@@ -149,7 +149,7 @@ impl Manager {
         self.pend@.dom().len()
     }
 
-    /// Memory bound (all metadata is O(P)): every runtime container's element count is bounded
+    /// I11 (bounded metadata, all O(P)): every runtime container's element count is bounded
     /// by the fixed configuration. `refs`, `keys` and the free set have exactly `P` slots.
     pub proof fn lemma_bounded(&self)
         requires

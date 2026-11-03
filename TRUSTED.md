@@ -4,7 +4,7 @@
 
 `scripts/verify.sh` runs Verus on `crates/pageproof-core` at a fixed `--rlimit 20` and fails on
 any error, timeout or rlimit exhaustion. Every public method of `Manager` (C0–C6) is proved on its
-real body, with machine integers, against the contract v0.2. See
+real body, with machine integers, against the contract v0.2.1. See
 [SPEC_NOTES.md](SPEC_NOTES.md) for the exact statement of each result and any deviations.
 
 ## What is trusted

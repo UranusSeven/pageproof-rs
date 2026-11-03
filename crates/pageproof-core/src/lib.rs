@@ -1,4 +1,4 @@
-//! pageproof-core: a Verus-verified KV block manager implementing contract v0.2.
+//! pageproof-core: a Verus-verified KV block manager implementing contract v0.2.1.
 #![allow(unused_imports)]
 // `verus!` expands ghost-only items/braces that rustc reports as unused or redundant.
 #![allow(unused_braces, dead_code)]

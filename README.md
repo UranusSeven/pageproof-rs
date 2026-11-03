@@ -1,13 +1,13 @@
 # pageproof-rs
 
 A KV-cache block manager for LLM serving, written in Rust and verified with
-[Verus](https://github.com/verus-lang/verus) against the pageproof block-manager contract v0.2
+[Verus](https://github.com/verus-lang/verus) against the pageproof block-manager contract v0.2.1
 ([docs/block-manager-contract.md](docs/block-manager-contract.md)).
 
 Every public method (create, attach, extend, begin_write, finish_write, release, inspect,
 slot_of) is proved on its real body, with machine integers. Each proof covers:
 
-- the invariant `Valid(S)` (I1–I10, including I5b)
+- the invariant `Valid(S)` (I1–I11, including I5b and the I11 metadata bound)
 - the method's functional postcondition and exact frame
 - strong failure atomicity on every declared error
 

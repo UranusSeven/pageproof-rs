@@ -3,9 +3,9 @@
 b8aada2a1f84997b77602d8d1415c04d5af0848b327679fc7b8d58a773f400f4  src/e8.rs
 66ee6042b361023c88254d2e2a49a591d4ba025fe48c685ff966da38dfea7f39  src/idxset.rs
 4ef2155496933246e95a43a22fb1e1255eba95e927138facae1282add46b6553  src/index.rs
-d451d6a05774efd967196928cdf2024a52e704da4e921dd8a87833ffa5789346  src/lib.rs
-efe4ca885e306cfaedd035ae2b3217b5aa5a325d8528f6ae75688b2442041646  src/manager.rs
-644084af2ae67b87f7e5987bd0ba113432e574cf7eb7f13eb171d8a63d840edb  src/model.rs
+e720f5fd4fa399b39fa011cb9af4e78e0163c0fa24d024d815d64ee15f9baaba  src/lib.rs
+01fcea7deb4b98f9cb5ecc656782da3b6b58f447393757de9f426543e1e3bd63  src/manager.rs
+87be1667f3c48de45d5ca7ce9bf75814e818e61e8ff77346307dcd80c6120787  src/model.rs
 06cb485193439af08a19effab1e2f8a9fb1a1163648362241f401c57a0c6a1e8  src/ops_attach.rs
 f6267182f74481f13d70e71aaaf0a57cdcf364803775a0896df1903bc85f4744  src/ops_extend.rs
 015ab21bf7451dd0de0749fc4c5fa1760dba3deec48d657685f646d111cec5b4  src/ops_release.rs
@@ -15,12 +15,12 @@ a3b28769f578ab384a770f48fcd525cec518c7cb123daebd6f5ecd79dc705c5a  src/types.rs
 == verus (rlimit 20)
     Checking pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
 verification results:: 179 verified, 0 errors
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.75s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.71s
 == verification results:: 179 verified, 0 errors
 == verified client (public-spec usability)
     Checking pageproof-client v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-client)
 verification results:: 3 verified, 0 errors
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.52s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.47s
 == client verification results:: 3 verified, 0 errors
 verify.sh: OK
 audit: assume(: 0 (allowed 0)
@@ -41,11 +41,11 @@ audit.sh: OK
 == build (rust 1.99.1-aarch64-apple-darwin, python Python 3.13.5)
    Compiling pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
    Compiling pageproof-py v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-py)
-    Finished `release` profile [optimized] target(s) in 0.78s
+    Finished `release` profile [optimized] target(s) in 0.88s
 4c8bc5ac424c4e41f9bf3d6f59c4e5b81e4eaf087b5ce12072cc86ddb69c5d11  /Users/jon/Documents/repos/pageproof-rs/python/pageproof.so
 build.sh: OK
    Compiling pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
      Running unittests src/lib.rs (target/debug/deps/pageproof_core-54ce2de37d375c9b)
 
 running 0 tests
@@ -55,21 +55,21 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/edge_cases.rs (target/debug/deps/edge_cases-393bd5a51eb35388)
 
 running 23 tests
-test empty_input_is_invalid ... ok
+test extend_within_tail_adds_no_page ... ok
 test completion_is_consumed_once ... ok
 test extend_at_block_boundary_adds_page ... ok
-test create_rejects_bad_config ... ok
 test extend_phase_errors_and_snapshot ... ok
-test extend_within_tail_adds_no_page ... ok
-test exactly_two_blocks_reuses_at_most_first ... ok
+test create_rejects_bad_config ... ok
+test empty_input_is_invalid ... ok
 test hit_on_free_cached_page_costs_a_slot ... ok
+test exactly_two_blocks_reuses_at_most_first ... ok
 test key_matches_reference_chain ... ok
 test hit_on_active_page_saves_capacity ... ok
 test no_capacity_is_atomic ... ok
 test pending_blocks_extend_and_release ... ok
 test partial_tail_is_never_published ... ok
-test plan_contents ... ok
 test plan_uses_instance_block_size ... ok
+test plan_contents ... ok
 test single_block_and_exact_b_have_kstar_zero ... ok
 test same_block_different_context_does_not_hit ... ok
 test stale_handle_and_ticket_rejected_after_preemption ... ok

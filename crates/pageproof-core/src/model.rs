@@ -359,7 +359,7 @@ pub open spec fn last_page(v: MgrV, h: u64) -> PageId {
     v.leases[h].table[v.leases[h].table.len() - 1]
 }
 
-/// Distinct live leases have distinct last pages. (A lease's last page is always taken fresh, by
+/// I11a: distinct live leases have distinct last pages. (A lease's last page is always taken fresh, by
 /// `attach` because `k* <= m-1`, or by `extend`; tables never change afterwards.) This makes
 /// `h -> last_page(h)` injective, which bounds the number of leases by `P`.
 #[verifier::opaque]
@@ -429,7 +429,7 @@ pub proof fn lemma_last_fresh(v: MgrV, log: Log, v2: MgrV, h: u64)
     }
 }
 
-/// Memory bounds (contract §3.3 "O(P) metadata"): at most `P` leases, at most one pending
+/// I11 (contract §4, bounded metadata): at most `P` leases, at most one pending
 /// ticket per lease, each lease's table at most `P` entries and input at most `P*B` tokens.
 pub proof fn lemma_counts_bounded(v: MgrV, log: Log)
     requires

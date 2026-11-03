@@ -1,4 +1,4 @@
-# Spec notes: contract v0.2 vs. the Verus implementation
+# Spec notes: contract v0.2.1 vs. the Verus implementation
 
 The contract is [docs/block-manager-contract.md](docs/block-manager-contract.md). This file maps
 each obligation to where it is proved, and records every deliberate representation choice or
@@ -11,7 +11,7 @@ deviation.
 | §3.3 encodings, E7 | `spec.rs`, `e8.rs` | `Canon`/`Enc`/`Tag`/domain separation are injective and parse uniquely. The exec byte builders equal the spec. |
 | §3.3 chain lemma | `spec::lemma_chain_inj` | Equal logged chain keys ⇒ same namespace, depth and prefix (under the E8 log). |
 | `den` | `spec::den`, `lemma_den_unique`, `lemma_chain_denotes` | `den(K(h,i)) = (ns, T_h[0:(i+1)B])`. |
-| I1–I10, I5b | `model::inv` | `cfg_ok` (I1/I10 and representability), `lease_ok` (I1, I4, I5 lease part, I5b, I9), `page_ok` (I2, I3 via derived `F`, I5, I6, I7), `pend_ok` (I9, `c_h = a`). I8 is `index::rep_ok`, connected through `Manager::rep`. |
+| I1–I11, I5b, I11a | `model::inv` | `cfg_ok` (I1/I10 and representability), `lease_ok` (I1, I4, I5 lease part, I5b, I9), `page_ok` (I2, I3 via derived `F`, I5, I6, I7), `pend_ok` (I9, `c_h = a`). I8 is `index::rep_ok`, connected through `Manager::rep`. I11a is `model::last_ok`. |
 | §5.1 Valid preserved | each method | `ensures final(self).valid()` |
 | §5.3 failure atomicity | each method | `r is Err ==> final(self)@ == old(self)@` (whole abstract state, including ids, index and pending). |
 | §5.4 frame | `released`/`attached`/`extended`/`began`/`finish_rel` | Exact abstract post-states: every field not mentioned is unchanged. |
@@ -24,7 +24,7 @@ deviation.
 | C6 inspect / slot_of | `ops_release.rs` | Read-only. `slot_of(h,j)` for `j < L_h` equals `slot(h,j)` and lies in range. |
 | §9.1.4 pending writes disjoint | `ops_write::lemma_pending_disjoint` | Two live tickets never share a write slot. |
 | §9.1.7 integers | everywhere | `usize`/`u64` with overflow checks. `IdentifierExhausted` for handles and tickets, with no wraparound. Manager ids: see the deviations below. |
-| §3.3 O(P) metadata | `Manager::lemma_bounded` | Key-index buckets ≤ P (no empty buckets, at most one per published page). Leases ≤ P (`model::last_ok`: distinct leases have distinct last pages). Pending ≤ leases. Each table ≤ P entries, each input ≤ P·B tokens. `refs`, `keys` and the free set have exactly P slots. |
+| I11 bounded metadata (§3.3 O(P)) | `Manager::lemma_bounded` | Key-index buckets ≤ P (no empty buckets, at most one per published page). Leases ≤ P (`model::last_ok`: distinct leases have distinct last pages). Pending ≤ leases. Each table ≤ P entries, each input ≤ P·B tokens. `refs`, `keys` and the free set have exactly P slots. |
 
 ## Representation choices
 
