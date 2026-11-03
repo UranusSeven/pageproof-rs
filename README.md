@@ -11,6 +11,9 @@ slot_of) is proved on its real body, with machine integers. Each proof covers:
 - the method's functional postcondition and exact frame
 - strong failure atomicity on every declared error
 
+All runtime metadata is proved to be O(P): key-index buckets, leases and pending tickets are each
+at most P (`Manager::lemma_bounded`).
+
 The chained SHA-256 cache key is implemented byte-for-byte as specified. The only trusted
 function in the verified core is the SHA-256 call, whose spec is exactly the contract's E8
 assumption.

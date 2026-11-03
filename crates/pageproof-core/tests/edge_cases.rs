@@ -422,3 +422,20 @@ fn many_requests_random_walk() {
     }
     assert_eq!(m.free_count(), p);
 }
+
+#[test]
+fn index_buckets_stay_bounded_under_churn() {
+    // Many distinct prompts, each published then evicted by later fresh allocations. Before the
+    // empty-bucket fix this left one empty bucket per distinct digest prefix ever published.
+    let p = 8;
+    let mut m = mgr(p, 4);
+    for r in 0..5000u32 {
+        let t = toks(9, r.wrapping_mul(7919));
+        if let Ok((h, _, _)) = m.attach(&t) {
+            compute_all(&mut m, h);
+            m.release(h).unwrap();
+        }
+        assert!(m.index_bucket_count() <= p, "round {r}: {} buckets", m.index_bucket_count());
+    }
+    assert_eq!(m.free_count(), p);
+}

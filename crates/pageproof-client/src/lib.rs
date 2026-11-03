@@ -51,4 +51,36 @@ pub fn fresh_attach() -> (r: Option<usize>)
     }
 }
 
+/// An arbitrary-length scheduler loop: attach, compute, release, repeated `n` times. Metadata
+/// stays O(P) at every iteration, whatever the inputs and however the calls fail.
+pub fn churn(m: &mut Manager, reqs: &Vec<Vec<u32>>)
+    requires
+        old(m).valid(),
+    ensures
+        final(m).valid(),
+        final(m).index_buckets() <= final(m)@.p,
+        final(m).num_leases() <= final(m)@.p,
+{
+    let mut i: usize = 0;
+    while i < reqs.len()
+        invariant
+            m.valid(),
+        decreases reqs.len() - i,
+    {
+        if let Ok((h, _, _)) = m.attach(reqs[i].as_slice()) {
+            if let Ok((t, _)) = m.begin_write(h, 1) {
+                let _ = m.finish_write(t, pageproof_core::ops_write::Completion { ticket: t });
+            }
+            let _ = m.release(h);
+        }
+        proof {
+            m.lemma_bounded();
+        }
+        i += 1;
+    }
+    proof {
+        m.lemma_bounded();
+    }
+}
+
 } // verus!

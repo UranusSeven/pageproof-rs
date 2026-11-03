@@ -47,6 +47,7 @@ load/compare_exchange.
 | E1 completion is real | Assumed. `finish_write` requires `Completion { ticket }` to name the ticket; truth is the executor's obligation. |
 | E2 KV depends only on the prefix | Assumed. Ghost `V` records provenance, not numerics. |
 | E3 single-threaded | Enforced in Rust by `&mut self`. The PyO3 class is `unsendable`. The process-global manager-id counter is atomic. |
+| Manager-id uniqueness | Trusted (see SPEC_NOTES). Relies on `AtomicU64` behaving as a counter. vstd gives no spec for its return values. Runtime-tested only. |
 | E4 writes always succeed | Assumed; there is no abort path (v0.2 scope). |
 | E5 executor uses the planned slots and B | Assumed. The plan's slots are proved equal to `slot(h,j)`. |
 | E6 Namespace completeness | Caller's obligation. The namespace is an opaque byte string (v0.2 dummy). |
@@ -60,3 +61,5 @@ load/compare_exchange.
   is the executor's E1 assertion.
 - The OS, allocator, CPython, and the dynamic loader.
 - Allocation failure, panics in std, and process termination (contract §5 excludes these).
+- Byte-level memory. The proof bounds element counts (`Manager::lemma_bounded`). That `Vec` and
+  `HashMap` memory tracks their peak element count is trusted about std.

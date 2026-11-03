@@ -135,6 +135,42 @@ impl Manager {
     {
     }
 
+    /// Number of key-index buckets (concrete).
+    pub closed spec fn index_buckets(&self) -> nat {
+        self.index.num_buckets()
+    }
+
+    /// Number of concrete lease / pending records.
+    pub closed spec fn num_leases(&self) -> nat {
+        self.leases@.dom().len()
+    }
+
+    pub closed spec fn num_pending(&self) -> nat {
+        self.pend@.dom().len()
+    }
+
+    /// Memory bound (all metadata is O(P)): every runtime container's element count is bounded
+    /// by the fixed configuration. `refs`, `keys` and the free set have exactly `P` slots.
+    pub proof fn lemma_bounded(&self)
+        requires
+            self.valid(),
+        ensures
+            self.index_buckets() <= self@.p,
+            self.num_leases() <= self@.p,
+            self.num_pending() <= self.num_leases(),
+            forall|h: u64| #[trigger] self@.leases.contains_key(h) ==> self@.leases[h].table.len() <= self@.p
+                && self@.leases[h].toks.len() <= self@.p * self@.b,
+            self@.free_set().len() <= self@.p,
+    {
+        let v = self@;
+        lemma_counts_bounded(v, self.log@@);
+        assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
+        self.index.lemma_bounded(v.keys);
+        self.free.lemma_bounds();
+        assert(self.leases@.dom() == v.leases.dom());
+        assert(self.pend@.dom() == v.pend.dom());
+    }
+
     pub fn block_size(&self) -> (r: usize)
         requires
             self.valid(),
@@ -151,6 +187,20 @@ impl Manager {
             r as nat == self@.p,
     {
         self.p
+    }
+
+    /// Runtime observation of the bucket count (bounded by `P`, see `lemma_bounded`).
+    pub fn index_bucket_count(&self) -> (r: usize)
+        requires
+            self.valid(),
+        ensures
+            r as nat == self.index_buckets(),
+            r as nat <= self@.p,
+    {
+        proof {
+            self.lemma_bounded();
+        }
+        self.index.bucket_count()
     }
 
     pub fn free_count(&self) -> (r: usize)
@@ -261,6 +311,7 @@ impl Manager {
                 assert(v.holders[x as int] =~= Set::<u64>::empty());
                 assert(hold_ok(v, x));
             }
+            reveal(last_ok);
         }
         Ok(m)
     }

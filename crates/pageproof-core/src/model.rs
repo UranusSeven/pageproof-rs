@@ -100,6 +100,7 @@ pub open spec fn inv(v: MgrV, log: Log) -> bool {
     &&& forall|h: u64| #[trigger] v.leases.contains_key(h) ==> lease_ok(v, log, h)
     &&& forall|x: PageId| (x as nat) < v.p ==> #[trigger] page_ok(v, log, x)
     &&& forall|t: u64| #[trigger] v.pend.contains_key(t) ==> pend_ok(v, t)
+    &&& last_ok(v)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -348,6 +349,161 @@ pub proof fn lemma_inv_log_mono(v: MgrV, log: Log, log2: Log)
         if v.keys[x as int] is Some {
             lemma_pub_frame(v, v, log, log2, x);
         }
+    }
+    lemma_last_frame(v, v);
+}
+
+
+/// The last page of a lease.
+pub open spec fn last_page(v: MgrV, h: u64) -> PageId {
+    v.leases[h].table[v.leases[h].table.len() - 1]
+}
+
+/// Distinct live leases have distinct last pages. (A lease's last page is always taken fresh, by
+/// `attach` because `k* <= m-1`, or by `extend`; tables never change afterwards.) This makes
+/// `h -> last_page(h)` injective, which bounds the number of leases by `P`.
+#[verifier::opaque]
+pub open spec fn last_ok(v: MgrV) -> bool {
+    forall|h1: u64, h2: u64|
+        v.leases.contains_key(h1) && v.leases.contains_key(h2) && h1 != h2 ==> #[trigger] last_page(v, h1)
+            != #[trigger] last_page(v, h2)
+}
+
+/// `last_ok` is preserved when leases are only removed or keep their tables.
+pub proof fn lemma_last_frame(v: MgrV, v2: MgrV)
+    requires
+        last_ok(v),
+        forall|h: u64| #[trigger] v2.leases.contains_key(h) ==> v.leases.contains_key(h) && v2.leases[h].table
+            == v.leases[h].table,
+    ensures
+        last_ok(v2),
+{
+    reveal(last_ok);
+    assert forall|h1: u64, h2: u64|
+        v2.leases.contains_key(h1) && v2.leases.contains_key(h2) && h1 != h2 implies #[trigger] last_page(v2, h1)
+        != #[trigger] last_page(v2, h2) by {
+        assert(last_page(v2, h1) == last_page(v, h1));
+        assert(last_page(v2, h2) == last_page(v, h2));
+    }
+}
+
+/// `last_ok` is preserved when lease `h` gets a table whose last page was free (or is unchanged),
+/// and every other lease keeps its table.
+pub proof fn lemma_last_fresh(v: MgrV, log: Log, v2: MgrV, h: u64)
+    requires
+        inv(v, log),
+        v2.leases.dom() == v.leases.dom().insert(h),
+        forall|h1: u64| #[trigger] v2.leases.contains_key(h1) && h1 != h ==> v2.leases[h1].table == v.leases[h1].table,
+        v2.leases[h].table.len() >= 1,
+        (v.leases.contains_key(h) && last_page(v2, h) == last_page(v, h)) || ((last_page(v2, h) as nat) < v.p
+            && v.refs[last_page(v2, h) as int] == 0),
+    ensures
+        last_ok(v2),
+{
+    reveal(last_ok);
+    reveal(lease_ok);
+    reveal(page_ok);
+    let x = last_page(v2, h);
+    assert forall|h1: u64, h2: u64|
+        v2.leases.contains_key(h1) && v2.leases.contains_key(h2) && h1 != h2 implies #[trigger] last_page(v2, h1)
+        != #[trigger] last_page(v2, h2) by {
+        if h1 != h && h2 != h {
+            assert(last_page(v2, h1) == last_page(v, h1));
+            assert(last_page(v2, h2) == last_page(v, h2));
+        } else {
+            let o = if h1 == h { h2 } else { h1 };
+            assert(v.leases.contains_key(o));
+            assert(lease_ok(v, log, o));
+            let y = last_page(v, o);
+            assert(last_page(v2, o) == y);
+            if v.leases.contains_key(h) && last_page(v2, h) == last_page(v, h) {
+                assert(last_page(v, h) != last_page(v, o));
+            } else if x == y {
+                // y is on o's table, so o holds it and refs[y] > 0.
+                assert(v.leases[o].table.contains(y));
+                assert(page_ok(v, log, y));
+                assert(v.holders[y as int].contains(o));
+                vstd::set::lemma_set_contains_len(v.holders[y as int], o);
+            }
+        }
+    }
+}
+
+/// Memory bounds (contract §3.3 "O(P) metadata"): at most `P` leases, at most one pending
+/// ticket per lease, each lease's table at most `P` entries and input at most `P*B` tokens.
+pub proof fn lemma_counts_bounded(v: MgrV, log: Log)
+    requires
+        inv(v, log),
+    ensures
+        v.leases.dom().len() <= v.p,
+        v.pend.dom().len() <= v.leases.dom().len(),
+        forall|h: u64| #[trigger] v.leases.contains_key(h) ==> v.leases[h].table.len() <= v.p && v.leases[h].toks.len()
+            <= v.p * v.b,
+{
+    reveal(lease_ok);
+    reveal(pend_ok);
+    reveal(last_ok);
+    assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
+    let pu = v.p as usize;
+    assert(pu as nat == v.p);
+    vstd::set_lib::range_set_properties::<usize>(0usize, pu);
+    let pages = Set::<usize>::range(0usize, pu);
+    assert(pages.len() == v.p);
+    assert forall|x: usize| (x as nat) < v.p implies #[trigger] pages.contains(x) by {}
+    // Leases inject into pages via their last page.
+    let dom = v.leases.dom();
+    let f = |h: u64| last_page(v, h);
+    let img = dom.map(f);
+    assert(dom.injective_on(f)) by {
+        assert forall|h1: u64, h2: u64| dom.contains(h1) && dom.contains(h2) && #[trigger] f(h1) == #[trigger] f(h2) implies h1
+            == h2 by {
+            if h1 != h2 {
+                assert(last_page(v, h1) != last_page(v, h2));
+            }
+        }
+    }
+    vstd::set_lib::lemma_map_size(dom, img, f);
+    assert forall|x: usize| #[trigger] img.contains(x) implies pages.contains(x) by {
+        dom.lemma_map_contains(f, x);
+        let h = choose|h: u64| dom.contains(h) && x == f(h);
+        assert(lease_ok(v, log, h));
+        let t = v.leases[h].table;
+        assert(t.len() >= 1) by {
+            assert(blocks_for(v.leases[h].toks.len(), v.b, t.len()));
+        }
+        assert((t[t.len() - 1] as nat) < v.p);
+    }
+    vstd::set_lib::lemma_len_subset(img, pages);
+    // Pending tickets inject into leases.
+    let pd = v.pend.dom();
+    let g = |t: u64| v.pend[t].lease;
+    let gi = pd.map(g);
+    assert(pd.injective_on(g)) by {
+        assert forall|t1: u64, t2: u64| pd.contains(t1) && pd.contains(t2) && #[trigger] g(t1) == #[trigger] g(t2) implies t1
+            == t2 by {
+            assert(pend_ok(v, t1));
+            assert(pend_ok(v, t2));
+        }
+    }
+    vstd::set_lib::lemma_map_size(pd, gi, g);
+    assert forall|h: u64| #[trigger] gi.contains(h) implies dom.contains(h) by {
+        pd.lemma_map_contains(g, h);
+        let t = choose|t: u64| pd.contains(t) && h == g(t);
+        assert(pend_ok(v, t));
+    }
+    vstd::set_lib::lemma_len_subset(gi, dom);
+    // Tables: no duplicates, all entries < P.
+    assert forall|h: u64| #[trigger] v.leases.contains_key(h) implies v.leases[h].table.len() <= v.p
+        && v.leases[h].toks.len() <= v.p * v.b by {
+        assert(lease_ok(v, log, h));
+        let t = v.leases[h].table;
+        t.unique_seq_to_set();
+        assert forall|x: usize| #[trigger] t.to_set().contains(x) implies pages.contains(x) by {
+            t.to_set_ensures();
+            let i = choose|i: int| 0 <= i < t.len() && t[i] == x;
+            assert((t[i] as nat) < v.p);
+        }
+        vstd::set_lib::lemma_len_subset(t.to_set(), pages);
     }
 }
 

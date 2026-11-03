@@ -369,6 +369,10 @@ pub proof fn lemma_attach_inv(v: MgrV, log: Log, toks: Seq<Token>, table: Seq<Pa
         assert(pend_ok(v, t));
         lemma_pend_frame(v, v2, t);
     }
+    // The last block index m-1 >= k*, so the last page is fresh.
+    assert(v2.leases.dom() =~= v.leases.dom().insert(h));
+    assert(v.refs[table[m - 1] as int] == 0);
+    lemma_last_fresh(v, log, v2, h);
 }
 
 // ---------------------------------------------------------------------------------------------

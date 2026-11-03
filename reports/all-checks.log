@@ -2,52 +2,26 @@
 7d298893aeeeb044e5de0b7facf770ed5909f59111a266a41b31cd16b9f2466b  src/arith.rs
 b8aada2a1f84997b77602d8d1415c04d5af0848b327679fc7b8d58a773f400f4  src/e8.rs
 66ee6042b361023c88254d2e2a49a591d4ba025fe48c685ff966da38dfea7f39  src/idxset.rs
-22fbdf49f5c4c4a8ce7b2e5312180a6df935af1af16d0fe6c1752e737dde4623  src/index.rs
+4ef2155496933246e95a43a22fb1e1255eba95e927138facae1282add46b6553  src/index.rs
 d451d6a05774efd967196928cdf2024a52e704da4e921dd8a87833ffa5789346  src/lib.rs
-bb88eb3f0a2a7de662aaeff1716d4a9e2dbfd44fb66b858f6cc130936c553c42  src/manager.rs
-1dbe3838c40c7fd295080ab0e40be4e44e83f1215dee7bcc0d5f105c03699202  src/model.rs
-244d484b36ae1aeb20ee39de35db72c601e23f56584688baf4e6c3848b53d1bb  src/ops_attach.rs
-6917faa227842bfa549060af9f4d964f3851deb70279c22d80fabc8e16048438  src/ops_extend.rs
-02e4df4cad8e27d4a43455f989079a5b4fe6b34f1e11bc3e1ae099a3b635aae8  src/ops_release.rs
-bb68f3734405ad1e4dd3bc4e0853f86dc3a45a4211a14b636a356023c30b8271  src/ops_write.rs
+efe4ca885e306cfaedd035ae2b3217b5aa5a325d8528f6ae75688b2442041646  src/manager.rs
+644084af2ae67b87f7e5987bd0ba113432e574cf7eb7f13eb171d8a63d840edb  src/model.rs
+06cb485193439af08a19effab1e2f8a9fb1a1163648362241f401c57a0c6a1e8  src/ops_attach.rs
+f6267182f74481f13d70e71aaaf0a57cdcf364803775a0896df1903bc85f4744  src/ops_extend.rs
+015ab21bf7451dd0de0749fc4c5fa1760dba3deec48d657685f646d111cec5b4  src/ops_release.rs
+fef4ec92ec615dc12bb26ef2d982ec47c1baa18a50da26a32dbb4260abfc991e  src/ops_write.rs
 307d4a3a7247f12a9f63a2ae1370cb24c43de899846f8b75191e0b3d55cd17ef  src/spec.rs
 a3b28769f578ab384a770f48fcd525cec518c7cb123daebd6f5ecd79dc705c5a  src/types.rs
 == verus (rlimit 20)
-   Compiling proc-macro2 v1.0.107
-   Compiling unicode-ident v1.0.27
-   Compiling quote v1.0.47
-   Compiling version_check v0.9.5
-    Checking typenum v1.20.1
-   Compiling verus_prettyplease v0.0.0-2026-11-01-0251
-   Compiling libc v0.2.191
-   Compiling hashbrown v0.17.1
-   Compiling equivalent v1.0.3
-   Compiling convert_case v0.4.0
-   Compiling vstd v0.0.0-2026-11-01-0251
-    Checking cfg-if v1.0.5
-    Checking verus_builtin v0.0.0-2026-11-01-0251
-   Compiling generic-array v0.14.7
-   Compiling indexmap v2.14.2
-   Compiling verus_syn v0.0.0-2026-11-01-0251
-   Compiling syn v2.0.119
-   Compiling synstructure v0.13.2
-   Compiling verus_state_machines_macros v0.0.0-2026-11-01-0251
-   Compiling verus_builtin_macros v0.0.0-2026-11-01-0251
-    Checking cpufeatures v0.2.17
-    Checking block-buffer v0.10.4
-    Checking crypto-common v0.1.7
-    Checking digest v0.10.7
-    Checking sha2 v0.10.9
-verification results:: 2159 verified, 0 errors
     Checking pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
-verification results:: 169 verified, 0 errors
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.76s
-== verification results:: 169 verified, 0 errors
+verification results:: 179 verified, 0 errors
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.75s
+== verification results:: 179 verified, 0 errors
 == verified client (public-spec usability)
     Checking pageproof-client v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-client)
-verification results:: 1 verified, 0 errors
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
-== client verification results:: 1 verified, 0 errors
+verification results:: 3 verified, 0 errors
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.52s
+== client verification results:: 3 verified, 0 errors
 verify.sh: OK
 audit: assume(: 0 (allowed 0)
 audit: admit(: 0 (allowed 0)
@@ -65,72 +39,13 @@ audit: external_body (E8 wrapper only): 1 (allowed 1)
 audit: pageproof-client: no escape hatches
 audit.sh: OK
 == build (rust 1.99.1-aarch64-apple-darwin, python Python 3.13.5)
-   Compiling proc-macro2 v1.0.107
-   Compiling quote v1.0.47
-   Compiling unicode-ident v1.0.27
-   Compiling target-lexicon v0.13.5
-   Compiling version_check v0.9.5
-   Compiling libc v0.2.191
-   Compiling typenum v1.20.1
-   Compiling verus_prettyplease v0.0.0-2026-11-01-0251
-   Compiling hashbrown v0.17.1
-   Compiling equivalent v1.0.3
-   Compiling pyo3-macros-backend v0.30.1
-   Compiling vstd v0.0.0-2026-11-01-0251
-   Compiling generic-array v0.14.7
-   Compiling convert_case v0.4.0
-   Compiling indexmap v2.14.2
-   Compiling heck v0.5.0
-   Compiling cfg-if v1.0.5
-   Compiling verus_builtin v0.0.0-2026-11-01-0251
+   Compiling pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
    Compiling pageproof-py v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-py)
-   Compiling once_cell v1.21.4
-   Compiling verus_syn v0.0.0-2026-11-01-0251
-   Compiling syn v2.0.119
-   Compiling syn v3.0.9
-   Compiling synstructure v0.13.2
-   Compiling verus_state_machines_macros v0.0.0-2026-11-01-0251
-   Compiling verus_builtin_macros v0.0.0-2026-11-01-0251
-   Compiling cpufeatures v0.2.17
-   Compiling pyo3-macros v0.30.1
-   Compiling crypto-common v0.1.7
-   Compiling block-buffer v0.10.4
-   Compiling digest v0.10.7
-   Compiling sha2 v0.10.9
-   Compiling pyo3-build-config v0.30.1
-   Compiling pyo3-ffi v0.30.1
-   Compiling pyo3 v0.30.1
-   Compiling pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
-    Finished `release` profile [optimized] target(s) in 25.93s
-d3ac9927dbaceadf6126f17cbbd979a13afc8df1a49f899ec6d9be5573a60241  /Users/jon/Documents/repos/pageproof-rs/python/pageproof.so
+    Finished `release` profile [optimized] target(s) in 0.78s
+4c8bc5ac424c4e41f9bf3d6f59c4e5b81e4eaf087b5ce12072cc86ddb69c5d11  /Users/jon/Documents/repos/pageproof-rs/python/pageproof.so
 build.sh: OK
-   Compiling proc-macro2 v1.0.107
-   Compiling unicode-ident v1.0.27
-   Compiling quote v1.0.47
-   Compiling version_check v0.9.5
-   Compiling typenum v1.20.1
-   Compiling verus_prettyplease v0.0.0-2026-11-01-0251
-   Compiling libc v0.2.191
-   Compiling hashbrown v0.17.1
-   Compiling equivalent v1.0.3
-   Compiling convert_case v0.4.0
-   Compiling vstd v0.0.0-2026-11-01-0251
-   Compiling verus_builtin v0.0.0-2026-11-01-0251
-   Compiling cfg-if v1.0.5
-   Compiling generic-array v0.14.7
-   Compiling indexmap v2.14.2
-   Compiling verus_syn v0.0.0-2026-11-01-0251
-   Compiling syn v2.0.119
-   Compiling synstructure v0.13.2
-   Compiling verus_state_machines_macros v0.0.0-2026-11-01-0251
-   Compiling verus_builtin_macros v0.0.0-2026-11-01-0251
-   Compiling cpufeatures v0.2.17
-   Compiling crypto-common v0.1.7
-   Compiling block-buffer v0.10.4
-   Compiling digest v0.10.7
-   Compiling sha2 v0.10.9
    Compiling pageproof-core v0.1.0 (/Users/jon/Documents/repos/pageproof-rs/crates/pageproof-core)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.63s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
      Running unittests src/lib.rs (target/debug/deps/pageproof_core-54ce2de37d375c9b)
 
 running 0 tests
@@ -139,22 +54,22 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
      Running tests/edge_cases.rs (target/debug/deps/edge_cases-393bd5a51eb35388)
 
-running 22 tests
+running 23 tests
 test empty_input_is_invalid ... ok
 test completion_is_consumed_once ... ok
-test extend_within_tail_adds_no_page ... ok
-test exactly_two_blocks_reuses_at_most_first ... ok
-test extend_phase_errors_and_snapshot ... ok
 test extend_at_block_boundary_adds_page ... ok
 test create_rejects_bad_config ... ok
-test key_matches_reference_chain ... ok
+test extend_phase_errors_and_snapshot ... ok
+test extend_within_tail_adds_no_page ... ok
+test exactly_two_blocks_reuses_at_most_first ... ok
 test hit_on_free_cached_page_costs_a_slot ... ok
+test key_matches_reference_chain ... ok
+test hit_on_active_page_saves_capacity ... ok
 test no_capacity_is_atomic ... ok
 test pending_blocks_extend_and_release ... ok
-test hit_on_active_page_saves_capacity ... ok
 test partial_tail_is_never_published ... ok
-test plan_uses_instance_block_size ... ok
 test plan_contents ... ok
+test plan_uses_instance_block_size ... ok
 test single_block_and_exact_b_have_kstar_zero ... ok
 test same_block_different_context_does_not_hit ... ok
 test stale_handle_and_ticket_rejected_after_preemption ... ok
@@ -162,8 +77,9 @@ test too_large_input ... ok
 test tail_completed_by_extend_is_published_on_finish ... ok
 test two_requests_same_input_share ... ok
 test many_requests_random_walk ... ok
+test index_buckets_stay_bounded_under_churn ... ok
 
-test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
    Doc-tests pageproof_core
 

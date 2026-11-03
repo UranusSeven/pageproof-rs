@@ -367,6 +367,7 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
             assert(v.refs[x as int] > 1);
         }
     }
+    lemma_last_frame(v, v2);
     // Pending: no ticket belongs to h.
     assert forall|t: u64| #[trigger] v2.pend.contains_key(t) implies pend_ok(v2, t) by {
         assert(pend_ok(v, t));

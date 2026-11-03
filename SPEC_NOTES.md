@@ -23,7 +23,8 @@ deviation.
 | C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`. Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
 | C6 inspect / slot_of | `ops_release.rs` | Read-only. `slot_of(h,j)` for `j < L_h` equals `slot(h,j)` and lies in range. |
 | §9.1.4 pending writes disjoint | `ops_write::lemma_pending_disjoint` | Two live tickets never share a write slot. |
-| §9.1.7 integers | everywhere | `usize`/`u64` with overflow checks. `IdentifierExhausted` for handles, tickets and manager ids, with no wraparound. |
+| §9.1.7 integers | everywhere | `usize`/`u64` with overflow checks. `IdentifierExhausted` for handles and tickets, with no wraparound. Manager ids: see the deviations below. |
+| §3.3 O(P) metadata | `Manager::lemma_bounded` | Key-index buckets ≤ P (no empty buckets, at most one per published page). Leases ≤ P (`model::last_ok`: distinct leases have distinct last pages). Pending ≤ leases. Each table ≤ P entries, each input ≤ P·B tokens. `refs`, `keys` and the free set have exactly P slots. |
 
 ## Representation choices
 
@@ -39,6 +40,7 @@ deviation.
    `Manager::den_log()` exposes the log. Every method only extends it.
 5. **The Index buckets on a 32-bit digest prefix** and compares full 256-bit digests within a
    bucket. Buckets are a performance device: correctness rests only on full-digest equality.
+   A bucket is removed when its last page is revoked, so the bucket count stays at most P.
 6. **Namespace is fixed per manager (I10),** so ghost `V` stores only the token prefix.
 7. **Handles and tickets** carry `(manager id, u64 id)`. Manager ids come from a process-global
    atomic counter, so objects from another manager are rejected even in the same process.
@@ -56,3 +58,10 @@ deviation.
   implementation pops from a stack.
 - **E3 inside one process:** `Manager` methods take `&mut self`, so Rust serializes them. The
   Python class is `unsendable`.
+- **Manager-id uniqueness is trusted, not proved.** vstd's `AtomicU64` specs say nothing about
+  return values, so the proof does not establish that two managers get different ids. Rejecting
+  another manager's handle or ticket is covered by a runtime test only. `fresh_mgr_id` gives up
+  after 1,024 lost compare-exchange races and `create` then returns `IdentifierExhausted`. That
+  can only happen when several threads create managers concurrently, which is outside E3.
+- **Memory bounds are element counts.** vstd models `Vec`/`HashMap` by their contents, not
+  their capacity, so "bytes ∝ peak element count" is trusted about std.

@@ -123,6 +123,7 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
             lemma_pub_frame(v, v2, log, log, x);
         }
     }
+    lemma_last_frame(v, v2);
     assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
         if t2 != t {
             assert(pend_ok(v, t2));
@@ -679,6 +680,7 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
             }
         }
     }
+    lemma_last_frame(v, v2);
     // ---- pending
     assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
         assert(pend_ok(v, t2));

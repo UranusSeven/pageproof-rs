@@ -41,6 +41,8 @@ pub open spec fn rep_ok(m: Map<u64, Vec<usize>>, keys: Seq<Option<Digest>>) -> b
         #![trigger m[s]@[j]]
         m.contains_key(s) && 0 <= j < m[s]@.len() ==> entry_ok(keys, s, m[s]@[j])
     &&& forall|s: u64| #[trigger] m.contains_key(s) ==> m[s]@.no_duplicates()
+    // No empty buckets: with this, #buckets <= #published pages <= P (lemma_bucket_bound).
+    &&& forall|s: u64| #[trigger] m.contains_key(s) ==> m[s]@.len() > 0
     &&& forall|b: usize|
         #![trigger keys[b as int]]
         (b as int) < keys.len() && keys[b as int] is Some ==> {
@@ -108,12 +110,18 @@ proof fn lemma_remove_rep(
         m0.contains_key(short(k)),
         v1@.no_duplicates(),
         forall|x: usize| #[trigger] v1@.contains(x) <==> (m0[short(k)]@.contains(x) && x != b),
-        m1 == m0.insert(short(k), v1),
+        v1@.len() > 0 ==> m1 == m0.insert(short(k), v1),
+        v1@.len() == 0 ==> m1 == m0.remove(short(k)),
     ensures
         rep_ok(m1, keys.update(b as int, None)),
 {
     let s = short(k);
     let keys2 = keys.update(b as int, None);
+    assert forall|s2: u64| #[trigger] m1.contains_key(s2) implies m1[s2]@.no_duplicates() && m1[s2]@.len() > 0 by {
+        if s2 != s {
+            assert(m0.contains_key(s2) && m1[s2] == m0[s2]);
+        }
+    }
     assert forall|s2: u64, j: int| m1.contains_key(s2) && 0 <= j < m1[s2]@.len() implies entry_ok(
         keys2,
         s2,
@@ -138,6 +146,11 @@ proof fn lemma_remove_rep(
         assert(keys2[b2 as int] == keys[b2 as int]);
         let s2 = short(keys[b2 as int]->Some_0);
         assert(m0.contains_key(s2) && m0[s2]@.contains(b2));
+        if s2 == s {
+            assert(v1@.contains(b2));
+            vstd::set::lemma_set_contains_len(v1@.to_set(), b2);
+            v1@.lemma_cardinality_of_set();
+        }
     }
 }
 
@@ -221,9 +234,64 @@ proof fn lemma_add_rep(
     }
 }
 
+/// Published pages: `{b | keys[b] is Some}`.
+pub open spec fn published(keys: Seq<Option<Digest>>) -> Set<usize> {
+    Set::<usize>::range(0, keys.len() as usize).filter(|b: usize| keys[b as int] is Some)
+}
+
+/// Each bucket is the image of some published page under `short ∘ key`, so
+/// `#buckets <= #published <= |keys|`.
+proof fn lemma_bucket_bound(m: Map<u64, Vec<usize>>, keys: Seq<Option<Digest>>)
+    requires
+        rep_ok(m, keys),
+        keys.len() <= usize::MAX,
+    ensures
+        m.dom().len() <= published(keys).len(),
+        published(keys).len() <= keys.len(),
+{
+    vstd::set_lib::range_set_properties::<usize>(0usize, keys.len() as usize);
+    let pubs = published(keys);
+    let f = |b: usize| short(keys[b as int]->Some_0);
+    let img = pubs.map(f);
+    assert forall|s: u64| #[trigger] m.dom().contains(s) implies img.contains(s) by {
+        let b = m[s]@[0];
+        assert(entry_ok(keys, s, m[s]@[0]));
+        assert(pubs.contains(b));
+        assert(f(b) == s);
+    }
+    vstd::set_lib::lemma_map_size_bound(pubs, img, f);
+    vstd::set_lib::lemma_len_subset(m.dom(), img);
+    let all = Set::<usize>::range(0, keys.len() as usize);
+    vstd::set_lib::lemma_len_subset(pubs, all);
+}
+
 impl KeyIndex {
     pub closed spec fn wf(&self, keys: Seq<Option<Digest>>) -> bool {
         rep_ok(self.map@, keys)
+    }
+
+    /// The number of buckets.
+    pub closed spec fn num_buckets(&self) -> nat {
+        self.map@.dom().len()
+    }
+
+    pub fn bucket_count(&self) -> (r: usize)
+        ensures
+            r as nat == self.num_buckets(),
+    {
+        self.map.len()
+    }
+
+    /// Memory bound: at most one bucket per published page.
+    pub proof fn lemma_bounded(&self, keys: Seq<Option<Digest>>)
+        requires
+            self.wf(keys),
+            keys.len() <= usize::MAX,
+        ensures
+            self.num_buckets() <= published(keys).len(),
+            self.num_buckets() <= keys.len(),
+    {
+        lemma_bucket_bound(self.map@, keys);
     }
 
     pub fn new(Ghost(keys): Ghost<Seq<Option<Digest>>>) -> (r: Self)
@@ -287,9 +355,17 @@ impl KeyIndex {
             assert(swap_removed(v0, v1@, i as int));
             lemma_swap_removed(v0, v1@, i as int);
         }
-        self.map.insert(s, v);
+        if v.len() > 0 {
+            self.map.insert(s, v);
+            proof {
+                assert(self.map@ =~= m0.insert(s, v1));
+            }
+        } else {
+            proof {
+                assert(self.map@ =~= m0.remove(s));
+            }
+        }
         proof {
-            assert(self.map@ =~= m0.insert(s, v1));
             lemma_remove_rep(m0, self.map@, keys, b, *k, v1);
         }
     }

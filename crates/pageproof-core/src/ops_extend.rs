@@ -229,6 +229,15 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
         }
         lemma_pend_frame(v, v2, t);
     }
+    // Either nothing was added (last page unchanged) or the new last page is a fresh free page.
+    assert(v2.leases.dom() =~= v.leases.dom().insert(h));
+    if fresh.len() > 0 {
+        assert(l2.table[l2.table.len() - 1] == fresh[fresh.len() - 1]);
+        assert(v.is_free(fresh[fresh.len() - 1]));
+    } else {
+        assert(l2.table =~= l.table);
+    }
+    lemma_last_fresh(v, log, v2, h);
 }
 
 /// Increment refs of `tbl[k..]`.
