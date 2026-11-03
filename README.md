@@ -39,13 +39,20 @@ assumption.
 ./scripts/setup.sh       # pinned Verus into .toolchain/, Rust 1.99.1 via rustup
 ./scripts/verify.sh      # Verus, fixed rlimit; fails on any error/timeout
 ./scripts/audit.sh       # escape-hatch audit (exactly one external_body: E8)
+./scripts/lint.sh        # Clippy on the full workspace (including tests)
 ./scripts/build.sh       # verify + audit, then build core + python/pageproof.so
 ./scripts/test.sh        # Rust edge-case tests + Python demo
 ./scripts/all-checks.sh  # everything
 ```
 
 `CARGO_HOME` lives under `.toolchain/`, and nothing is written to `~/.cargo`. Set `PP_PYTHON` to
-choose the Python interpreter (default `python3`).
+choose the Python interpreter (default `python3`). The lint gate uses the pinned Rust toolchain
+and treats Clippy warnings as errors, with exceptions for proof-sensitive Verus code and items
+used only during verification. Run `scripts/verify.sh` for proof checking; Clippy does not verify
+contracts. Formatting is not part of the lint gate because existing Verus sources are not
+`cargo fmt --check`-clean. GitHub Actions runs the same lint gate on pushes and pull
+requests using an arm64 macOS runner and the pinned toolchains
+([lint workflow](.github/workflows/lint.yml)).
 
 ```python
 import pageproof as pp

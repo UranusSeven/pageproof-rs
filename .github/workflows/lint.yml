@@ -1,0 +1,17 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clippy:
+    runs-on: macos-15-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Verus and Rust toolchains
+        run: ./scripts/setup.sh
+      - name: Install Clippy for pinned Rust toolchain
+        run: rustup component add clippy --toolchain 1.99.1-aarch64-apple-darwin
+      - name: Lint workspace
+        run: ./scripts/lint.sh

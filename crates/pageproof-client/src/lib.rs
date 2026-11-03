@@ -3,6 +3,8 @@
 //! It checks that the public contracts are strong enough to reason about a scheduler step. On a
 //! freshly created manager, attaching a 3-token request (one block, B = 4) must succeed with
 //! `cached == 0`, by the C1 capacity rule. Only `create` itself may fail (id exhaustion).
+// Proof-only imports and bindings disappear from rustc's executable view.
+#![allow(unused_imports, unused_variables)]
 use vstd::prelude::*;
 use pageproof_core::manager::*;
 use pageproof_core::types::*;
