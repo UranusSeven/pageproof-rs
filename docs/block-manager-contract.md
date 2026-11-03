@@ -1,12 +1,11 @@
 # Block Manager Functional Contract v0.2.1 (draft)
 
-Status: specification draft for review. v0.2.1 is the English edition of the Chinese v0.2 draft
-(`UranusSeven/pageproof`, `docs/block-manager-contract.md`) plus invariant I11 (bounded
-metadata). It is implemented and verified in this repository; see `SPEC_NOTES.md`.
+Status: specification draft for review. v0.2.1 is v0.2 plus invariant I11 (bounded metadata).
+It is implemented and verified in this repository; see `SPEC_NOTES.md`.
 Date: 2026-11-03 (v0.2: 2026-11-02; v0.1: 2026-11-01).
 Reference code: nano-vLLM `bb823b3e06983d71485a8e1f23715ebd87d98ef8`: `block_manager.py`, `sequence.py`, `scheduler.py`; `prefix_keys` in `shell/offload.py` (the existing implementation of chained keys).
 
-Changes in v0.2.1 relative to v0.2: English translation. New invariant I11 (bounded metadata) with the supporting fact I11a (§4). I8 is tightened: a key whose candidate set is empty keeps no stored Index entry. §7 adds a churn edge case, and §9.1 adds proof obligation 9.
+Changes in v0.2.1 relative to v0.2: new invariant I11 (bounded metadata) with the supporting fact I11a (§4). I8 is tightened: a key whose candidate set is empty keeps no stored Index entry. §7 adds a churn edge case, and §9.1 adds proof obligation 9.
 
 Changes in v0.2 relative to v0.1:
 - Keys became chained 256-bit digests that serve as both identity and index key. Collisions enter the trusted base as an explicit probabilistic assumption (D4, §3.3, §9).
