@@ -1,0 +1,30 @@
+{
+  "platform": "macOS 26.6.2 arm64",
+  "verus": {
+    "version": "0.2026.11.02.8bf68ee",
+    "commit": "8bf68ee741df833ea5d0fe6a2255126fdea87e47",
+    "url": "https://github.com/verus-lang/verus/releases/download/release/0.2026.11.02.8bf68ee/verus-0.2026.11.02.8bf68ee-arm64-macos.zip",
+    "zip_sha256": "3086974d1afebf8b9f6fee2939b626486a12248c0dab528b9262ea652b863326",
+    "install_dir": ".toolchain/verus-arm64-macos",
+    "binaries_sha256": {
+      "verus": "483703c79cf57530a9864de2e69326740ee69162dd98b853aedb8273c74a06f6",
+      "rust_verify": "cfb7b5c00940fd20fa0aa395ed3551e12112f39bc7d848ea757945560a722805",
+      "z3": "edae32f9e37ea4b5bb35310d72f0e352d0dc07626cac4e9e30bc1ea9a5bc8efb"
+    },
+    "z3": "4.16.0 (bundled)"
+  },
+  "rust": "1.99.1-aarch64-apple-darwin",
+  "crates": {
+    "vstd": "=0.0.0-2026-11-01-0251",
+    "sha2": "=0.10.9",
+    "pyo3": "=0.30.1"
+  },
+  "python": "CPython 3.13.5 (/opt/homebrew/bin/python3; override with PP_PYTHON)",
+  "verification": {
+    "command": "scripts/verify.sh",
+    "rlimit": 20,
+    "flags": ["--rlimit 20", "--triggers-mode silent"],
+    "expected": "verification results:: N verified, 0 errors"
+  },
+  "cargo_home": ".toolchain/cargo-home (workspace-local; nothing is written to ~/.cargo)"
+}
