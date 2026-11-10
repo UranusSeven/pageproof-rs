@@ -167,6 +167,307 @@ impl Coordinator {
         (probes, kmin)
     }
 
+    /// `Prot` of C1 for the hit prefix `k` (the first `k` hits of each probe).
+    pub(crate) fn compute_prot(&self, toks: &[Token], probes: &Vec<Probe>, k: usize) -> (r: Vec<bool>)
+        requires
+            self.valid(),
+            probes@.len() == self.np(),
+            forall|c: int|
+                0 <= c < self.np() ==> probe_ok(self.pv(c), self.paged@[c].den_log(), toks@, #[trigger] probes@[c]) && k
+                    <= probes@[c].hits@.len(),
+        ensures
+            r@ == self@.attach_prot(toks@, k as nat),
+            forall|c: int, j: int|
+                #![trigger probes@[c].hits@[j]]
+                0 <= c < self.np() && 0 <= j < k && !probes@[c].hits@[j].1 ==> r@[probes@[c].hits@[j].0 as int / (self.per_c(c) as int)],
+    {
+        proof {
+            self.lemma_view();
+            self.lemma_shape();
+        }
+        let mut prot: Vec<bool> = vec![false; self.nslab];
+        let ghost target = self@.attach_prot(toks@, k as nat);
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                self.valid(),
+                probes@.len() == self.np(),
+                forall|c2: int|
+                    0 <= c2 < self.np() ==> probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks@, #[trigger] probes@[c2]) && k
+                        <= probes@[c2].hits@.len(),
+                target == self@.attach_prot(toks@, k as nat),
+                c <= self.npaged,
+                prot@.len() == self.nslab,
+                forall|s: int|
+                    0 <= s < self.nslab ==> #[trigger] prot@[s] == exists|c2: int, i: nat|
+                        0 <= c2 < c && i < k && #[trigger] self@.prot_hit(toks@, c2, i, s),
+                forall|c2: int, j: int|
+                    #![trigger probes@[c2].hits@[j]]
+                    0 <= c2 < c && 0 <= j < k && !probes@[c2].hits@[j].1 ==> prot@[probes@[c2].hits@[j].0 as int / (
+                    self.per_c(c2) as int)],
+            decreases self.npaged - c,
+        {
+            let pr = &probes[c];
+            let p = self.per[c];
+            proof {
+                assert(self.paged@[c as int].valid());
+                assert(self.unit@[c as int] >= 1);
+                assert(self@.paged[c as int] == self.pv(c as int));
+            }
+            let mut i: usize = 0;
+            let ghost prot_c = prot@;
+            while i < k
+                invariant
+                    self.valid(),
+                    probes@.len() == self.np(),
+                    (c as nat) < self.np(),
+                    pr == &probes@[c as int],
+                    p as nat == self.per_c(c as int),
+                    p >= 1,
+                    self@.paged[c as int] == self.pv(c as int),
+                    self.paged@[c as int].valid(),
+                    probe_ok(self.pv(c as int), self.paged@[c as int].den_log(), toks@, *pr),
+                    k <= pr.hits@.len(),
+                    i <= k,
+                    prot@.len() == self.nslab,
+                    forall|s: int|
+                        0 <= s < self.nslab ==> #[trigger] prot@[s] == (prot_c[s] || exists|i2: nat|
+                            i2 < i && #[trigger] self@.prot_hit(toks@, c as int, i2, s)),
+                    forall|j: int| #![trigger pr.hits@[j]] 0 <= j < i && !pr.hits@[j].1 ==> prot@[pr.hits@[j].0 as int / (p as int)],
+                    forall|s: int| 0 <= s < self.nslab && #[trigger] prot_c[s] ==> prot@[s],
+                    prot_c.len() == self.nslab,
+                decreases k - i,
+            {
+                let (x, act) = pr.hits[i];
+                let ghost key = self.pv(c as int).key_of(toks@, i as nat);
+                proof {
+                    assert(in_index(self.pv(c as int).keys, key, x));
+                    assert(act == self.pv(c as int).has_active_hit(key));
+                }
+                let ghost pb = prot@;
+                if !act {
+                    let ki = &pr.keys[i];
+                    let cands = self.paged[c].candidates(ki);
+                    let mut q: usize = 0;
+                    while q < cands.len()
+                        invariant
+                            self.valid(),
+                            (c as nat) < self.np(),
+                            p as nat == self.per_c(c as int),
+                            p >= 1,
+                            self@.paged[c as int] == self.pv(c as int),
+                            self.paged@[c as int].valid(),
+                            *ki == key,
+                            forall|y: usize| #[trigger] cands@.contains(y) <==> in_index(self.pv(c as int).keys, key, y),
+                            q <= cands@.len(),
+                            prot@.len() == self.nslab,
+                            forall|s: int| 0 <= s < self.nslab && #[trigger] pb[s] ==> prot@[s],
+                            forall|s: int|
+                                0 <= s < self.nslab && #[trigger] prot@[s] ==> pb[s] || exists|q2: int|
+                                    0 <= q2 < q && cands@[q2] as int / (p as int) == s,
+                            forall|q2: int| 0 <= q2 < q ==> prot@[#[trigger] cands@[q2] as int / (p as int)],
+                        decreases cands@.len() - q,
+                    {
+                        let y = cands[q];
+                        proof {
+                            assert(cands@.contains(y));
+                            assert(self.pv(c as int).p == self.cunits(c as int));
+                            assert((y as nat) < self.pv(c as int).p);
+                            lemma_div_bounds(y as nat, p as nat);
+                            if (y / p) as nat >= self.nslab {
+                                lemma_mul_mono(self.nslab as nat, (y / p) as nat, p as nat);
+                            }
+                        }
+                        prot.set(y / p, true);
+                        q += 1;
+                    }
+                    proof {
+                        assert(cands@.contains(x));
+                        let qx = choose|qx: int| 0 <= qx < cands@.len() && cands@[qx] == x;
+                        assert(prot@[x as int / (p as int)]);
+                        assert forall|s: int| 0 <= s < self.nslab implies #[trigger] prot@[s] == (pb[s] || self@.prot_hit(
+                            toks@,
+                            c as int,
+                            i as nat,
+                            s,
+                        )) by {
+                            if prot@[s] && !pb[s] {
+                                let q2 = choose|q2: int| 0 <= q2 < cands@.len() && cands@[q2] as int / (p as int) == s;
+                                assert(cands@.contains(cands@[q2]));
+                                assert(in_index(self@.paged[c as int].keys, key, cands@[q2]));
+                            }
+                            if self@.prot_hit(toks@, c as int, i as nat, s) {
+                                let y = choose|y: usize| #[trigger] in_index(self@.paged[c as int].keys, key, y) && y as int / (
+                                self@.per[c as int] as int) == s;
+                                assert(cands@.contains(y));
+                                let q2 = choose|q2: int| 0 <= q2 < cands@.len() && cands@[q2] == y;
+                                assert(prot@[cands@[q2] as int / (p as int)]);
+                            }
+                        }
+                    }
+                } else {
+                    proof {
+                        assert forall|s: int| 0 <= s < self.nslab implies !self@.prot_hit(toks@, c as int, i as nat, s) by {}
+                    }
+                }
+                proof {
+                    assert forall|j: int| #![trigger pr.hits@[j]] 0 <= j < i + 1 && !pr.hits@[j].1 implies prot@[pr.hits@[j].0 as int
+                        / (p as int)] by {
+                        if j < i {
+                            let sj = pr.hits@[j].0 as int / (p as int);
+                            assert(pb[sj]);
+                            assert((pr.hits@[j].0 as nat) < self.pv(c as int).p) by {
+                                assert(in_index(self.pv(c as int).keys, self.pv(c as int).key_of(toks@, j as nat), pr.hits@[j].0));
+                            }
+                            lemma_div_bounds(pr.hits@[j].0 as nat, p as nat);
+                            if sj >= self.nslab {
+                                lemma_mul_mono(self.nslab as nat, sj as nat, p as nat);
+                            }
+                        } else {
+                            assert(j == i);
+                        }
+                    }
+                    assert forall|s: int| 0 <= s < self.nslab && #[trigger] prot_c[s] implies prot@[s] by {
+                        assert(pb[s]);
+                    }
+                    assert forall|s: int|
+                        0 <= s < self.nslab implies #[trigger] prot@[s] == (prot_c[s] || exists|i2: nat|
+                        i2 < i + 1 && #[trigger] self@.prot_hit(toks@, c as int, i2, s)) by {
+                        if exists|i2: nat| i2 < i + 1 && #[trigger] self@.prot_hit(toks@, c as int, i2, s) {
+                            let i2 = choose|i2: nat| i2 < i + 1 && #[trigger] self@.prot_hit(toks@, c as int, i2, s);
+                            if i2 < i {
+                                assert(pb[s]);
+                            }
+                        }
+                        if pb[s] && !prot_c[s] {
+                            assert(exists|i2: nat| i2 < i && #[trigger] self@.prot_hit(toks@, c as int, i2, s));
+                            let i2 = choose|i2: nat| i2 < i && #[trigger] self@.prot_hit(toks@, c as int, i2, s);
+                            assert(i2 < i + 1);
+                        }
+                        if prot@[s] && !pb[s] {
+                            assert(self@.prot_hit(toks@, c as int, i as nat, s));
+                        }
+                    }
+                }
+                i += 1;
+            }
+            proof {
+                assert forall|c2: int, j: int|
+                    #![trigger probes@[c2].hits@[j]]
+                    0 <= c2 < c + 1 && 0 <= j < k && !probes@[c2].hits@[j].1 implies prot@[probes@[c2].hits@[j].0 as int / (
+                    self.per_c(c2) as int)] by {
+                    if c2 < c {
+                        let x = probes@[c2].hits@[j].0;
+                        let p2 = self.per_c(c2);
+                        assert(prot_c[x as int / (p2 as int)]);
+                        assert(self.paged@[c2].valid());
+                        assert(self.unit@[c2] >= 1);
+                        assert(probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks@, probes@[c2]));
+                        assert(in_index(self.pv(c2).keys, self.pv(c2).key_of(toks@, j as nat), x));
+                        lemma_div_bounds(x as nat, p2);
+                        if x as int / (p2 as int) >= self.nslab {
+                            lemma_mul_mono(self.nslab as nat, (x as int / (p2 as int)) as nat, p2);
+                        }
+                    }
+                }
+                assert forall|s: int|
+                    0 <= s < self.nslab implies #[trigger] prot@[s] == exists|c2: int, i2: nat|
+                    0 <= c2 < c + 1 && i2 < k && #[trigger] self@.prot_hit(toks@, c2, i2, s) by {
+                    if prot@[s] {
+                        if prot_c[s] {
+                            let (c2, i2) = choose|c2: int, i2: nat| 0 <= c2 < c && i2 < k && #[trigger] self@.prot_hit(toks@, c2, i2, s);
+                            assert(0 <= c2 < c + 1 && i2 < k && self@.prot_hit(toks@, c2, i2, s));
+                        } else {
+                            let i2 = choose|i2: nat| i2 < k && #[trigger] self@.prot_hit(toks@, c as int, i2, s);
+                            assert(0 <= c < c + 1 && i2 < k && self@.prot_hit(toks@, c as int, i2, s));
+                        }
+                    }
+                    if exists|c2: int, i2: nat| 0 <= c2 < c + 1 && i2 < k && #[trigger] self@.prot_hit(toks@, c2, i2, s) {
+                        let (c2, i2) = choose|c2: int, i2: nat| 0 <= c2 < c + 1 && i2 < k && #[trigger] self@.prot_hit(toks@, c2, i2, s);
+                        if c2 < c {
+                            assert(prot_c[s]);
+                        } else {
+                            assert(prot@[s]);
+                        }
+                    }
+                }
+            }
+            c += 1;
+        }
+        proof {
+            assert(prot@ =~= target);
+        }
+        prot
+    }
+
+    /// C1 demand vector `d`: `m - u_c` for paged classes, 1 for state classes.
+    pub(crate) fn attach_demand_exec(&self, toks: &[Token], probes: &Vec<Probe>, k: usize, m: usize) -> (r: Vec<usize>)
+        requires
+            self.valid(),
+            probes@.len() == self.np(),
+            forall|c: int|
+                0 <= c < self.np() ==> probe_ok(self.pv(c), self.paged@[c].den_log(), toks@, #[trigger] probes@[c]) && k
+                    <= probes@[c].hits@.len(),
+            m as nat <= max_slots(),
+            k <= m,
+        ensures
+            r@ == self@.attach_demand(toks@, m as nat, k as nat),
+            r@.len() == self.ncls(),
+            forall|c: int| 0 <= c < r@.len() ==> #[trigger] r@[c] <= max_slots(),
+    {
+        proof {
+            self.lemma_view();
+        }
+        let mut d: Vec<usize> = Vec::new();
+        let k_all = self.unit.len();
+        let mut c: usize = 0;
+        while c < k_all
+            invariant
+                self.valid(),
+                k_all as nat == self.ncls(),
+                probes@.len() == self.np(),
+                forall|c2: int|
+                    0 <= c2 < self.np() ==> probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks@, #[trigger] probes@[c2]) && k
+                        <= probes@[c2].hits@.len(),
+                m as nat <= max_slots(),
+                k <= m,
+                c <= k_all,
+                d@.len() == c,
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] d@[c2] == self@.attach_demand(toks@, m as nat, k as nat)[c2],
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] d@[c2] <= max_slots(),
+            decreases k_all - c,
+        {
+            if c < self.npaged {
+                let hk = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(probes[c].hits.as_slice(), 0, k));
+                let u = count_hits_active(&hk);
+                proof {
+                    let pr = probes@[c as int];
+                    assert(hk@ =~= pr.hits@.subrange(0, k as int));
+                    assert(hit_ok(self.pv(c as int), toks@, hk@)) by {
+                        assert forall|j: int| #![trigger hk@[j]] 0 <= j < hk@.len() implies {
+                            &&& in_index(self.pv(c as int).keys, self.pv(c as int).key_of(toks@, j as nat), hk@[j].0)
+                            &&& hk@[j].1 == self.pv(c as int).has_active_hit(self.pv(c as int).key_of(toks@, j as nat))
+                            &&& hk@[j].1 == (self.pv(c as int).refs[hk@[j].0 as int] > 0)
+                        } by {
+                            assert(hk@[j] == pr.hits@[j]);
+                        }
+                    }
+                    lemma_n_active_eq(self.pv(c as int), toks@, hk@, k as nat);
+                    assert(self@.paged[c as int] == self.pv(c as int));
+                    assert(u <= k);
+                }
+                d.push((m - u) as usize);
+            } else {
+                d.push(1);
+            }
+            c += 1;
+        }
+        proof {
+            assert(d@ =~= self@.attach_demand(toks@, m as nat, k as nat));
+        }
+        d
+    }
+
     /// Replacing paged pools by valid pools with the same views keeps `valid` and the view.
     pub(crate) proof fn lemma_paged_swap(&self, o: &Coordinator)
         requires
