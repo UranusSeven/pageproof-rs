@@ -80,6 +80,60 @@ pub proof fn lemma_slab_of(x: int, n: nat, s: nat)
     }
 }
 
+/// The public abstract state of a coordinator (contract §3.2), for client reasoning.
+pub ghost struct CoordV {
+    pub id: u64,
+    pub nslab: nat,
+    pub sbytes: nat,
+    pub b: nat,
+    /// `u_c` of every class, paged classes first.
+    pub unit: Seq<usize>,
+    pub per: Seq<usize>,
+    pub np: nat,
+    /// `owner[s]`: 0 is `Free`, `c + 1` is class `c`.
+    pub owner: Seq<usize>,
+    /// Paged classes (lockstep leases; class 0 is the reference copy).
+    pub paged: Seq<MgrV>,
+    pub state: Seq<StateV>,
+    /// `σ_h^c` for each lease and state class.
+    pub slots: Map<u64, Seq<usize>>,
+}
+
+impl CoordV {
+    pub open spec fn ncls(self) -> nat {
+        self.unit.len()
+    }
+
+    pub open spec fn nst(self) -> nat {
+        self.state.len()
+    }
+
+    pub open spec fn leases(self) -> Map<u64, LeaseV> {
+        self.paged[0].leases
+    }
+
+    pub open spec fn pend(self) -> Map<u64, PendV> {
+        self.paged[0].pend
+    }
+
+    pub open spec fn next_handle(self) -> u64 {
+        self.paged[0].next_handle
+    }
+
+    pub open spec fn next_ticket(self) -> u64 {
+        self.paged[0].next_ticket
+    }
+
+    pub open spec fn fits_m(self, m: nat) -> bool {
+        fits(self.per, self.np, self.nst(), self.nslab, m)
+    }
+
+    /// `FS`.
+    pub open spec fn free_slabs(self) -> Set<usize> {
+        Set::<usize>::range(0, self.nslab as usize).filter(|s: usize| self.owner[s as int] == 0)
+    }
+}
+
 pub struct Coordinator {
     pub(crate) id: u64,
     pub(crate) nslab: usize,
@@ -101,6 +155,28 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    /// Public view.
+    pub closed spec fn view(&self) -> CoordV {
+        CoordV {
+            id: self.id,
+            nslab: self.nslab as nat,
+            sbytes: self.sbytes as nat,
+            b: self.b as nat,
+            unit: self.unit@,
+            per: self.per@,
+            np: self.npaged as nat,
+            owner: self.owner@,
+            paged: Seq::new(self.paged@.len(), |i: int| self.paged@[i]@),
+            state: Seq::new(self.state@.len(), |j: int| self.state@[j]@),
+            slots: self.slots@.map_values(|v: Vec<usize>| v@),
+        }
+    }
+
+    /// Public validity.
+    pub closed spec fn inv(&self) -> bool {
+        self.valid()
+    }
+
     // ------------------------------------------------------------------ abstract accessors
     pub open(crate) spec fn np(&self) -> nat {
         self.npaged as nat
@@ -729,6 +805,357 @@ impl Coordinator {
                 assert(self.state@[c2 - o.np()] == o.state@[c2 - o.np()]);
             }
         }
+    }
+}
+
+} // verus!
+
+verus! {
+
+/// Configuration accepted by C0 (A1 and representability).
+pub open spec fn cfg_accepts(nslab: nat, sbytes: nat, b: nat, pu: Seq<usize>, su: Seq<usize>, ns: Seq<u8>) -> bool {
+    &&& nslab >= 1
+    &&& sbytes >= 1
+    &&& b >= 1
+    &&& pu.len() >= 1
+    &&& pu.len() + su.len() < 0x1_0000
+    &&& ns.len() <= u32::MAX
+    &&& nslab * sbytes <= u64::MAX
+    &&& forall|c: int| 0 <= c < pu.len() ==> #[trigger] pu[c] >= 1 && sbytes % (pu[c] as nat) == 0 && nslab * (sbytes
+        / (pu[c] as nat)) * b <= max_slots()
+    &&& forall|c: int| 0 <= c < su.len() ==> #[trigger] su[c] >= 1 && sbytes % (su[c] as nat) == 0 && nslab * (sbytes
+        / (su[c] as nat)) * b <= max_slots()
+}
+
+impl Coordinator {
+    /// C0. `create(N, S, classes, B, Namespace)`. Paged classes are `pu` (in order), then state
+    /// classes `su`. Every slab starts free.
+    pub fn create(nslab: usize, sbytes: usize, pu: &[usize], su: &[usize], b: usize, ns: &[u8]) -> (r: Result<
+        Coordinator,
+        Error,
+    >)
+        ensures
+            r matches Ok(co) ==> {
+                &&& co.inv()
+                &&& co@.nslab == nslab
+                &&& co@.sbytes == sbytes
+                &&& co@.b == b
+                &&& co@.unit == pu@ + su@
+                &&& co@.np == pu@.len()
+                &&& co@.nst() == su@.len()
+                &&& co@.owner.len() == nslab
+                &&& forall|s: int| 0 <= s < nslab ==> #[trigger] co@.owner[s] == 0
+                &&& co@.leases() == Map::<u64, LeaseV>::empty()
+                &&& co@.pend() == Map::<u64, PendV>::empty()
+                &&& co@.paged[0].ns == ns@
+            },
+            r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
+            !cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@) ==> r == Err::<Coordinator, Error>(
+                Error::ConfigError,
+            ),
+    {
+        if nslab == 0 || sbytes == 0 || b == 0 || pu.len() == 0 || pu.len() >= 0x1_0000 || su.len() >= 0x1_0000
+            - pu.len() || ns.len() > u32::MAX as usize {
+            return Err(Error::ConfigError);
+        }
+        proof {
+            assert((nslab as nat) * (sbytes as nat) <= u128::MAX) by (nonlinear_arith)
+                requires nslab as nat <= u64::MAX, sbytes as nat <= u64::MAX;
+        }
+        if (nslab as u128) * (sbytes as u128) > u64::MAX as u128 {
+            return Err(Error::ConfigError);
+        }
+        let mut unit: Vec<usize> = Vec::new();
+        let mut per: Vec<usize> = Vec::new();
+        let ghost all = pu@ + su@;
+        let ncls = pu.len() + su.len();
+        let mut c: usize = 0;
+        while c < ncls
+            invariant
+                0 <= c <= ncls,
+                ncls == all.len(),
+                all == pu@ + su@,
+                nslab >= 1,
+                b >= 1,
+                sbytes >= 1,
+                (nslab as nat) * (sbytes as nat) <= u64::MAX,
+                unit@ == all.subrange(0, c as int),
+                per@.len() == c,
+                forall|k: int| 0 <= k < c ==> #[trigger] all[k] >= 1 && sbytes % all[k] == 0 && per@[k] == sbytes
+                    / all[k] && per@[k] >= 1 && (nslab as nat) * (per@[k] as nat) * (b as nat) <= max_slots()
+                    && (nslab as nat) * (per@[k] as nat) <= usize::MAX,
+            decreases ncls - c,
+        {
+            let u = if c < pu.len() { pu[c] } else { su[c - pu.len()] };
+            proof {
+                assert(u == all[c as int]);
+            }
+            if u == 0 || sbytes % u != 0 {
+                proof {
+                    if c < pu.len() {
+                        assert(pu@[c as int] == u);
+                    } else {
+                        assert(su@[c - pu.len()] == u);
+                    }
+                }
+                return Err(Error::ConfigError);
+            }
+            let n = sbytes / u;
+            proof {
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(sbytes as int, u as int);
+                assert(sbytes as int == u * (sbytes / u) as int + 0);
+                if n == 0 {
+                    assert(sbytes as int == u * 0);
+                }
+                assert(n >= 1);
+                assert(n <= sbytes) by (nonlinear_arith) requires sbytes as int == u * (n as int), u >= 1, n >= 1;
+                assert((nslab as nat) * (n as nat) <= (nslab as nat) * (sbytes as nat)) by (nonlinear_arith)
+                    requires n <= sbytes;
+                assert((nslab as nat) * (n as nat) * (b as nat) <= u128::MAX) by (nonlinear_arith)
+                    requires (nslab as nat) * (n as nat) <= u64::MAX, b as nat <= u64::MAX;
+            }
+            if (nslab as u128) * (n as u128) * (b as u128) > MAX_SLOTS as u128 {
+                proof {
+                    if c < pu.len() {
+                        assert(pu@[c as int] == u);
+                    } else {
+                        assert(su@[c - pu.len()] == u);
+                    }
+                }
+                return Err(Error::ConfigError);
+            }
+            proof {
+                assert((nslab as nat) * (n as nat) <= usize::MAX);
+            }
+            unit.push(u);
+            per.push(n);
+            proof {
+                assert(unit@ =~= all.subrange(0, c + 1));
+            }
+            c += 1;
+        }
+        proof {
+            assert(unit@ =~= all);
+            assert(cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@)) by {
+                assert forall|k: int| 0 <= k < pu@.len() implies #[trigger] pu@[k] >= 1 && (sbytes as nat) % (
+                pu@[k] as nat) == 0 && (nslab as nat) * ((sbytes as nat) / (pu@[k] as nat)) * (b as nat) <= max_slots() by {
+                    assert(all[k] == pu@[k]);
+                }
+                assert forall|k: int| 0 <= k < su@.len() implies #[trigger] su@[k] >= 1 && (sbytes as nat) % (
+                su@[k] as nat) == 0 && (nslab as nat) * ((sbytes as nat) / (su@[k] as nat)) * (b as nat) <= max_slots() by {
+                    assert(all[pu@.len() + k] == su@[k]);
+                }
+            }
+        }
+        let id = match fresh_mgr_id() {
+            Some(id) => id,
+            None => return Err(Error::IdentifierExhausted),
+        };
+        // Paged classes.
+        let mut paged: Vec<Manager> = Vec::new();
+        let mut i: usize = 0;
+        proof {
+            assert forall|k: int| 0 <= k < ncls implies #[trigger] per@[k] >= 1 && (nslab as nat) * (per@[k] as nat) * (
+            b as nat) <= max_slots() && (nslab as nat) * (per@[k] as nat) <= usize::MAX by {
+                assert(all[k] >= 1);
+            }
+        }
+        while i < pu.len()
+            invariant
+                cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@),
+                0 <= i <= pu@.len(),
+                per@.len() == ncls,
+                ncls == pu@.len() + su@.len(),
+                b >= 1,
+                nslab >= 1,
+                ns@.len() <= u32::MAX,
+                forall|k: int| 0 <= k < ncls ==> #[trigger] per@[k] >= 1 && (nslab as nat) * (per@[k] as nat) * (b as nat)
+                    <= max_slots(),
+                paged@.len() == i,
+                forall|k: int|
+                    0 <= k < ncls ==> (nslab as nat) * (#[trigger] per@[k] as nat) <= usize::MAX,
+                forall|k: int|
+                    0 <= k < i ==> {
+                        &&& #[trigger] paged@[k].valid()
+                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                    },
+            decreases pu@.len() - i,
+        {
+            proof {
+                assert((nslab as nat) * (per@[i as int] as nat) <= usize::MAX);
+            }
+            let units = nslab * per[i];
+            proof {
+                assert((nslab as nat) * (per@[i as int] as nat) * (b as nat) <= max_slots());
+                lemma_mul_mono(1, b as nat, (nslab as nat) * (per@[i as int] as nat));
+                assert((nslab as nat) * (per@[i as int] as nat) >= 1) by (nonlinear_arith)
+                    requires nslab >= 1, per@[i as int] >= 1;
+            }
+            match Manager::create_empty(units, b, ns) {
+                Ok(m) => {
+                    paged.push(m);
+                },
+                Err(e) => {
+                    proof {
+                        // ConfigError is impossible: the configuration was checked above.
+                        assert((units as nat) * (b as nat) <= max_slots());
+                    }
+                    return Err(Error::IdentifierExhausted);
+                },
+            }
+            i += 1;
+        }
+        let mut state: Vec<StatePool> = Vec::new();
+        let mut j: usize = 0;
+        while j < su.len()
+            invariant
+                0 <= j <= su@.len(),
+                per@.len() == ncls,
+                ncls == pu@.len() + su@.len(),
+                nslab >= 1,
+                b >= 1,
+                forall|k: int| 0 <= k < ncls ==> #[trigger] per@[k] >= 1 && (nslab as nat) * (per@[k] as nat) * (b as nat)
+                    <= max_slots(),
+                state@.len() == j,
+                forall|k: int|
+                    0 <= k < ncls ==> (nslab as nat) * (#[trigger] per@[k] as nat) <= usize::MAX,
+                forall|k: int|
+                    0 <= k < j ==> {
+                        &&& #[trigger] state@[k].valid()
+                        &&& state@[k]@.p == (nslab as nat) * (per@[pu@.len() + k] as nat)
+                        &&& state@[k]@.own == Seq::new(state@[k]@.p, |x: int| false)
+                        &&& state@[k]@.holder == Seq::new(state@[k]@.p, |x: int| None::<u64>)
+                    },
+            decreases su@.len() - j,
+        {
+            proof {
+                let k = pu@.len() + j;
+                assert(per@[k] >= 1);
+                lemma_mul_mono(1, b as nat, (nslab as nat) * (per@[k] as nat));
+            }
+            let units = nslab * per[pu.len() + j];
+            state.push(StatePool::new(units));
+            j += 1;
+        }
+        let owner: Vec<usize> = vec![0usize; nslab];
+        let fs = IdxSet::new_full(nslab);
+        let ghost st = state@;
+        let co = Coordinator {
+            id,
+            nslab,
+            sbytes,
+            b,
+            npaged: pu.len(),
+            unit,
+            per,
+            owner,
+            fs,
+            paged,
+            state,
+            slots: HashMap::new(),
+        };
+        proof {
+            assert(co.cfg_ok()) by {
+                assert forall|k: int| 0 <= k < co.ncls() implies {
+                    &&& #[trigger] co.unit@[k] >= 1
+                    &&& co.sbytes % co.unit@[k] == 0
+                    &&& co.per@[k] == co.sbytes / co.unit@[k]
+                    &&& co.per@[k] >= 1
+                    &&& co.cunits(k) * (co.b as nat) <= max_slots()
+                } by {
+                    assert(all[k] == co.unit@[k]);
+                }
+            }
+            assert(co.pools_ok()) by {
+                assert forall|k: int| 0 <= k < co.np() implies {
+                    &&& #[trigger] co.paged@[k].valid()
+                    &&& co.pv(k).p == co.cunits(k)
+                    &&& co.pv(k).b == co.b as nat
+                    &&& co.pv(k).ns == co.pv(0).ns
+                } by {
+                    assert(co.paged@[k].valid());
+                    assert(co.paged@[0].valid());
+                }
+                assert forall|k: int| 0 <= k < co.nst() implies {
+                    &&& #[trigger] co.state@[k].valid()
+                    &&& co.sv(k).p == co.cunits(co.np() + k)
+                } by {
+                    assert(co.state@[k].valid());
+                }
+            }
+            assert(co.own_ok()) by {
+                assert forall|s2: usize| #[trigger] co.fs@.contains(s2) <==> ((s2 as nat) < co.nslab && co.owner@[s2 as int]
+                    == 0) by {}
+                assert forall|c2: int, x: int| 0 <= c2 < co.ncls() && 0 <= x < co.cunits(c2) implies #[trigger] co.cown(
+                    c2,
+                    x,
+                ) == (co.owner@[x / (co.per_c(c2) as int)] == c2 + 1) by {
+                    let n2 = co.per_c(c2);
+                    lemma_div_bounds(x as nat, n2);
+                    if x / (n2 as int) >= co.nslab {
+                        lemma_mul_mono(co.nslab as nat, (x / (n2 as int)) as nat, n2);
+                    }
+                    if c2 < co.np() {
+                        assert(co.paged@[c2].valid());
+                    } else {
+                        assert(co.state@[c2 - co.np()].valid());
+                    }
+                }
+            }
+            assert(co.lock_ok()) by {
+                assert forall|k: int, h: u64| 0 <= k < co.np() && #[trigger] co.pv(k).leases.contains_key(h) implies false by {
+                    assert(co.paged@[k].valid());
+                }
+                assert forall|h: u64| #[trigger] co.pv(0).leases.contains_key(h) implies false by {
+                    assert(co.paged@[0].valid());
+                }
+                assert forall|k: int| #![trigger co.paged@[k]] 0 <= k < co.np() implies {
+                    &&& co.pv(k).leases.dom() == co.pv(0).leases.dom()
+                    &&& co.pv(k).pend == co.pv(0).pend
+                    &&& co.pv(k).next_handle == co.pv(0).next_handle
+                    &&& co.pv(k).next_ticket == co.pv(0).next_ticket
+                } by {
+                    assert(co.paged@[0].valid());
+                    assert(co.paged@[k].valid());
+                    assert(co.pv(k).leases =~= Map::<u64, LeaseV>::empty());
+                    assert(co.pv(0).leases =~= Map::<u64, LeaseV>::empty());
+                }
+            }
+            assert(co.pv(0).leases =~= Map::<u64, LeaseV>::empty()) by {
+                assert(co.paged@[0].valid());
+            }
+            assert(co.slots_ok()) by {
+                assert(co.slots@.dom() =~= Set::<u64>::empty());
+                assert(co.slots@.dom() =~= co.pv(0).leases.dom());
+                assert forall|k: int, x: int|
+                    #![trigger co.sv(k).holder[x]]
+                    0 <= k < co.nst() && 0 <= x < co.sv(k).p && co.sv(k).holder[x] is Some implies {
+                    let h = co.sv(k).holder[x]->Some_0;
+                    &&& co.slots@.contains_key(h)
+                    &&& co.slots@[h]@[k] as int == x
+                } by {
+                    assert(co.state@[k].valid());
+                }
+            }
+            assert(co@.paged[0] == co.pv(0));
+            assert(co@.leases() =~= Map::<u64, LeaseV>::empty());
+            assert(co@.pend() =~= Map::<u64, PendV>::empty()) by {
+                assert(co.paged@[0].valid());
+            }
+            assert(co@.unit == pu@ + su@);
+            assert(co@.nst() == su@.len());
+            assert(co.inv());
+            assert(co@.nslab == nslab);
+            assert(co@.sbytes == sbytes);
+            assert(co@.b == b);
+            assert(co@.np == pu@.len());
+            assert(co@.owner.len() == nslab);
+            assert(forall|s: int| 0 <= s < nslab ==> #[trigger] co@.owner[s] == 0);
+            assert(co@.paged[0].ns == ns@) by {
+                assert(co.paged@[0]@ == initial_own(co.paged@[0]@.id, (nslab as nat) * (co.per@[0] as nat), b as nat, ns@, false));
+            }
+        }
+        Ok(co)
     }
 }
 
