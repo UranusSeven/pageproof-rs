@@ -1270,7 +1270,7 @@ impl Coordinator {
             proof {
                 assert(u == all[c as int]);
             }
-            if u == 0 || sbytes % u != 0 {
+            if u == 0 || !sbytes.is_multiple_of(u) {
                 proof {
                     if c < pu.len() {
                         assert(pu@[c as int] == u);
@@ -1388,7 +1388,7 @@ impl Coordinator {
                         }
                     }
                 },
-                Err(e) => {
+                Err(_e) => {
                     proof {
                         // ConfigError is impossible: the configuration was checked above.
                         assert((units as nat) * (b as nat) <= max_slots());

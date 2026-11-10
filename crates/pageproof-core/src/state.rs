@@ -3,6 +3,7 @@
 use vstd::prelude::*;
 use crate::spec::*;
 use crate::idxset::IdxSet;
+#[cfg(verus_keep_ghost)]
 use crate::ops_slab::in_range;
 
 verus! {
@@ -341,6 +342,8 @@ impl StatePool {
     }
 
     /// Ghost update of a held slot's provenance (C4: the slot now holds the state after `tau`).
+    // `x` names the slot in the contract only; the update is ghost.
+    #[allow(unused_variables)]
     pub fn set_w(&mut self, x: usize, Ghost(tau): Ghost<Seq<Token>>)
         requires
             old(self).valid(),

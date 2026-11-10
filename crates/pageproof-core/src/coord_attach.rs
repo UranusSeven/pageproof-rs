@@ -10,6 +10,7 @@ use crate::manager::*;
 use crate::state::*;
 use crate::coord::*;
 use crate::slabplan::*;
+#[cfg(verus_keep_ghost)]
 use crate::ops_slab::in_range;
 use crate::ops_attach::*;
 #[cfg(verus_keep_ghost)]
@@ -588,6 +589,8 @@ impl Coordinator {
     }
 
     /// `Prot` of C1 for the hit prefix `k` (the first `k` hits of each probe).
+    // `toks` is read only by the contract and the proof.
+    #[allow(unused_variables)]
     pub(crate) fn compute_prot(&self, toks: &[Token], probes: &Vec<Probe>, k: usize) -> (r: Vec<bool>)
         requires
             self.valid(),
@@ -658,7 +661,8 @@ impl Coordinator {
                     prot_c.len() == self.nslab,
                 decreases k - i,
             {
-                let (x, act) = pr.hits[i];
+                let (_x, act) = pr.hits[i];
+                let ghost x = pr.hits@[i as int].0;
                 let ghost key = self.pv(c as int).key_of(toks@, i as nat);
                 proof {
                     assert(in_index(self.pv(c as int).keys, key, x));
@@ -821,6 +825,8 @@ impl Coordinator {
     }
 
     /// C1 demand vector `d`: `m - u_c` for paged classes, 1 for state classes.
+    // `toks` is read only by the contract and the proof.
+    #[allow(unused_variables)]
     pub(crate) fn attach_demand_exec(&self, toks: &[Token], probes: &Vec<Probe>, k: usize, m: usize) -> (r: Vec<usize>)
         requires
             self.valid(),
@@ -1054,7 +1060,6 @@ impl Coordinator {
         let ghost h = mid.next_handle();
         let mut tables: Vec<Vec<PageId>> = Vec::new();
         let mut cached: usize = 0;
-        let mut tp = tp;
         proof {
             assert(self.paged@[0].valid());
         }
@@ -1116,7 +1121,7 @@ impl Coordinator {
                 assert(mid.pv(c as int).next_handle == h);
             }
             let ghost p0 = self.paged@;
-            let (hh, ch, view) = self.paged[c].attach_commit(toks, pr);
+            let (_hh, ch, view) = self.paged[c].attach_commit(toks, pr);
             proof {
                 assert forall|c2: int| 0 <= c2 < self.paged@.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
             }

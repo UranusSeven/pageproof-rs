@@ -5,6 +5,7 @@ use vstd::prelude::*;
 use crate::arith::*;
 use crate::cnt::*;
 use crate::coord::*;
+#[cfg(verus_keep_ghost)]
 use crate::ops_slab::in_range;
 use crate::types::MgrV;
 use crate::state::StateV;

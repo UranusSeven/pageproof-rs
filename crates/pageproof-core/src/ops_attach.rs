@@ -389,6 +389,8 @@ pub proof fn lemma_attach_inv(v: MgrV, log: Log, toks: Seq<Token>, table: Seq<Pa
 
 /// Plan phase: walks the key chain from `Seed(ns)` and looks each complete block (except the
 /// last logical block) up in the Index. Mutates only the ghost E8 log.
+// `m` is read only by the contract and loop invariants, which rustc does not see.
+#[allow(unused_variables)]
 fn probe(
     index: &KeyIndex,
     keys: &Vec<Option<Digest>>,
@@ -996,6 +998,7 @@ impl Manager {
             assert(b as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires p >= 1;
             assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
         }
+        let _ = p;
         let m = (n + b - 1) / b;
         proof {
             lemma_cdiv_props(n as nat, b as nat);
@@ -1162,7 +1165,7 @@ impl Manager {
             assert(m as nat == cdiv(n as nat, b as nat));
         }
         let pr = self.probe_prefix(toks, m - 1);
-        let kstar = pr.hits.len();
+        let ghost kstar = pr.hits@.len();
         let u = count_hits_active(&pr.hits);
         proof {
             lemma_n_active_eq(v, toks@, pr.hits@, kstar as nat);

@@ -1370,7 +1370,7 @@ impl Coordinator {
                 assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
             }
             match r {
-                Ok((t, plan)) => {
+                Ok((_t, plan)) => {
                     let ghost wb = wslots@;
                     let ghost pb = ptabs@;
                     if c == 0 {
@@ -1605,7 +1605,7 @@ impl Coordinator {
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id {
             return Err(Error::InvalidTicket);
         }
-        let (hid, a, z) = match self.paged[0].pend_info(t.id) {
+        let (hid, _a, z) = match self.paged[0].pend_info(t.id) {
             None => return Err(Error::InvalidTicket),
             Some(x) => x,
         };
