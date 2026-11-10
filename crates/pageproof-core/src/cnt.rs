@@ -154,4 +154,41 @@ pub proof fn lemma_ssum_bound(s: Seq<usize>, k: int, bnd: nat)
     }
 }
 
+pub proof fn lemma_ssum_mono(s: Seq<usize>, t: Seq<usize>, k: int)
+    requires
+        forall|i: int| 0 <= i < k ==> #[trigger] s[i] >= t[i],
+    ensures
+        ssum(s, k) >= ssum(t, k),
+    decreases k,
+{
+    if k > 0 {
+        lemma_ssum_mono(s, t, k - 1);
+    }
+}
+
+pub proof fn lemma_ssum_prefix_le(s: Seq<usize>, k1: int, k2: int)
+    requires
+        0 <= k1 <= k2,
+    ensures
+        ssum(s, k1) <= ssum(s, k2),
+    decreases k2 - k1,
+{
+    if k1 < k2 {
+        lemma_ssum_prefix_le(s, k1, k2 - 1);
+    }
+}
+
+/// `cnt` is monotone under pointwise implication.
+pub proof fn lemma_cnt_imp(n: int, f: spec_fn(int) -> bool, g: spec_fn(int) -> bool)
+    requires
+        forall|i: int| 0 <= i < n && #[trigger] f(i) ==> g(i),
+    ensures
+        cnt(n, f) <= cnt(n, g),
+    decreases n,
+{
+    if n > 0 {
+        lemma_cnt_imp(n - 1, f, g);
+    }
+}
+
 } // verus!

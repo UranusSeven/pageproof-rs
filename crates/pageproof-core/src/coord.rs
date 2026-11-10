@@ -161,9 +161,17 @@ impl CoordV {
         forall|x: int| #[trigger] in_range(x, s * self.per_c(c), self.per_c(c)) ==> self.cidle(c, x)
     }
 
+    pub open spec fn fpred(self) -> spec_fn(int) -> bool {
+        |s: int| self.owner[s] == 0
+    }
+
+    pub open spec fn rpred(self, c: int, prot: Seq<bool>) -> spec_fn(int) -> bool {
+        |s: int| self.reclaimable(c, prot, s)
+    }
+
     /// `|FS|`: the number of free slabs.
     pub open spec fn fcount(self) -> nat {
-        cnt(self.nslab as int, |s: int| self.owner[s] == 0)
+        cnt(self.nslab as int, self.fpred())
     }
 
     /// Slab `s` is reclaimable from class `c` outside `prot` (a member of `R_c`, §3.5).
@@ -173,7 +181,7 @@ impl CoordV {
 
     /// `|R_c|`.
     pub open spec fn rcount(self, c: int, prot: Seq<bool>) -> nat {
-        cnt(self.nslab as int, |s: int| self.reclaimable(c, prot, s))
+        cnt(self.nslab as int, self.rpred(c, prot))
     }
 
     /// `need_c`.
@@ -226,12 +234,20 @@ impl CoordV {
     }
 
     /// Slabs class `c` gained since `o` / lost since `o`.
+    pub open spec fn gpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
+        |s: int| self.owner[s] == c + 1 && o.owner[s] != c + 1
+    }
+
+    pub open spec fn lpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
+        |s: int| o.owner[s] == c + 1 && self.owner[s] != c + 1
+    }
+
     pub open spec fn gained(self, o: CoordV, c: int) -> nat {
-        cnt(self.nslab as int, |s: int| self.owner[s] == c + 1 && o.owner[s] != c + 1)
+        cnt(self.nslab as int, self.gpred(o, c))
     }
 
     pub open spec fn lost(self, o: CoordV, c: int) -> nat {
-        cnt(self.nslab as int, |s: int| o.owner[s] == c + 1 && self.owner[s] != c + 1)
+        cnt(self.nslab as int, self.lpred(o, c))
     }
 
     pub open spec fn sum_lost(self, o: CoordV, k: int) -> nat
@@ -697,6 +713,11 @@ impl Coordinator {
             final(self).fs@ == old(self).fs@.remove(s),
             final(self).cfree(c as int) == old(self).cfree(c as int) + old(self).per_c(c as int),
             forall|c2: int| 0 <= c2 < old(self).ncls() && c2 != c ==> #[trigger] final(self).cfree(c2) == old(self).cfree(c2),
+            forall|c2: int, x: int|
+                #![trigger final(self).cidle(c2, x)]
+                #![trigger final(self).cown(c2, x)]
+                0 <= c2 < old(self).ncls() && 0 <= x < old(self).cunits(c2) && x / (old(self).per_c(c2) as int) != s as int
+                    ==> final(self).cidle(c2, x) == old(self).cidle(c2, x) && final(self).cown(c2, x) == old(self).cown(c2, x),
     {
         let ghost o = *self;
         let per = self.per[c];
@@ -733,6 +754,7 @@ impl Coordinator {
         self.owner.set(s, c + 1);
         proof {
             self.lemma_move_own(&o, s, c, lo, true);
+            self.lemma_unit_frame(&o, s, c, lo, true);
         }
     }
 
@@ -753,6 +775,11 @@ impl Coordinator {
             final(self).fs@ == old(self).fs@.insert(s),
             final(self).cfree(c as int) + old(self).per_c(c as int) == old(self).cfree(c as int),
             forall|c2: int| 0 <= c2 < old(self).ncls() && c2 != c ==> #[trigger] final(self).cfree(c2) == old(self).cfree(c2),
+            forall|c2: int, x: int|
+                #![trigger final(self).cidle(c2, x)]
+                #![trigger final(self).cown(c2, x)]
+                0 <= c2 < old(self).ncls() && 0 <= x < old(self).cunits(c2) && x / (old(self).per_c(c2) as int) != s as int
+                    ==> final(self).cidle(c2, x) == old(self).cidle(c2, x) && final(self).cown(c2, x) == old(self).cown(c2, x),
     {
         let ghost o = *self;
         let per = self.per[c];
@@ -792,6 +819,7 @@ impl Coordinator {
         self.owner.set(s, 0);
         proof {
             self.lemma_move_own(&o, s, c, lo, false);
+            self.lemma_unit_frame(&o, s, c, lo, false);
             assert forall|i: int| #![trigger self.paged@[i]] 0 <= i < self.np() implies forall|x: int|
                 #![trigger self.pv(i).keys[x]]
                 0 <= x < self.pv(i).p ==> self.pv(i).keys[x] == o.pv(i).keys[x] || (self.pv(i).keys[x] is None
@@ -805,6 +833,72 @@ impl Coordinator {
                         assert(o.cidle(c as int, x));
                     }
                 }
+            }
+        }
+    }
+
+    /// Units outside slab `s` keep their idleness and ownership across a slab move.
+    proof fn lemma_unit_frame(&self, o: &Coordinator, s: usize, c: usize, lo: usize, grant: bool)
+        requires
+            o.valid(),
+            (c as nat) < o.ncls(),
+            lo as nat == (s as nat) * o.per_c(c as int),
+            o.per_c(c as int) >= 1,
+            self.npaged == o.npaged,
+            self.per@ == o.per@,
+            self.paged@.len() == o.paged@.len(),
+            self.state@.len() == o.state@.len(),
+            forall|i: int| 0 <= i < o.np() && i != c ==> #[trigger] self.paged@[i] == o.paged@[i],
+            forall|j: int| 0 <= j < o.nst() && j + o.np() != c ==> #[trigger] self.state@[j] == o.state@[j],
+            (c as nat) < o.np() ==> {
+                &&& grant ==> self.pv(c as int) == granted(o.pv(c as int), lo as nat, o.per_c(c as int))
+                &&& !grant ==> self.pv(c as int) == reclaimed(o.pv(c as int), lo as nat, o.per_c(c as int))
+            },
+            (c as nat) >= o.np() ==> {
+                let j = c - o.np();
+                &&& grant ==> self.sv(j) == (StateV {
+                    own: Seq::new(o.sv(j).p, |x: int| if in_range(x, lo as nat, o.per_c(c as int)) { true } else { o.sv(j).own[x] }),
+                    ..o.sv(j)
+                })
+                &&& !grant ==> self.sv(j) == (StateV {
+                    own: Seq::new(o.sv(j).p, |x: int| if in_range(x, lo as nat, o.per_c(c as int)) { false } else { o.sv(j).own[x] }),
+                    w: Seq::new(o.sv(j).p, |x: int| if in_range(x, lo as nat, o.per_c(c as int)) { None } else { o.sv(j).w[x] }),
+                    ..o.sv(j)
+                })
+            },
+        ensures
+            forall|c2: int, x: int|
+                #![trigger self.cidle(c2, x)]
+                #![trigger self.cown(c2, x)]
+                0 <= c2 < o.ncls() && 0 <= x < o.cunits(c2) && x / (o.per_c(c2) as int) != s as int ==> self.cidle(c2, x)
+                    == o.cidle(c2, x) && self.cown(c2, x) == o.cown(c2, x),
+    {
+        assert forall|c2: int, x: int|
+            #![trigger self.cidle(c2, x)]
+            #![trigger self.cown(c2, x)]
+            0 <= c2 < o.ncls() && 0 <= x < o.cunits(c2) && x / (o.per_c(c2) as int) != s as int implies self.cidle(c2, x)
+            == o.cidle(c2, x) && self.cown(c2, x) == o.cown(c2, x) by {
+            if c2 == c as int {
+                assert(!in_range(x, lo as nat, o.per_c(c as int))) by {
+                    if in_range(x, lo as nat, o.per_c(c as int)) {
+                        lemma_slab_of(x, o.per_c(c as int), s as nat);
+                    }
+                }
+                if c2 < o.np() {
+                    assert(o.paged@[c2].valid());
+                    assert(o.pv(c2).p == o.cunits(c2));
+                    assert(self.pv(c2).own[x] == o.pv(c2).own[x]);
+                } else {
+                    let j = c2 - o.np();
+                    assert(o.state@[j].valid());
+                    assert(o.sv(j).p == o.cunits(c2));
+                    assert(self.sv(j).own[x] == o.sv(j).own[x]);
+                    assert(self.sv(j).holder == o.sv(j).holder);
+                }
+            } else if c2 < o.np() {
+                assert(self.paged@[c2] == o.paged@[c2]);
+            } else {
+                assert(self.state@[c2 - o.np()] == o.state@[c2 - o.np()]);
             }
         }
     }
