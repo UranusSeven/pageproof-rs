@@ -10,6 +10,7 @@ use crate::manager::*;
 use crate::state::*;
 use crate::coord::*;
 use crate::slabplan::*;
+use crate::ops_slab::in_range;
 use crate::ops_attach::*;
 #[cfg(verus_keep_ghost)]
 use crate::index::in_index;
@@ -18,12 +19,405 @@ verus! {
 
 broadcast use vstd::std_specs::hash::group_hash_axioms;
 
-pub open spec fn kmin_ok(ks: Seq<nat>, n: int, k: nat) -> bool {
-    &&& forall|c: int| 0 <= c < n ==> k <= #[trigger] ks[c]
-    &&& n > 0 ==> exists|c: int| 0 <= c < n && #[trigger] ks[c] == k
+/// Snapshot of a lease returned by C1/C2/C6: one page table per paged class, one live slot per
+/// state class.
+pub struct LeaseView {
+    pub tables: Vec<Vec<PageId>>,
+    pub slots: Vec<usize>,
+}
+
+pub open spec fn tables_view(t: Seq<Vec<PageId>>) -> Seq<Seq<PageId>> {
+    t.map_values(|x: Vec<PageId>| x@)
+}
+
+/// C1 success relation: `mid` is `o` after the slab plan, and `n` is `mid` with the new lease
+/// attached in every paged class and a fresh live slot taken in every state class.
+pub open spec fn coord_attached(
+    o: CoordV,
+    mid: CoordV,
+    n: CoordV,
+    toks: Seq<Token>,
+    k: nat,
+    tables: Seq<Seq<PageId>>,
+    slots: Seq<usize>,
+) -> bool {
+    let h = o.next_handle();
+    let m = cdiv(toks.len(), o.b);
+    &&& mid.plan_rel(o, o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+    &&& tables.len() == o.np
+    &&& slots.len() == o.nst()
+    &&& n.id == o.id
+    &&& n.nslab == o.nslab
+    &&& n.sbytes == o.sbytes
+    &&& n.b == o.b
+    &&& n.unit == o.unit
+    &&& n.per == o.per
+    &&& n.np == o.np
+    &&& n.owner == mid.owner
+    &&& n.paged.len() == o.paged.len()
+    &&& n.state.len() == o.state.len()
+    &&& n.slots == mid.slots.insert(h, slots)
+    &&& forall|c: int|
+        0 <= c < o.np ==> {
+            &&& (#[trigger] tables[c]).len() == m
+            &&& attach_choice_k(mid.paged[c], toks, tables[c], k)
+            &&& n.paged[c] == attached(mid.paged[c], toks, tables[c], k)
+            // Hits come from the call-time Index, and an active candidate is used whenever one exists.
+            &&& forall|i: int|
+                #![trigger tables[c][i]]
+                0 <= i < k ==> in_index(o.paged[c].keys, o.paged[c].key_of(toks, i as nat), tables[c][i]) && (
+                o.paged[c].has_active_hit(o.paged[c].key_of(toks, i as nat)) ==> o.paged[c].refs[tables[c][i] as int] > 0)
+        }
+    &&& forall|j: int|
+        0 <= j < o.nst() ==> {
+            &&& mid.state[j].free_set().contains(#[trigger] slots[j])
+            &&& n.state[j] == (StateV {
+                holder: mid.state[j].holder.update(slots[j] as int, Some(h)),
+                w: mid.state[j].w.update(slots[j] as int, None),
+                ..mid.state[j]
+            })
+        }
+}
+
+/// The complete C1 contract of the coordinator.
+pub open spec fn coord_attach_result(o: CoordV, n: CoordV, toks: Seq<Token>, r: Result<(Handle, usize, LeaseView), Error>) -> bool {
+    let m = cdiv(toks.len(), o.b);
+    let ok_in = toks.len() >= 1 && o.fits_m(m);
+    &&& toks.len() == 0 ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::InvalidArgument)
+    &&& (toks.len() > 0 && !o.fits_m(m)) ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::RequestTooLarge)
+    &&& (ok_in && o.next_handle() == u64::MAX) ==> r == Err::<(Handle, usize, LeaseView), Error>(
+        Error::IdentifierExhausted,
+    )
+    &&& (ok_in && o.next_handle() < u64::MAX) ==> (r is Ok || r == Err::<(Handle, usize, LeaseView), Error>(
+        Error::NoCapacity,
+    ))
+    &&& r is Err ==> n == o
+    &&& r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity) ==> exists|k: nat|
+        o.joint_k(toks, m, k) && !o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+    &&& r matches Ok((h, cached, view)) ==> {
+        let k = cached as nat / o.b;
+        &&& ok_in
+        &&& h == Handle { mgr: o.id, id: o.next_handle() }
+        &&& cached as nat == k * o.b
+        &&& o.joint_k(toks, m, k)
+        &&& o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+        &&& exists|mid: CoordV| coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@)
+    }
+}
+
+/// The joint `k*` is unique.
+pub proof fn lemma_joint_k_unique(o: CoordV, toks: Seq<Token>, m: nat, k1: nat, k2: nat)
+    requires
+        o.joint_k(toks, m, k1),
+        o.joint_k(toks, m, k2),
+    ensures
+        k1 == k2,
+{
+    if o.nst() == 0 {
+        if k1 < k2 {
+            let c = choose|c: int| 0 <= c < o.np && !#[trigger] o.paged[c].has_hit(o.paged[c].key_of(toks, k1));
+            assert(o.paged[c].has_hit(o.paged[c].key_of(toks, k1)));
+        }
+        if k2 < k1 {
+            let c = choose|c: int| 0 <= c < o.np && !#[trigger] o.paged[c].has_hit(o.paged[c].key_of(toks, k2));
+            assert(o.paged[c].has_hit(o.paged[c].key_of(toks, k2)));
+        }
+    }
+}
+
+/// C1 success condition as an equivalence: for valid input and a free handle id, `attach`
+/// succeeds iff `Cap(d, Prot)` holds at the unique joint `k*`, and otherwise returns NoCapacity.
+pub proof fn lemma_coord_attach_capacity_iff(
+    o: CoordV,
+    n: CoordV,
+    toks: Seq<Token>,
+    r: Result<(Handle, usize, LeaseView), Error>,
+    k: nat,
+)
+    requires
+        coord_attach_result(o, n, toks, r),
+        toks.len() >= 1,
+        o.fits_m(cdiv(toks.len(), o.b)),
+        o.next_handle() < u64::MAX,
+        o.joint_k(toks, cdiv(toks.len(), o.b), k),
+    ensures
+        r is Ok <==> o.cap(o.attach_demand(toks, cdiv(toks.len(), o.b), k), o.attach_prot(toks, k)),
+        r is Err ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity),
+        r matches Ok((h, cached, view)) ==> cached as nat == k * o.b,
+{
+    let m = cdiv(toks.len(), o.b);
+    if r is Ok {
+        let (h, cached, view) = r->Ok_0;
+        lemma_joint_k_unique(o, toks, m, cached as nat / o.b, k);
+    } else {
+        let k2 = choose|k2: nat| o.joint_k(toks, m, k2) && !o.cap(o.attach_demand(toks, m, k2), o.attach_prot(toks, k2));
+        lemma_joint_k_unique(o, toks, m, k2, k);
+    }
 }
 
 impl Coordinator {
+    /// The minimum of the per-class probe runs is the joint `k*`.
+    pub(crate) proof fn lemma_joint_k(&self, toks: Seq<Token>, m: nat, cap: nat, probes: Seq<Probe>, k: nat)
+        requires
+            self.valid(),
+            m >= 1,
+            cap + 1 <= m,
+            self.nst() > 0 ==> cap == 0,
+            self.nst() == 0 ==> cap + 1 == m,
+            probes.len() == self.np(),
+            k <= cap,
+            forall|c: int|
+                0 <= c < self.np() ==> is_kcap(self.pv(c), toks, cap, (#[trigger] probes[c]).hits@.len() as nat) && k
+                    <= probes[c].hits@.len(),
+            exists|c: int| 0 <= c < self.np() && #[trigger] probes[c].hits@.len() == k,
+        ensures
+            self@.joint_k(toks, m, k),
+    {
+        self.lemma_view();
+        if self.nst() == 0 {
+            assert forall|c: int, i: nat| 0 <= c < self@.np && i < k implies #[trigger] self@.paged[c].has_hit(
+                self@.paged[c].key_of(toks, i),
+            ) by {
+                assert(is_kcap(self.pv(c), toks, cap, probes[c].hits@.len() as nat));
+                assert(self@.paged[c] == self.pv(c));
+            }
+            if k + 1 < m {
+                let c0 = choose|c: int| 0 <= c < self.np() && #[trigger] probes[c].hits@.len() == k;
+                assert(is_kcap(self.pv(c0), toks, cap, probes[c0].hits@.len() as nat));
+                assert(self@.paged[c0] == self.pv(c0));
+            }
+        }
+    }
+
+    /// Facts for committing paged class `c` after the slab plan.
+    pub(crate) proof fn lemma_commit_pre(
+        &self,
+        pre: &Coordinator,
+        toks: Seq<Token>,
+        tp: Seq<Probe>,
+        k: nat,
+        m: nat,
+        d: Seq<usize>,
+        prot: Seq<bool>,
+        c: int,
+    )
+        requires
+            pre.valid(),
+            self.valid(),
+            self.slab_frame(pre, prot),
+            self@.plan_rel(pre@, d, prot),
+            d == pre@.attach_demand(toks, m, k),
+            tp.len() == pre.np(),
+            0 <= c < pre.np(),
+            probe_ok(pre.pv(c), pre.paged@[c].den_log(), toks, tp[c]),
+            tp[c].hits@.len() == k,
+            forall|j: int|
+                #![trigger tp[c].hits@[j]]
+                0 <= j < k && !tp[c].hits@[j].1 ==> prot[tp[c].hits@[j].0 as int / (pre.per_c(c) as int)],
+            k <= m,
+            m <= usize::MAX,
+        ensures
+            probe_ok(self.pv(c), self.paged@[c].den_log(), toks, tp[c]),
+            self.pv(c).free_set().len() >= m - count_active(self.pv(c), toks, k),
+            count_active(self.pv(c), toks, k) == count_active(pre.pv(c), toks, k),
+            forall|key: Digest| #[trigger] self.pv(c).has_active_hit(key) == pre.pv(c).has_active_hit(key),
+            forall|key: Digest, x: PageId| #[trigger] in_index(self.pv(c).keys, key, x) ==> in_index(pre.pv(c).keys, key, x),
+    {
+        assert(self.paged@[c] == self.paged@[c]);
+        let v = pre.pv(c);
+        let w = self.pv(c);
+        assert(pre.paged@[c].valid());
+        assert(self.paged@[c].valid());
+        assert(pre.unit@[c] >= 1);
+        lemma_probe_transfer(v, w, pre.paged@[c].den_log(), toks, tp[c], pre.per_c(c), prot);
+        self.lemma_view();
+        pre.lemma_view();
+        self.lemma_view_cls();
+        assert(self@.cfree(c) >= d[c]);
+        assert(pre@.paged[c] == v);
+        lemma_n_active_eq(v, toks, tp[c].hits@, k);
+        assert(count_active(v, toks, k) <= k);
+        assert(m as int - count_active(v, toks, k) as int <= usize::MAX) by {
+            assert(m <= usize::MAX);
+        }
+        assert(d[c] as nat == m - count_active(v, toks, k));
+        assert(self@.paged[c] == w);
+    }
+
+    /// `valid` after committing the new lease `h` in every class.
+    pub(crate) proof fn lemma_attach_valid(
+        &self,
+        mid: &Coordinator,
+        toks: Seq<Token>,
+        k: nat,
+        h: u64,
+        tabs: Seq<Seq<PageId>>,
+        sl: Seq<usize>,
+    )
+        requires
+            mid.valid(),
+            self.id == mid.id,
+            self.nslab == mid.nslab,
+            self.sbytes == mid.sbytes,
+            self.b == mid.b,
+            self.npaged == mid.npaged,
+            self.unit@ == mid.unit@,
+            self.per@ == mid.per@,
+            self.owner@ == mid.owner@,
+            self.fs == mid.fs,
+            self.paged@.len() == mid.paged@.len(),
+            self.state@.len() == mid.state@.len(),
+            h == mid.pv(0).next_handle,
+            h < u64::MAX,
+            tabs.len() == mid.np(),
+            sl.len() == mid.nst(),
+            mid.nst() > 0 ==> k == 0,
+            mid@.fits_m(cdiv(toks.len(), mid.b as nat)),
+            forall|c: int|
+                0 <= c < mid.np() ==> {
+                    &&& (#[trigger] self.paged@[c]).valid()
+                    &&& attach_choice_k(mid.pv(c), toks, tabs[c], k)
+                    &&& self.pv(c) == attached(mid.pv(c), toks, tabs[c], k)
+                },
+            forall|j: int|
+                0 <= j < mid.nst() ==> {
+                    &&& (#[trigger] self.state@[j]).valid()
+                    &&& mid.sv(j).free_set().contains(sl[j])
+                    &&& self.sv(j) == (StateV {
+                        holder: mid.sv(j).holder.update(sl[j] as int, Some(h)),
+                        w: mid.sv(j).w.update(sl[j] as int, None),
+                        ..mid.sv(j)
+                    })
+                },
+            self.slots@.dom() == mid.slots@.dom().insert(h),
+            self.slots@[h]@ == sl,
+            forall|h2: u64| #[trigger] mid.slots@.contains_key(h2) ==> self.slots@[h2] == mid.slots@[h2],
+        ensures
+            self.valid(),
+    {
+        mid.lemma_view();
+        assert(mid.paged@[0].valid());
+        mid.paged@[0].lemma_handles_lt();
+        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: None };
+        assert forall|c: int| 0 <= c < mid.np() implies (#[trigger] self.pv(c)).leases.dom() == mid.pv(0).leases.dom().insert(h)
+            && self.pv(c).pend == mid.pv(0).pend && self.pv(c).next_handle == (h + 1) as u64 && self.pv(c).next_ticket
+            == mid.pv(0).next_ticket && self.pv(c).p == mid.pv(c).p && self.pv(c).b == mid.pv(c).b && self.pv(c).ns == mid.pv(c).ns
+            && self.pv(c).own == mid.pv(c).own by {
+            assert(self.paged@[c].valid());
+            assert(mid.paged@[c] == mid.paged@[c]);
+            assert(self.pv(c).leases.dom() =~= mid.pv(c).leases.dom().insert(h));
+        }
+        // cfg_ok unchanged.
+        assert(self.cfg_ok());
+        assert(self.pools_ok()) by {
+            assert forall|i: int| 0 <= i < self.np() implies {
+                &&& #[trigger] self.paged@[i].valid()
+                &&& self.pv(i).p == self.cunits(i)
+                &&& self.pv(i).b == self.b as nat
+                &&& self.pv(i).ns == self.pv(0).ns
+            } by {
+                assert(mid.paged@[i].valid());
+                assert(self.pv(i).p == mid.pv(i).p);
+                assert(self.pv(0).ns == mid.pv(0).ns);
+            }
+            assert forall|j: int| 0 <= j < self.nst() implies {
+                &&& #[trigger] self.state@[j].valid()
+                &&& self.sv(j).p == self.cunits(self.np() + j)
+            } by {
+                assert(mid.state@[j].valid());
+            }
+        }
+        assert(self.own_ok()) by {
+            assert forall|c: int, x: int| 0 <= c < self.ncls() && 0 <= x < self.cunits(c) implies #[trigger] self.cown(c, x)
+                == (self.owner@[x / (self.per_c(c) as int)] == c + 1) by {
+                assert(mid.cown(c, x) == (mid.owner@[x / (mid.per_c(c) as int)] == c + 1));
+                if c < self.np() {
+                    assert(self.pv(c).own == mid.pv(c).own);
+                } else {
+                    assert(self.sv(c - self.np()).own == mid.sv(c - self.np()).own);
+                }
+            }
+        }
+        assert(self.lock_ok()) by {
+            assert forall|i: int| #![trigger self.paged@[i]] 0 <= i < self.np() implies {
+                &&& self.pv(i).leases.dom() == self.pv(0).leases.dom()
+                &&& self.pv(i).pend == self.pv(0).pend
+                &&& self.pv(i).next_handle == self.pv(0).next_handle
+                &&& self.pv(i).next_ticket == self.pv(0).next_ticket
+            } by {
+                assert(self.pv(i).leases.dom() == mid.pv(0).leases.dom().insert(h));
+                assert(self.pv(0).leases.dom() == mid.pv(0).leases.dom().insert(h));
+            }
+            assert forall|i: int, h2: u64| 0 <= i < self.np() && #[trigger] self.pv(i).leases.contains_key(h2) implies {
+                &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
+                &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
+                &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+            } by {
+                assert(self.pv(i) == attached(mid.pv(i), toks, tabs[i], k));
+                assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
+                if h2 != h {
+                    assert(mid.pv(i).leases.contains_key(h2));
+                    assert(mid.paged@[i] == mid.paged@[i]);
+                }
+            }
+            assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
+                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+            ) by {
+                assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
+                if h2 != h {
+                    assert(mid.pv(0).leases.contains_key(h2));
+                }
+            }
+        }
+        assert(self.slots_ok()) by {
+            assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
+            assert(self.slots@.dom() =~= self.pv(0).leases.dom());
+            assert forall|h2: u64| #[trigger] self.slots@.contains_key(h2) implies self.slots@[h2]@.len() == self.nst() by {
+                if h2 != h {
+                    assert(mid.slots@.contains_key(h2));
+                }
+            }
+            assert forall|h2: u64, j: int|
+                #![trigger self.slots@[h2]@[j]]
+                self.slots@.contains_key(h2) && 0 <= j < self.nst() implies {
+                let x = self.slots@[h2]@[j];
+                let l2 = self.pv(0).leases[h2];
+                &&& (x as nat) < self.sv(j).p
+                &&& self.sv(j).holder[x as int] == Some(h2)
+                &&& l2.c > 0 ==> self.sv(j).w[x as int] == Some(l2.toks.subrange(0, l2.c as int))
+            } by {
+                assert(self.state@[j].valid());
+                assert(mid.sv(j).free_set().contains(sl[j]));
+                mid.state@[j].lemma_free();
+                if h2 == h {
+                    assert(k == 0);
+                    assert(self.pv(0).leases[h].c == 0);
+                } else {
+                    assert(mid.slots@.contains_key(h2));
+                    let x = mid.slots@[h2]@[j];
+                    assert(mid.sv(j).holder[x as int] == Some(h2));
+                    assert(x != sl[j]);
+                    assert(self.pv(0).leases[h2] == mid.pv(0).leases[h2]);
+                }
+            }
+            assert forall|j: int, x: int|
+                #![trigger self.sv(j).holder[x]]
+                0 <= j < self.nst() && 0 <= x < self.sv(j).p && self.sv(j).holder[x] is Some implies {
+                let h2 = self.sv(j).holder[x]->Some_0;
+                &&& self.slots@.contains_key(h2)
+                &&& self.slots@[h2]@[j] as int == x
+            } by {
+                assert(self.state@[j].valid());
+                if x != sl[j] as int {
+                    assert(mid.sv(j).holder[x] is Some);
+                    let h2 = mid.sv(j).holder[x]->Some_0;
+                    assert(mid.slots@.contains_key(h2));
+                    assert(h2 < h);
+                }
+            }
+        }
+    }
+
     /// `Fits(m)`, executable.
     pub(crate) fn fits_exec(&self, m: usize) -> (r: bool)
         requires
