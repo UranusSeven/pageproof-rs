@@ -101,8 +101,34 @@ pub open spec fn coord_attach_result(o: CoordV, n: CoordV, toks: Seq<Token>, r: 
         &&& cached as nat == k * o.b
         &&& o.joint_k(toks, m, k)
         &&& o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
-        &&& exists|mid: CoordV| coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@)
+        &&& exists|mid: CoordV| #[trigger] coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@)
     }
+}
+
+/// Assembles the success case of `coord_attach_result`.
+pub proof fn lemma_attach_ok(o: CoordV, mid: CoordV, n: CoordV, toks: Seq<Token>, k: nat, h: Handle, cached: usize, view: LeaseView)
+    requires
+        toks.len() >= 1,
+        o.b >= 1,
+        o.fits_m(cdiv(toks.len(), o.b)),
+        o.next_handle() < u64::MAX,
+        h == (Handle { mgr: o.id, id: o.next_handle() }),
+        cached as nat == k * o.b,
+        o.joint_k(toks, cdiv(toks.len(), o.b), k),
+        o.cap(o.attach_demand(toks, cdiv(toks.len(), o.b), k), o.attach_prot(toks, k)),
+        coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@),
+    ensures
+        coord_attach_result(o, n, toks, Ok((h, cached, view))),
+{
+    lemma_slot_decomp(k, 0, o.b);
+    assert((cached as nat) / o.b == k);
+    let r = Ok::<(Handle, usize, LeaseView), Error>((h, cached, view));
+    let m = cdiv(toks.len(), o.b);
+    assert(r is Ok);
+    let (h2, c2, v2) = r->Ok_0;
+    assert(c2 == cached);
+    assert(v2 == view);
+    assert(coord_attached(o, mid, n, toks, k, tables_view(v2.tables@), v2.slots@));
 }
 
 /// The joint `k*` is unique.
@@ -1233,6 +1259,319 @@ impl Coordinator {
             }
         }
         (cached, lv)
+    }
+}
+
+
+impl Coordinator {
+    /// The run of every probe can be truncated to `k`, keeping `probe_ok`.
+    fn truncate_all(&self, probes: Vec<Probe>, k: usize, Ghost(toks): Ghost<Seq<Token>>) -> (r: Vec<Probe>)
+        requires
+            self.valid(),
+            probes@.len() == self.np(),
+            forall|c: int|
+                0 <= c < self.np() ==> probe_ok(self.pv(c), self.paged@[c].den_log(), toks, #[trigger] probes@[c]) && k
+                    <= probes@[c].hits@.len(),
+        ensures
+            r@.len() == self.np(),
+            forall|c: int|
+                0 <= c < self.np() ==> probe_ok(self.pv(c), self.paged@[c].den_log(), toks, #[trigger] r@[c]) && r@[c].hits@
+                    == probes@[c].hits@.subrange(0, k as int),
+    {
+        let mut out: Vec<Probe> = Vec::new();
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                self.valid(),
+                probes@.len() == self.np(),
+                forall|c2: int|
+                    0 <= c2 < self.np() ==> probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks, #[trigger] probes@[c2]) && k
+                        <= probes@[c2].hits@.len(),
+                c <= self.npaged,
+                out@.len() == c,
+                forall|c2: int|
+                    0 <= c2 < c ==> probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks, #[trigger] out@[c2]) && out@[c2].hits@
+                        == probes@[c2].hits@.subrange(0, k as int),
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int].valid());
+            }
+            let pr = copy_probe(&probes[c]);
+            proof {
+                lemma_probe_ok_views(self.pv(c as int), self.paged@[c as int].den_log(), toks, probes@[c as int], pr);
+            }
+            let t = self.paged[c].truncate_probe(pr, k, Ghost(toks));
+            let ghost o0 = out@;
+            out.push(t);
+            proof {
+                assert forall|c2: int| 0 <= c2 < c + 1 implies probe_ok(self.pv(c2), self.paged@[c2].den_log(), toks, #[trigger] out@[c2])
+                    && out@[c2].hits@ == probes@[c2].hits@.subrange(0, k as int) by {
+                    if c2 < c {
+                        assert(out@[c2] == o0[c2]);
+                    }
+                }
+            }
+            c += 1;
+        }
+        out
+    }
+
+    proof fn lemma_coord_attached(
+        o: &Coordinator,
+        pre: &Coordinator,
+        mid: &Coordinator,
+        fin: &Coordinator,
+        toks: Seq<Token>,
+        k: nat,
+        m: nat,
+        tp: &Vec<Probe>,
+        d: Seq<usize>,
+        prot: Seq<bool>,
+        view: &LeaseView,
+    )
+        requires
+            o.valid(),
+            pre.valid(),
+            mid.valid(),
+            o@ == pre@,
+            forall|c: int| 0 <= c < o.np() ==> #[trigger] pre.pv(c) == o.pv(c),
+            m == cdiv(toks.len(), o.b as nat),
+            d == o@.attach_demand(toks, m, k),
+            prot == o@.attach_prot(toks, k),
+            mid@.plan_rel(pre@, d, prot),
+            mid.slab_frame(pre, prot),
+            tp@.len() == o.np(),
+            forall|c: int|
+                0 <= c < o.np() ==> probe_ok(pre.pv(c), pre.paged@[c].den_log(), toks, #[trigger] tp@[c])
+                    && tp@[c].hits@.len() == k,
+            fin.valid(),
+            fin.id == mid.id,
+            fin.nslab == mid.nslab,
+            fin.sbytes == mid.sbytes,
+            fin.b == mid.b,
+            fin.npaged == mid.npaged,
+            fin.unit@ == mid.unit@,
+            fin.per@ == mid.per@,
+            fin.owner@ == mid.owner@,
+            fin.paged@.len() == mid.paged@.len(),
+            fin.state@.len() == mid.state@.len(),
+            view.tables@.len() == mid.np(),
+            view.slots@.len() == mid.nst(),
+            fin.slots@.dom() == mid.slots@.dom().insert(mid.next_handle()),
+            fin.slots@[mid.next_handle()]@ == view.slots@,
+            forall|h2: u64| #[trigger] mid.slots@.contains_key(h2) ==> fin.slots@[h2] == mid.slots@[h2],
+            mid.next_handle() == o.next_handle(),
+            forall|c: int|
+                0 <= c < mid.np() ==> {
+                    &&& (#[trigger] view.tables@[c])@.len() == m
+                    &&& attach_choice_k(mid.pv(c), toks, view.tables@[c]@, k)
+                    &&& fin.pv(c) == attached(mid.pv(c), toks, view.tables@[c]@, k)
+                },
+            forall|j: int|
+                0 <= j < mid.nst() ==> {
+                    &&& mid.sv(j).free_set().contains(#[trigger] view.slots@[j])
+                    &&& fin.sv(j) == (StateV {
+                        holder: mid.sv(j).holder.update(view.slots@[j] as int, Some(mid.next_handle())),
+                        w: mid.sv(j).w.update(view.slots@[j] as int, None),
+                        ..mid.sv(j)
+                    })
+                },
+        ensures
+            coord_attached(o@, mid@, fin@, toks, k, tables_view(view.tables@), view.slots@),
+    {
+        let ov = o@;
+        let tabs = tables_view(view.tables@);
+        mid.lemma_view();
+        fin.lemma_view();
+        o.lemma_view();
+        pre.lemma_view();
+        let h = ov.next_handle();
+        assert(fin@.slots =~= mid@.slots.insert(h, view.slots@)) by {
+            assert forall|h2: u64| #[trigger] fin@.slots.contains_key(h2) implies fin@.slots[h2] == mid@.slots.insert(
+                h,
+                view.slots@,
+            )[h2] by {
+                if h2 != h {
+                    assert(mid.slots@.contains_key(h2));
+                }
+            }
+        }
+        assert forall|c: int| 0 <= c < ov.np implies {
+            &&& (#[trigger] tabs[c]).len() == m
+            &&& attach_choice_k(mid@.paged[c], toks, tabs[c], k)
+            &&& fin@.paged[c] == attached(mid@.paged[c], toks, tabs[c], k)
+            &&& forall|i: int|
+                #![trigger tabs[c][i]]
+                0 <= i < k ==> in_index(ov.paged[c].keys, ov.paged[c].key_of(toks, i as nat), tabs[c][i]) && (
+                ov.paged[c].has_active_hit(ov.paged[c].key_of(toks, i as nat)) ==> ov.paged[c].refs[tabs[c][i] as int] > 0)
+        } by {
+            assert(tabs[c] == view.tables@[c]@);
+            let t = tabs[c];
+            assert(ov.paged[c] == pre.pv(c));
+            assert(mid@.paged[c] == mid.pv(c));
+            assert(mid.paged@[c] == mid.paged@[c]);
+            assert(mid.pv(c) == (MgrV { own: mid.pv(c).own, keys: mid.pv(c).keys, ..pre.pv(c) }));
+            assert(mid.paged@[c].valid());
+            assert(pre.paged@[c].valid());
+            assert forall|i: int| #![trigger t[i]] 0 <= i < k implies in_index(ov.paged[c].keys, ov.paged[c].key_of(toks, i as nat), t[i])
+                && (ov.paged[c].has_active_hit(ov.paged[c].key_of(toks, i as nat)) ==> ov.paged[c].refs[t[i] as int] > 0) by {
+                let key = pre.pv(c).key_of(toks, i as nat);
+                assert(attach_choice_k(mid.pv(c), toks, t, k));
+                assert(mid.pv(c).key_of(toks, i as nat) == key);
+                assert(in_index(mid.pv(c).keys, key, t[i]));
+                let x = t[i];
+                assert(mid.pv(c).keys[x as int] == pre.pv(c).keys[x as int] || (mid.pv(c).keys[x as int] is None
+                    && pre.pv(c).refs[x as int] == 0 && !prot[x as int / (mid.per_c(c) as int)]));
+                assert(in_index(pre.pv(c).keys, key, x));
+                if pre.pv(c).has_active_hit(key) {
+                    let y = choose|y: PageId| #[trigger] in_index(pre.pv(c).keys, key, y) && pre.pv(c).refs[y as int] > 0;
+                    assert(mid.pv(c).keys[y as int] == pre.pv(c).keys[y as int] || (mid.pv(c).keys[y as int] is None
+                        && pre.pv(c).refs[y as int] == 0 && !prot[y as int / (mid.per_c(c) as int)]));
+                    assert(in_index(mid.pv(c).keys, key, y));
+                    assert(mid.pv(c).has_active_hit(key));
+                }
+            }
+        }
+        assert forall|j: int| 0 <= j < ov.nst() implies {
+            &&& mid@.state[j].free_set().contains(#[trigger] view.slots@[j])
+            &&& fin@.state[j] == (StateV {
+                holder: mid@.state[j].holder.update(view.slots@[j] as int, Some(h)),
+                w: mid@.state[j].w.update(view.slots@[j] as int, None),
+                ..mid@.state[j]
+            })
+        } by {
+            assert(mid@.state[j] == mid.sv(j));
+            assert(fin@.state[j] == fin.sv(j));
+        }
+        assert(tabs.len() == ov.np);
+    }
+
+    /// C1. `attach(T)` across every class (contract v0.3 §6 C1).
+    pub fn attach(&mut self, toks: &[Token]) -> (r: Result<(Handle, usize, LeaseView), Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_attach_result(old(self)@, final(self)@, toks@, r),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        let n = toks.len();
+        if n == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let b = self.b;
+        proof {
+            self.lemma_view();
+            self.lemma_shape();
+        }
+        let m = (n - 1) / b + 1;
+        proof {
+            vstd::arithmetic::div_mod::lemma_div_plus_one((n - 1) as int, b as int);
+            assert(((n - 1 + b) as int) / (b as int) == ((n - 1) as int) / (b as int) + 1);
+            assert(m as nat == cdiv(n as nat, b as nat));
+        }
+        if !self.fits_exec(m) {
+            return Err(Error::RequestTooLarge);
+        }
+        proof {
+            self.paged@[0].lemma_valid();
+            assert(self.paged@[0].valid());
+        }
+        let hid = self.paged[0].next_handle_exec();
+        if hid == u64::MAX {
+            return Err(Error::IdentifierExhausted);
+        }
+        proof {
+            lemma_cdiv_props(n as nat, b as nat);
+            assert(m >= 1);
+            lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, m as nat, 0);
+            self.lemma_nslab_bound();
+            assert(self.unit@[0] >= 1);
+            assert((m as nat) <= self.cunits(0));
+        }
+        let cap = if self.state.len() > 0 { 0 } else { m - 1 };
+        let (probes, kmin) = self.joint_probe(toks, cap);
+        let ghost s1 = *self;
+        proof {
+            self.lemma_joint_k(toks@, m as nat, cap as nat, probes@, kmin as nat);
+        }
+        let tp = self.truncate_all(probes, kmin, Ghost(toks@));
+        let prot = self.compute_prot(toks, &tp, kmin);
+        proof {
+            assert forall|c: int| 0 <= c < self.np() implies probe_ok(self.pv(c), self.paged@[c].den_log(), toks@, #[trigger] tp@[c])
+                && kmin <= tp@[c].hits@.len() by {}
+            self.lemma_nslab_bound();
+            assert((m as nat) <= max_slots());
+        }
+        let d = self.attach_demand_exec(toks, &tp, kmin, m);
+        if !self.check_cap(&d, &prot) {
+            proof {
+                assert(ov.joint_k(toks@, m as nat, kmin as nat));
+                assert(!ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
+            }
+            return Err(Error::NoCapacity);
+        }
+        let ghost pre = *self;
+        self.run_plan(&d, &prot);
+        let ghost mid = *self;
+        proof {
+            // Probes stay valid; every class has room for its share of the lease.
+            assert forall|c: int| 0 <= c < pre.np() implies {
+                &&& probe_ok(mid.pv(c), mid.paged@[c].den_log(), toks@, #[trigger] tp@[c])
+                &&& tp@[c].hits@.len() == kmin
+                &&& mid.pv(c).free_set().len() >= m - count_active(mid.pv(c), toks@, kmin as nat)
+            } by {
+                assert(tp@[c].hits@.len() == kmin);
+                mid.lemma_commit_pre(&pre, toks@, tp@, kmin as nat, m as nat, d@, prot@, c);
+            }
+            mid.lemma_view();
+            mid.lemma_view_cls();
+            assert forall|j: int| 0 <= j < mid.nst() implies #[trigger] mid.sv(j).free_set().len() >= 1 by {
+                assert(mid@.cfree(mid.np() + j) >= d@[mid.np() + j]);
+                assert(mid@.state[j] == mid.sv(j));
+            }
+            assert(mid.paged@[0] == mid.paged@[0]);
+            assert(mid.next_handle() == o.next_handle());
+            assert(mid@.fits_m(m as nat));
+        }
+        let (cached, view) = self.attach_commit_all(toks, tp, Ghost(kmin as nat), Ghost(m as nat));
+        proof {
+            self.lemma_view();
+            o.lemma_view();
+            pre.lemma_view();
+            assert forall|c: int| 0 <= c < o.np() implies #[trigger] pre.pv(c) == o.pv(c) by {
+                assert(pre@.paged[c] == o@.paged[c]);
+            }
+            Self::lemma_coord_attached(&o, &pre, &mid, self, toks@, kmin as nat, m as nat, &tp, d@, prot@, &view);
+            assert((cached as nat) / ov.b == kmin as nat) by {
+                lemma_slot_decomp(kmin as nat, 0, ov.b);
+            }
+        }
+        proof {
+            assert(hid == ov.next_handle()) by {
+                assert(o.paged@[0] == o.paged@[0]);
+                o.lemma_view();
+            }
+            assert(self.id == ov.id) by {
+                o.lemma_view();
+            }
+            assert(ov.joint_k(toks@, m as nat, kmin as nat));
+            assert(ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
+            assert(ov.fits_m(m as nat));
+            assert(cached as nat == kmin * ov.b) by {
+                o.lemma_view();
+            }
+            assert(m as nat == cdiv(toks@.len(), ov.b)) by {
+                o.lemma_view();
+            }
+            let midv = mid@;
+            assert(coord_attached(ov, midv, self@, toks@, kmin as nat, tables_view(view.tables@), view.slots@));
+            assert(ov == old(self)@);
+            lemma_attach_ok(ov, midv, self@, toks@, kmin as nat, Handle { mgr: self.id, id: hid }, cached, view);
+        }
+        Ok((Handle { mgr: self.id, id: hid }, cached, view))
     }
 }
 
