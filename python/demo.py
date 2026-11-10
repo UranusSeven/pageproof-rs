@@ -66,3 +66,47 @@ for h in (h1b, h2):
 assert mgr.free_pages == mgr.num_pages
 print(f"all released: free={mgr.free_pages}")
 print("pageproof demo: ok")
+
+# ---------------------------------------------------------------------------------------------
+# v0.3: a slab arena shared by two paged classes and one recurrent-state class.
+# ---------------------------------------------------------------------------------------------
+# Unit sizes (bytes): paged class 0 = 16, paged class 1 = 64, state = 64; slab = lcm = 64 B.
+co = pp.Coordinator(6, 64, [16, 64], [64], B, b"dummy-v0.3")
+print(f"coordinator arena: {co.arena()}")
+
+
+def run_c(h, n):
+    plan = co.begin_write(h, n)
+    assert len(plan.write_slots) == 2 and all(len(w) == n for w in plan.write_slots)
+    for c, (ws, pt) in enumerate(zip(plan.write_slots, plan.page_tables)):
+        for j, s in zip(plan.positions, ws):
+            assert s == pt[j // B] * B + j % B, (c, j, s)
+    return plan, co.finish_write(plan.ticket)
+
+
+ha, cached, la = co.attach(list(range(200, 208)))
+assert cached == 0, "a state class disables prefix hits (D13)"
+plan, _ = run_c(ha, 8)
+assert plan.init and plan.state_slots == la["slots"]
+print(f"hybrid lease attached and prefilled: {co.inspect(ha)}")
+
+co.extend(ha, [1])
+plan, _ = run_c(ha, 1)
+assert not plan.init, "decode reads the live state slot"
+co.release(ha)
+print(f"after release (slabs kept, reclaimable): {co.arena()}")
+
+# A burst of short leases forces reclaim of idle keyed slabs into the class that needs them.
+hs = []
+while True:
+    try:
+        h, _, _ = co.attach([len(hs)] * 4)
+    except pp.BlockManagerError as e:
+        print(f"arena full after {len(hs)} leases: {e}; arena={co.arena()}")
+        break
+    run_c(h, 4)
+    hs.append(h)
+assert len(hs) >= 2
+for h in hs:
+    co.release(h)
+print("pageproof coordinator demo: ok")
