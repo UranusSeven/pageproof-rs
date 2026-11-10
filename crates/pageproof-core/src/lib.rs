@@ -19,6 +19,7 @@ pub mod ops_slab;
 pub mod state;
 pub mod cnt;
 pub mod coord;
+pub mod slabplan;
 
 use vstd::prelude::*;
 

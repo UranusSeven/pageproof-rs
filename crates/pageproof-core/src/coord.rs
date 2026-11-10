@@ -208,74 +208,30 @@ impl CoordV {
         }
     }
 
-    pub open spec fn sum_need(self, d: Seq<usize>, k: int) -> nat
-        decreases k,
-    {
-        if k <= 0 {
-            0
-        } else {
-            self.sum_need(d, k - 1) + self.need(k - 1, d[k - 1] as nat)
-        }
+    pub open spec fn needf(self, d: Seq<usize>) -> spec_fn(int) -> nat {
+        |c: int| self.need(c, d[c] as nat)
     }
 
-    pub open spec fn sum_give(self, d: Seq<usize>, prot: Seq<bool>, k: int) -> nat
-        decreases k,
-    {
-        if k <= 0 {
-            0
-        } else {
-            self.sum_give(d, prot, k - 1) + self.give(k - 1, d[k - 1] as nat, prot)
-        }
+    pub open spec fn givef(self, d: Seq<usize>, prot: Seq<bool>) -> spec_fn(int) -> nat {
+        |c: int| self.give(c, d[c] as nat, prot)
+    }
+
+    /// `Σ_c need_c`.
+    pub open spec fn sum_need(self, d: Seq<usize>) -> nat {
+        nsum(self.ncls() as int, self.needf(d))
+    }
+
+    /// `Σ_c give_c`.
+    pub open spec fn sum_give(self, d: Seq<usize>, prot: Seq<bool>) -> nat {
+        nsum(self.ncls() as int, self.givef(d, prot))
     }
 
     /// `Cap(d, Prot)` of §3.5.
     pub open spec fn cap(self, d: Seq<usize>, prot: Seq<bool>) -> bool {
-        self.sum_need(d, self.ncls() as int) <= self.fcount() + self.sum_give(d, prot, self.ncls() as int)
+        self.sum_need(d) <= self.fcount() + self.sum_give(d, prot)
     }
 
     /// Slabs class `c` gained since `o` / lost since `o`.
-    pub open spec fn gpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
-        |s: int| self.owner[s] == c + 1 && o.owner[s] != c + 1
-    }
-
-    pub open spec fn lpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
-        |s: int| o.owner[s] == c + 1 && self.owner[s] != c + 1
-    }
-
-    pub open spec fn gained(self, o: CoordV, c: int) -> nat {
-        cnt(self.nslab as int, self.gpred(o, c))
-    }
-
-    pub open spec fn lost(self, o: CoordV, c: int) -> nat {
-        cnt(self.nslab as int, self.lpred(o, c))
-    }
-
-    pub open spec fn sum_lost(self, o: CoordV, k: int) -> nat
-        decreases k,
-    {
-        if k <= 0 {
-            0
-        } else {
-            self.sum_lost(o, k - 1) + self.lost(o, k - 1)
-        }
-    }
-
-    /// The slab plan of §3.5 rules 1–3 took `o` to `self` for demand `d` and protection `prot`:
-    /// class `c` gained exactly `need_c` slabs and gave up at most `give_c`; every slab that changed
-    /// owner was free or idle and unprotected; reclaim happened exactly when free slabs ran out.
-    pub open spec fn plan_done(self, o: CoordV, d: Seq<usize>, prot: Seq<bool>) -> bool {
-        let tot = o.sum_need(d, o.ncls() as int);
-        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.gained(o, c) == o.need(c, d[c] as nat) && self.lost(o, c)
-            <= o.give(c, d[c] as nat, prot)
-        &&& forall|s: int|
-            0 <= s < o.nslab && #[trigger] self.owner[s] != o.owner[s] ==> o.owner[s] == 0 || (!prot[s] && o.slab_idle(
-                o.owner[s] - 1,
-                s as nat,
-            ))
-        &&& self.sum_lost(o, o.ncls() as int) == if tot > o.fcount() { (tot - o.fcount()) as nat } else { 0nat }
-        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.cfree(c) >= d[c]
-    }
-
     /// The joint `k*` of C1.
     pub open spec fn joint_k(self, toks: Seq<Token>, m: nat, k: nat) -> bool {
         &&& k + 1 <= m
@@ -334,7 +290,7 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Public view.
-    pub closed spec fn view(&self) -> CoordV {
+    pub open(crate) spec fn view(&self) -> CoordV {
         CoordV {
             id: self.id,
             nslab: self.nslab as nat,
@@ -351,7 +307,7 @@ impl Coordinator {
     }
 
     /// Public validity.
-    pub closed spec fn inv(&self) -> bool {
+    pub open(crate) spec fn inv(&self) -> bool {
         self.valid()
     }
 
@@ -601,6 +557,24 @@ impl Coordinator {
         &&& self.slots_ok()
     }
 
+    /// `self` is `o` after one slab move at slab `s`: owners differ at most at `s`, and units of
+    /// other slabs keep their ownership and idleness.
+    pub(crate) open spec fn moved(&self, o: &Coordinator, s: int) -> bool {
+        &&& o.valid()
+        &&& self.valid()
+        &&& self.nslab == o.nslab
+        &&& self.per@ == o.per@
+        &&& self.unit@ == o.unit@
+        &&& self.npaged == o.npaged
+        &&& self.paged@.len() == o.paged@.len()
+        &&& self.state@.len() == o.state@.len()
+        &&& 0 <= s < self.nslab
+        &&& forall|s2: int| 0 <= s2 < self.nslab && s2 != s ==> #[trigger] self.owner@[s2] == o.owner@[s2]
+        &&& forall|c2: int, x: int|
+            #![trigger self.cidle(c2, x)]
+            0 <= c2 < o.ncls() && 0 <= x < o.cunits(c2) && x / (o.per_c(c2) as int) != s ==> self.cidle(c2, x) == o.cidle(c2, x)
+    }
+
     /// Same configuration and same lease/slot structure; pools differ at most by ownership,
     /// revoked keys of unreferenced pages outside `prot`, and `⊥` provenance of free state units
     /// (the effect of slab moves, §3.5 rules 1–3).
@@ -718,6 +692,8 @@ impl Coordinator {
                 #![trigger final(self).cown(c2, x)]
                 0 <= c2 < old(self).ncls() && 0 <= x < old(self).cunits(c2) && x / (old(self).per_c(c2) as int) != s as int
                     ==> final(self).cidle(c2, x) == old(self).cidle(c2, x) && final(self).cown(c2, x) == old(self).cown(c2, x),
+            forall|i: int| 0 <= i < old(self).np() ==> (#[trigger] final(self).pv(i)).keys == old(self).pv(i).keys,
+            final(self).moved(old(self), s as int),
     {
         let ghost o = *self;
         let per = self.per[c];
@@ -755,6 +731,11 @@ impl Coordinator {
         proof {
             self.lemma_move_own(&o, s, c, lo, true);
             self.lemma_unit_frame(&o, s, c, lo, true);
+            assert forall|i: int| 0 <= i < o.np() implies (#[trigger] self.pv(i)).keys == o.pv(i).keys by {
+                if i != c as int {
+                    assert(self.paged@[i] == o.paged@[i]);
+                }
+            }
         }
     }
 
@@ -780,6 +761,7 @@ impl Coordinator {
                 #![trigger final(self).cown(c2, x)]
                 0 <= c2 < old(self).ncls() && 0 <= x < old(self).cunits(c2) && x / (old(self).per_c(c2) as int) != s as int
                     ==> final(self).cidle(c2, x) == old(self).cidle(c2, x) && final(self).cown(c2, x) == old(self).cown(c2, x),
+            final(self).moved(old(self), s as int),
     {
         let ghost o = *self;
         let per = self.per[c];

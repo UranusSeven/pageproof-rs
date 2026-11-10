@@ -191,4 +191,129 @@ pub proof fn lemma_cnt_imp(n: int, f: spec_fn(int) -> bool, g: spec_fn(int) -> b
     }
 }
 
+/// `Σ_{i<k} f(i)`.
+pub open spec fn nsum(k: int, f: spec_fn(int) -> nat) -> nat
+    decreases k,
+{
+    if k <= 0 {
+        0
+    } else {
+        nsum(k - 1, f) + f(k - 1)
+    }
+}
+
+pub proof fn lemma_nsum_ext(k: int, f: spec_fn(int) -> nat, g: spec_fn(int) -> nat)
+    requires
+        forall|i: int| 0 <= i < k ==> #[trigger] f(i) == g(i),
+    ensures
+        nsum(k, f) == nsum(k, g),
+    decreases k,
+{
+    if k > 0 {
+        lemma_nsum_ext(k - 1, f, g);
+    }
+}
+
+pub proof fn lemma_nsum_point(k: int, f: spec_fn(int) -> nat, g: spec_fn(int) -> nat, c: int)
+    requires
+        0 <= c < k,
+        forall|i: int| 0 <= i < k && i != c ==> #[trigger] f(i) == g(i),
+    ensures
+        nsum(k, g) + f(c) == nsum(k, f) + g(c),
+    decreases k,
+{
+    if c < k - 1 {
+        lemma_nsum_point(k - 1, f, g, c);
+    } else {
+        lemma_nsum_ext(k - 1, f, g);
+    }
+}
+
+pub proof fn lemma_nsum_ge(k: int, f: spec_fn(int) -> nat, g: spec_fn(int) -> nat)
+    requires
+        forall|i: int| 0 <= i < k ==> #[trigger] f(i) >= g(i),
+    ensures
+        nsum(k, f) >= nsum(k, g),
+    decreases k,
+{
+    if k > 0 {
+        lemma_nsum_ge(k - 1, f, g);
+    }
+}
+
+pub proof fn lemma_nsum_zero(k: int, f: spec_fn(int) -> nat)
+    requires
+        forall|i: int| 0 <= i < k ==> #[trigger] f(i) == 0,
+    ensures
+        nsum(k, f) == 0,
+    decreases k,
+{
+    if k > 0 {
+        lemma_nsum_zero(k - 1, f);
+    }
+}
+
+pub proof fn lemma_nsum_pos(k: int, f: spec_fn(int) -> nat)
+    requires
+        nsum(k, f) > 0,
+    ensures
+        exists|i: int| 0 <= i < k && #[trigger] f(i) > 0,
+    decreases k,
+{
+    if k > 0 && f(k - 1) == 0 {
+        lemma_nsum_pos(k - 1, f);
+    }
+}
+
+pub proof fn lemma_nsum_le(k: int, f: spec_fn(int) -> nat, i: int)
+    requires
+        0 <= i < k,
+    ensures
+        f(i) <= nsum(k, f),
+    decreases k,
+{
+    if i < k - 1 {
+        lemma_nsum_le(k - 1, f, i);
+    }
+}
+
+pub proof fn lemma_nsum_bound(k: int, f: spec_fn(int) -> nat, bnd: nat)
+    requires
+        k >= 0,
+        forall|i: int| 0 <= i < k ==> #[trigger] f(i) <= bnd,
+    ensures
+        nsum(k, f) <= k * bnd,
+    decreases k,
+{
+    if k > 0 {
+        lemma_nsum_bound(k - 1, f, bnd);
+        assert((k - 1) * bnd + bnd == k * bnd) by (nonlinear_arith);
+    }
+}
+
+/// A set of `usize` described by a predicate on `[0, n)` has `cnt` elements.
+pub proof fn lemma_cnt_set(n: int, f: spec_fn(int) -> bool, s: Set<usize>)
+    requires
+        0 <= n <= usize::MAX,
+        forall|x: usize| #[trigger] s.contains(x) <==> ((x as int) < n && f(x as int)),
+    ensures
+        s.len() == cnt(n, f),
+    decreases n,
+{
+    if n > 0 {
+        let y = (n - 1) as usize;
+        let s2 = s.remove(y);
+        assert forall|x: usize| #[trigger] s2.contains(x) <==> ((x as int) < n - 1 && f(x as int)) by {}
+        lemma_cnt_set(n - 1, f, s2);
+        if f(n - 1) {
+            assert(s.contains(y));
+            vstd::set::lemma_set_remove_len(s, y);
+        } else {
+            assert(s2 =~= s);
+        }
+    } else {
+        assert(s =~= Set::<usize>::empty());
+    }
+}
+
 } // verus!
