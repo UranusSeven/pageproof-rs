@@ -132,6 +132,124 @@ impl CoordV {
     pub open spec fn free_slabs(self) -> Set<usize> {
         Set::<usize>::range(0, self.nslab as usize).filter(|s: usize| self.owner[s as int] == 0)
     }
+
+    pub open spec fn per_c(self, c: int) -> nat {
+        self.per[c] as nat
+    }
+
+    /// `|F_c|`.
+    pub open spec fn cfree(self, c: int) -> nat {
+        if c < self.np {
+            self.paged[c].free_set().len()
+        } else {
+            self.state[c - self.np].free_set().len()
+        }
+    }
+
+    /// Unit `x` of class `c` is owned and unreferenced.
+    pub open spec fn cidle(self, c: int, x: int) -> bool {
+        if c < self.np {
+            self.paged[c].own[x] && self.paged[c].refs[x] == 0
+        } else {
+            self.state[c - self.np].own[x] && self.state[c - self.np].holder[x] is None
+        }
+    }
+
+    /// Every unit of slab `s` of class `c` is owned and unreferenced.
+    pub open spec fn slab_idle(self, c: int, s: nat) -> bool {
+        forall|x: int| #[trigger] in_range(x, s * self.per_c(c), self.per_c(c)) ==> self.cidle(c, x)
+    }
+
+    /// `R_c`: reclaimable slabs of class `c` outside `prot` (§3.5).
+    pub open spec fn reclaimable(self, c: int, prot: Seq<bool>) -> Set<usize> {
+        Set::<usize>::range(0, self.nslab as usize).filter(
+            |s: usize| self.owner[s as int] == c + 1 && !prot[s as int] && self.slab_idle(c, s as nat),
+        )
+    }
+
+    /// `need_c`.
+    pub open spec fn need(self, c: int, d: nat) -> nat {
+        if d <= self.cfree(c) {
+            0
+        } else {
+            cdiv((d - self.cfree(c)) as nat, self.per_c(c))
+        }
+    }
+
+    /// `give_c`.
+    pub open spec fn give(self, c: int, d: nat, prot: Seq<bool>) -> nat {
+        if self.cfree(c) >= d {
+            let lim = ((self.cfree(c) - d) as nat) / self.per_c(c);
+            let r = self.reclaimable(c, prot).len();
+            if r <= lim {
+                r
+            } else {
+                lim
+            }
+        } else {
+            0
+        }
+    }
+
+    pub open spec fn sum_need(self, d: Seq<nat>, k: int) -> nat
+        decreases k,
+    {
+        if k <= 0 {
+            0
+        } else {
+            self.sum_need(d, k - 1) + self.need(k - 1, d[k - 1])
+        }
+    }
+
+    pub open spec fn sum_give(self, d: Seq<nat>, prot: Seq<bool>, k: int) -> nat
+        decreases k,
+    {
+        if k <= 0 {
+            0
+        } else {
+            self.sum_give(d, prot, k - 1) + self.give(k - 1, d[k - 1], prot)
+        }
+    }
+
+    /// `Cap(d, Prot)` of §3.5.
+    pub open spec fn cap(self, d: Seq<nat>, prot: Seq<bool>) -> bool {
+        self.sum_need(d, self.ncls() as int) <= self.free_slabs().len() + self.sum_give(d, prot, self.ncls() as int)
+    }
+
+    /// The joint `k*` of C1.
+    pub open spec fn joint_k(self, toks: Seq<Token>, m: nat, k: nat) -> bool {
+        &&& k + 1 <= m
+        &&& self.nst() > 0 ==> k == 0
+        &&& self.nst() == 0 ==> {
+            &&& forall|c: int, i: nat| 0 <= c < self.np && i < k ==> #[trigger] self.paged[c].has_hit(
+                self.paged[c].key_of(toks, i),
+            )
+            &&& k + 1 < m ==> exists|c: int| 0 <= c < self.np && !#[trigger] self.paged[c].has_hit(
+                self.paged[c].key_of(toks, k),
+            )
+        }
+    }
+
+    /// C1 demand `d_c`: `m - u_c` for paged classes, 1 for state classes.
+    pub open spec fn attach_demand(self, toks: Seq<Token>, m: nat, k: nat) -> Seq<nat> {
+        Seq::new(
+            self.ncls(),
+            |c: int| if c < self.np { (m - count_active(self.paged[c], toks, k)) as nat } else { 1nat },
+        )
+    }
+
+    /// C1 `Prot`: slabs of every candidate of a hit position `i < k*` with no active candidate.
+    pub open spec fn attach_prot(self, toks: Seq<Token>, k: nat) -> Seq<bool> {
+        Seq::new(
+            self.nslab,
+            |s: int|
+                exists|c: int, i: nat, x: usize|
+                    #![trigger crate::index::in_index(self.paged[c].keys, self.paged[c].key_of(toks, i), x), x as int / (self.per[c] as int)]
+                    0 <= c < self.np && i < k && crate::index::in_index(self.paged[c].keys, self.paged[c].key_of(toks, i), x)
+                        && !self.paged[c].has_active_hit(self.paged[c].key_of(toks, i)) && x as int / (self.per[c] as int)
+                        == s,
+        )
+    }
 }
 
 pub struct Coordinator {
@@ -175,6 +293,81 @@ impl Coordinator {
     /// Public validity.
     pub closed spec fn inv(&self) -> bool {
         self.valid()
+    }
+
+    /// The public view agrees with the internal accessors.
+    pub(crate) proof fn lemma_view(&self)
+        ensures
+            self@.paged.len() == self.paged@.len(),
+            self@.state.len() == self.state@.len(),
+            forall|i: int| 0 <= i < self.paged@.len() ==> #[trigger] self@.paged[i] == self.pv(i),
+            forall|j: int| 0 <= j < self.state@.len() ==> #[trigger] self@.state[j] == self.sv(j),
+            self@.owner == self.owner@,
+            self@.per == self.per@,
+            self@.unit == self.unit@,
+            self@.np == self.np(),
+            self@.nslab == self.nslab as nat,
+            self@.b == self.b as nat,
+            self@.id == self.id,
+            self@.slots.dom() == self.slots@.dom(),
+            forall|h: u64| #[trigger] self.slots@.contains_key(h) ==> self@.slots[h] == self.slots@[h]@,
+    {
+    }
+
+    pub(crate) proof fn lemma_view_cls(&self)
+        requires
+            self.cfg_ok(),
+        ensures
+            forall|c: int| 0 <= c < self.ncls() ==> #[trigger] self@.cfree(c) == self.cfree(c),
+            forall|c: int, x: int| 0 <= c < self.ncls() ==> #[trigger] self@.cidle(c, x) == self.cidle(c, x),
+            forall|c: int, s: nat| 0 <= c < self.ncls() ==> #[trigger] self@.slab_idle(c, s) == self.slab_idle(c, s),
+    {
+        self.lemma_view();
+        assert forall|c: int| 0 <= c < self.ncls() implies #[trigger] self@.cfree(c) == self.cfree(c) by {
+            if c >= self.np() {
+                assert(self@.state[c - self.np()] == self.sv(c - self.np()));
+            } else {
+                assert(self@.paged[c] == self.pv(c));
+            }
+        }
+        assert forall|c: int, x: int| 0 <= c < self.ncls() implies #[trigger] self@.cidle(c, x) == self.cidle(c, x) by {
+            if c >= self.np() {
+                assert(self@.state[c - self.np()] == self.sv(c - self.np()));
+            } else {
+                assert(self@.paged[c] == self.pv(c));
+            }
+        }
+        assert forall|c: int, s: nat| 0 <= c < self.ncls() implies #[trigger] self@.slab_idle(c, s) == self.slab_idle(c, s) by {
+            assert(self@.per_c(c) == self.per_c(c));
+            assert forall|x: int| #[trigger] in_range(x, s * self.per_c(c), self.per_c(c)) implies self@.cidle(c, x)
+                == self.cidle(c, x) by {
+                assert(self@.cidle(c, x) == self.cidle(c, x));
+            }
+            if self@.slab_idle(c, s) {
+                assert forall|x: int| #[trigger] in_range(x, s * self.per_c(c), self.per_c(c)) implies self.cidle(c, x) by {
+                    assert(in_range(x, s * self@.per_c(c), self@.per_c(c)));
+                    assert(self@.cidle(c, x) == self.cidle(c, x));
+                }
+            }
+            if self.slab_idle(c, s) {
+                assert forall|x: int| #[trigger] in_range(x, s * self@.per_c(c), self@.per_c(c)) implies self@.cidle(c, x) by {
+                    assert(in_range(x, s * self.per_c(c), self.per_c(c)));
+                    assert(self@.cidle(c, x) == self.cidle(c, x));
+                }
+            }
+        }
+    }
+
+    pub(crate) proof fn lemma_free_slabs(&self)
+        requires
+            self.valid(),
+        ensures
+            self@.free_slabs() == self.fs@,
+            self@.free_slabs().len() <= self.nslab,
+    {
+        vstd::set_lib::range_set_properties::<usize>(0usize, self.nslab);
+        assert(self@.free_slabs() =~= self.fs@);
+        self.fs.lemma_bounds();
     }
 
     // ------------------------------------------------------------------ abstract accessors
@@ -978,6 +1171,7 @@ impl Coordinator {
                     0 <= k < i ==> {
                         &&& #[trigger] paged@[k].valid()
                         &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                        &&& paged@[k]@.ns == ns@
                     },
             decreases pu@.len() - i,
         {
@@ -993,7 +1187,19 @@ impl Coordinator {
             }
             match Manager::create_empty(units, b, ns) {
                 Ok(m) => {
+                    let ghost p0 = paged@;
                     paged.push(m);
+                    proof {
+                        assert forall|k: int| 0 <= k < i + 1 implies {
+                            &&& #[trigger] paged@[k].valid()
+                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                            &&& paged@[k]@.ns == ns@
+                        } by {
+                            if k < i {
+                                assert(paged@[k] == p0[k]);
+                            }
+                        }
+                    }
                 },
                 Err(e) => {
                     proof {
@@ -1007,8 +1213,15 @@ impl Coordinator {
         }
         let mut state: Vec<StatePool> = Vec::new();
         let mut j: usize = 0;
+        let ghost pg0 = paged@;
+        proof {
+            assert(pg0.len() == pu@.len());
+            assert(paged@[0].valid());
+            assert(pg0[0]@.ns == ns@);
+        }
         while j < su.len()
             invariant
+                paged@ == pg0,
                 0 <= j <= su@.len(),
                 per@.len() == ncls,
                 ncls == pu@.len() + su@.len(),
@@ -1040,6 +1253,7 @@ impl Coordinator {
         let owner: Vec<usize> = vec![0usize; nslab];
         let fs = IdxSet::new_full(nslab);
         let ghost st = state@;
+        let ghost pg = paged@;
         let co = Coordinator {
             id,
             nslab,
@@ -1073,8 +1287,11 @@ impl Coordinator {
                     &&& co.pv(k).b == co.b as nat
                     &&& co.pv(k).ns == co.pv(0).ns
                 } by {
-                    assert(co.paged@[k].valid());
-                    assert(co.paged@[0].valid());
+                    assert(co.paged@ == pg0);
+                    assert(pg0[k].valid());
+                    assert(pg0[0].valid());
+                    assert(pg0[k]@.ns == ns@);
+                    assert(pg0[0]@.ns == ns@);
                 }
                 assert forall|k: int| 0 <= k < co.nst() implies {
                     &&& #[trigger] co.state@[k].valid()
@@ -1151,9 +1368,11 @@ impl Coordinator {
             assert(co@.np == pu@.len());
             assert(co@.owner.len() == nslab);
             assert(forall|s: int| 0 <= s < nslab ==> #[trigger] co@.owner[s] == 0);
-            assert(co@.paged[0].ns == ns@) by {
-                assert(co.paged@[0]@ == initial_own(co.paged@[0]@.id, (nslab as nat) * (co.per@[0] as nat), b as nat, ns@, false));
-            }
+            assert(co.paged@ == pg);
+            assert(co.paged@[0]@.ns == ns@);
+            co.lemma_view();
+            assert(co@.paged[0] == co.pv(0));
+            assert(co@.paged[0].ns == ns@);
         }
         Ok(co)
     }
