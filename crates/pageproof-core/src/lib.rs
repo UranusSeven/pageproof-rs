@@ -16,6 +16,7 @@ pub mod ops_attach;
 pub mod ops_extend;
 pub mod ops_write;
 pub mod ops_slab;
+pub mod state;
 
 use vstd::prelude::*;
 
