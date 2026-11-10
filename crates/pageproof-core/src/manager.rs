@@ -160,6 +160,7 @@ impl Manager {
         ensures
             self.index_buckets() <= self@.p,
             self.num_leases() <= self@.p,
+            self.num_leases() == self@.leases.dom().len(),
             self.num_pending() <= self.num_leases(),
             forall|h: u64| #[trigger] self@.leases.contains_key(h) ==> self@.leases[h].table.len() <= self@.p
                 && self@.leases[h].toks.len() <= self@.p * self@.b,

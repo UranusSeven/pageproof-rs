@@ -2003,3 +2003,149 @@ impl Coordinator {
 }
 
 } // verus!
+
+verus! {
+
+/// Unit `g` of class `c` occupies arena bytes `[g·u_c, (g+1)·u_c)`.
+pub open spec fn unit_bytes(o: CoordV, c: int, g: int) -> (int, int) {
+    (g * (o.unit[c] as int), (g + 1) * (o.unit[c] as int))
+}
+
+/// Unit `g` is owned by class `c`.
+pub open spec fn owns(o: CoordV, c: int, g: int) -> bool {
+    if c < o.np {
+        o.paged[c].own[g]
+    } else {
+        o.state[c - o.np].own[g]
+    }
+}
+
+/// A1 places unit `g` of class `c` inside slab `g / n_c`.
+pub proof fn lemma_unit_in_slab(u: nat, n: nat, sb: nat, g: nat)
+    requires
+        u >= 1,
+        n >= 1,
+        sb == n * u,
+    ensures
+        (g / n) * sb <= g * u,
+        (g + 1) * u <= (g / n + 1) * sb,
+{
+    lemma_div_bounds(g, n);
+    let s = g / n;
+    let r = g % n;
+    assert(g == s * n + r);
+    assert(g * u == s * sb + r * u) by (nonlinear_arith) requires g == s * n + r, sb == n * u;
+    assert((g + 1) * u == s * sb + (r + 1) * u) by (nonlinear_arith) requires g == s * n + r, sb == n * u;
+    assert((r + 1) * u <= n * u) by (nonlinear_arith) requires r + 1 <= n;
+    assert((s + 1) * sb == s * sb + sb) by (nonlinear_arith);
+}
+
+impl Coordinator {
+    /// Arena disjointness (§4, §9.1 obligation 10): two distinct owned units, of the same or of
+    /// different classes, occupy disjoint byte ranges, and every owned unit lies in `[0, N·S)`.
+    pub proof fn theorem_arena_disjoint(&self, c1: int, g1: int, c2: int, g2: int)
+        requires
+            self.inv(),
+            0 <= c1 < self@.ncls(),
+            0 <= c2 < self@.ncls(),
+            0 <= g1 < self@.nslab * (self@.per[c1] as nat),
+            0 <= g2 < self@.nslab * (self@.per[c2] as nat),
+            owns(self@, c1, g1),
+            owns(self@, c2, g2),
+            (c1, g1) != (c2, g2),
+        ensures
+            unit_bytes(self@, c1, g1).1 <= unit_bytes(self@, c2, g2).0 || unit_bytes(self@, c2, g2).1 <= unit_bytes(self@, c1, g1).0,
+            0 <= unit_bytes(self@, c1, g1).0,
+            unit_bytes(self@, c1, g1).1 <= self@.nslab * self@.sbytes,
+    {
+        self.lemma_view();
+        let o = self@;
+        let u1 = self.unit@[c1] as nat;
+        let u2 = self.unit@[c2] as nat;
+        let n1 = self.per_c(c1);
+        let n2 = self.per_c(c2);
+        let sb = self.sbytes as nat;
+        assert(self.unit@[c1] >= 1 && self.per@[c1] == self.sbytes / self.unit@[c1]);
+        assert(self.unit@[c2] >= 1 && self.per@[c2] == self.sbytes / self.unit@[c2]);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(sb as int, u1 as int);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(sb as int, u2 as int);
+        assert(sb == n1 * u1) by (nonlinear_arith) requires sb as int == (u1 as int) * (n1 as int) + 0;
+        assert(sb == n2 * u2) by (nonlinear_arith) requires sb as int == (u2 as int) * (n2 as int) + 0;
+        lemma_unit_in_slab(u1, n1, sb, g1 as nat);
+        lemma_unit_in_slab(u2, n2, sb, g2 as nat);
+        let s1 = (g1 as nat) / n1;
+        let s2 = (g2 as nat) / n2;
+        // Ownership is the slab owner (I12/I13).
+        assert(self.cown(c1, g1) == (self.owner@[g1 / (n1 as int)] == c1 + 1));
+        assert(self.cown(c2, g2) == (self.owner@[g2 / (n2 as int)] == c2 + 1));
+        assert(owns(o, c1, g1) == self.cown(c1, g1));
+        assert(owns(o, c2, g2) == self.cown(c2, g2));
+        lemma_div_bounds(g1 as nat, n1);
+        if s1 >= self.nslab {
+            lemma_mul_mono(self.nslab as nat, s1, n1);
+        }
+        assert((s1 + 1) * sb <= (self.nslab as nat) * sb) by (nonlinear_arith) requires s1 + 1 <= self.nslab;
+        if c1 == c2 {
+            assert(g1 != g2);
+            if g1 < g2 {
+                assert((g1 + 1) * (u1 as int) <= g2 * (u1 as int)) by (nonlinear_arith) requires g1 + 1 <= g2;
+            } else {
+                assert((g2 + 1) * (u1 as int) <= g1 * (u1 as int)) by (nonlinear_arith) requires g2 + 1 <= g1;
+            }
+        } else {
+            // Different classes own different slabs.
+            assert(s1 != s2);
+            if s1 < s2 {
+                assert((s1 + 1) * sb <= s2 * sb) by (nonlinear_arith) requires s1 + 1 <= s2;
+            } else {
+                assert((s2 + 1) * sb <= s1 * sb) by (nonlinear_arith) requires s2 + 1 <= s1;
+            }
+        }
+    }
+}
+
+} // verus!
+
+verus! {
+
+impl Coordinator {
+    pub closed spec fn num_leases(&self) -> nat {
+        self.paged@[0].num_leases()
+    }
+
+    pub closed spec fn num_pending(&self) -> nat {
+        self.paged@[0].num_pending()
+    }
+
+    pub closed spec fn index_buckets(&self, c: int) -> nat {
+        self.paged@[c].index_buckets()
+    }
+
+    pub closed spec fn num_slot_records(&self) -> nat {
+        self.slots@.dom().len()
+    }
+
+    /// I11 (bounded metadata) for the coordinator: leases, slot records and pending tickets are
+    /// bounded by the units of paged class 0; each class's key-index buckets by its unit count.
+    pub proof fn lemma_bounded(&self)
+        requires
+            self.inv(),
+        ensures
+            self.num_leases() <= self@.nslab * (self@.per[0] as nat),
+            self.num_slot_records() == self.num_leases(),
+            self.num_pending() <= self.num_leases(),
+            forall|c: int| 0 <= c < self@.np ==> #[trigger] self.index_buckets(c) <= self@.nslab * (self@.per[c] as nat),
+    {
+        self.lemma_view();
+        assert(self.paged@[0].valid());
+        self.paged@[0].lemma_bounded();
+        assert(self.slots@.dom() == self.pv(0).leases.dom());
+        assert(self.paged@[0].num_leases() == self.pv(0).leases.dom().len());
+        assert forall|c: int| 0 <= c < self@.np implies #[trigger] self.index_buckets(c) <= self@.nslab * (self@.per[c] as nat) by {
+            assert(self.paged@[c].valid());
+            self.paged@[c].lemma_bounded();
+        }
+    }
+}
+
+} // verus!
