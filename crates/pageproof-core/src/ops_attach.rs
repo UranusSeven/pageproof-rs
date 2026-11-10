@@ -1191,3 +1191,140 @@ impl Manager {
 }
 
 } // verus!
+
+verus! {
+
+/// `count_active` depends only on `has_active_hit` (and the key chain).
+pub proof fn lemma_count_active_eq(v: MgrV, w: MgrV, toks: Seq<Token>, k: nat)
+    requires
+        v.ns == w.ns,
+        v.b == w.b,
+        forall|key: Digest| #[trigger] w.has_active_hit(key) == v.has_active_hit(key),
+    ensures
+        count_active(w, toks, k) == count_active(v, toks, k),
+    decreases k,
+{
+    if k > 0 {
+        lemma_count_active_eq(v, w, toks, (k - 1) as nat);
+        assert(w.has_active_hit(w.key_of(toks, (k - 1) as nat)) == v.has_active_hit(v.key_of(toks, (k - 1) as nat)));
+    }
+}
+
+/// A probe taken in `v` stays valid in `w`, where `w` differs from `v` only by ownership and by
+/// keys revoked on unreferenced pages whose slab is unprotected, provided every inactive hit's
+/// slab is protected. Active candidates are referenced, so they survive; `w`'s Index is a subset
+/// of `v`'s, so `has_active_hit` is unchanged.
+pub proof fn lemma_probe_transfer(v: MgrV, w: MgrV, log: Log, toks: Seq<Token>, pr: Probe, per: nat, prot: Seq<bool>)
+    requires
+        probe_ok(v, log, toks, pr),
+        w == (MgrV { own: w.own, keys: w.keys, ..v }),
+        w.keys.len() == v.keys.len(),
+        per >= 1,
+        forall|x: int|
+            #![trigger w.keys[x]]
+            0 <= x < v.p ==> w.keys[x] == v.keys[x] || (w.keys[x] is None && v.refs[x] == 0 && !prot[x / (per as int)]),
+        v.keys.len() == v.p,
+        forall|j: int| #![trigger pr.hits@[j]] 0 <= j < pr.hits@.len() && !pr.hits@[j].1 ==> prot[pr.hits@[j].0 as int / (per as int)],
+    ensures
+        probe_ok(w, log, toks, pr),
+        forall|key: Digest| #[trigger] w.has_active_hit(key) == v.has_active_hit(key),
+        forall|key: Digest, x: PageId| #[trigger] in_index(w.keys, key, x) ==> in_index(v.keys, key, x),
+        count_active(w, toks, pr.hits@.len() as nat) == count_active(v, toks, pr.hits@.len() as nat),
+{
+    assert forall|key: Digest, x: PageId| #[trigger] in_index(w.keys, key, x) implies in_index(v.keys, key, x) by {
+        assert(w.keys[x as int] == v.keys[x as int] || w.keys[x as int] is None);
+    }
+    assert forall|key: Digest| #[trigger] w.has_active_hit(key) == v.has_active_hit(key) by {
+        if v.has_active_hit(key) {
+            let x = choose|x: PageId| #[trigger] in_index(v.keys, key, x) && v.refs[x as int] > 0;
+            assert(w.keys[x as int] == v.keys[x as int]);
+            assert(in_index(w.keys, key, x));
+        }
+        if w.has_active_hit(key) {
+            let x = choose|x: PageId| #[trigger] in_index(w.keys, key, x) && w.refs[x as int] > 0;
+            assert(in_index(v.keys, key, x));
+        }
+    }
+    let hits = pr.hits@;
+    assert forall|j: int| #![trigger hits[j]] 0 <= j < hits.len() implies {
+        &&& in_index(w.keys, w.key_of(toks, j as nat), hits[j].0)
+        &&& hits[j].1 == w.has_active_hit(w.key_of(toks, j as nat))
+        &&& hits[j].1 == (w.refs[hits[j].0 as int] > 0)
+    } by {
+        let x = hits[j].0;
+        assert(in_index(v.keys, v.key_of(toks, j as nat), x));
+        if hits[j].1 {
+            assert(v.refs[x as int] > 0);
+            assert(w.keys[x as int] == v.keys[x as int]);
+        } else {
+            assert(prot[x as int / (per as int)]);
+            assert(w.keys[x as int] == v.keys[x as int]);
+        }
+    }
+    lemma_count_active_eq(v, w, toks, hits.len() as nat);
+}
+
+impl Manager {
+    /// Every live lease id is below `next_handle`.
+    pub(crate) proof fn lemma_handles_lt(&self)
+        requires
+            self.valid(),
+        ensures
+            forall|h: u64| #[trigger] self@.leases.contains_key(h) ==> h < self@.next_handle,
+            forall|t: u64| #[trigger] self@.pend.contains_key(t) ==> t < self@.next_ticket,
+    {
+        reveal(lease_ok);
+        reveal(pend_ok);
+        assert forall|h: u64| #[trigger] self@.leases.contains_key(h) implies h < self@.next_handle by {
+            assert(lease_ok(self@, self.den_log(), h));
+        }
+        assert forall|t: u64| #[trigger] self@.pend.contains_key(t) implies t < self@.next_ticket by {
+            assert(pend_ok(self@, t));
+        }
+    }
+}
+
+} // verus!
+
+verus! {
+
+/// A copy of a probe (same views).
+pub fn copy_probe(pr: &Probe) -> (r: Probe)
+    ensures
+        r.hits@ == pr.hits@,
+        r.keys@ == pr.keys@,
+        r.head == pr.head,
+{
+    Probe {
+        hits: vstd::slice::slice_to_vec(pr.hits.as_slice()),
+        keys: vstd::slice::slice_to_vec(pr.keys.as_slice()),
+        head: pr.head,
+    }
+}
+
+/// `probe_ok` depends only on the probe's views.
+pub proof fn lemma_probe_ok_views(v: MgrV, log: Log, toks: Seq<Token>, a: Probe, b: Probe)
+    requires
+        probe_ok(v, log, toks, a),
+        a.hits@ == b.hits@,
+        a.keys@ == b.keys@,
+        a.head == b.head,
+    ensures
+        probe_ok(v, log, toks, b),
+{
+}
+
+/// `probe_ok` is monotone in the E8 log.
+pub proof fn lemma_probe_ok_log(v: MgrV, log: Log, log2: Log, toks: Seq<Token>, pr: Probe)
+    requires
+        probe_ok(v, log, toks, pr),
+        log.submap_of(log2),
+    ensures
+        probe_ok(v, log2, toks, pr),
+{
+    if pr.hits@.len() > 0 {
+        lemma_chain_logged_mono(log, log2, v.ns, toks, v.b, (pr.hits@.len() - 1) as nat);
+    }
+}
+
+} // verus!

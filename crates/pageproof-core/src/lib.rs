@@ -20,6 +20,7 @@ pub mod state;
 pub mod cnt;
 pub mod coord;
 pub mod slabplan;
+pub mod coord_attach;
 
 use vstd::prelude::*;
 
