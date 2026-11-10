@@ -271,6 +271,8 @@ impl Manager {
                 &&& final(self)@ == released(old(self)@, h.id)
             },
             r is Err ==> final(self)@ == old(self)@,
+            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending is None)
+                ==> r is Ok,
     {
         if !self.handle_ok(h) {
             return Err(Error::InvalidHandle);

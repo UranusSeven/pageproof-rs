@@ -194,6 +194,42 @@ impl Manager {
         true
     }
 
+    pub fn mgr_id(&self) -> (r: u64)
+        requires
+            self.valid(),
+        ensures
+            r == self@.id,
+    {
+        self.id
+    }
+
+    pub fn next_ticket_exec(&self) -> (r: u64)
+        requires
+            self.valid(),
+        ensures
+            r == self@.next_ticket,
+    {
+        self.next_ticket
+    }
+
+    /// Whether lease `h` is live, and if so whether it has a pending ticket.
+    pub fn lease_state(&self, h: u64) -> (r: Option<bool>)
+        requires
+            self.valid(),
+        ensures
+            r is None <==> !self@.leases.contains_key(h),
+            r matches Some(p) ==> p == (self@.leases[h].pending is Some),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        match self.leases.get(&h) {
+            None => None,
+            Some(l) => Some(l.pending.is_some()),
+        }
+    }
+
     pub fn next_handle_exec(&self) -> (r: u64)
         requires
             self.valid(),

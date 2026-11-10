@@ -21,6 +21,7 @@ pub mod cnt;
 pub mod coord;
 pub mod slabplan;
 pub mod coord_attach;
+pub mod coord_ops;
 
 use vstd::prelude::*;
 
