@@ -254,16 +254,18 @@ impl CoordV {
         )
     }
 
-    /// C1 `Prot`: slabs of every candidate of a hit position `i < k*` with no active candidate.
+    /// Hit position `i` of class `c` has no active candidate, and some candidate lies in slab `s`.
+    pub open spec fn prot_hit(self, toks: Seq<Token>, c: int, i: nat, s: int) -> bool {
+        let key = self.paged[c].key_of(toks, i);
+        &&& !self.paged[c].has_active_hit(key)
+        &&& exists|x: usize| #[trigger] crate::index::in_index(self.paged[c].keys, key, x) && x as int / (self.per[c] as int) == s
+    }
+
+    /// C1 `Prot`: slabs of the free candidates of hit positions `i < k*` (§6 C1).
     pub open spec fn attach_prot(self, toks: Seq<Token>, k: nat) -> Seq<bool> {
         Seq::new(
             self.nslab,
-            |s: int|
-                exists|c: int, i: nat, x: usize|
-                    #![trigger crate::index::in_index(self.paged[c].keys, self.paged[c].key_of(toks, i), x), x as int / (self.per[c] as int)]
-                    0 <= c < self.np && i < k && crate::index::in_index(self.paged[c].keys, self.paged[c].key_of(toks, i), x)
-                        && !self.paged[c].has_active_hit(self.paged[c].key_of(toks, i)) && x as int / (self.per[c] as int)
-                        == s,
+            |s: int| exists|c: int, i: nat| 0 <= c < self.np && i < k && #[trigger] self.prot_hit(toks, c, i, s),
         )
     }
 }
