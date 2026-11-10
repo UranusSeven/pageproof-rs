@@ -1198,4 +1198,342 @@ impl Coordinator {
     }
 }
 
+
+impl Coordinator {
+    /// C3. `begin_write(h, n)`: one ticket whose plan covers every class.
+    pub fn begin_write(&mut self, h: Handle, k: usize) -> (r: Result<(Ticket, CoordPlan), Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_begin_result(old(self)@, final(self)@, h, k, r),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        match self.lease_live(h) {
+            None => return Err(Error::InvalidHandle),
+            Some(true) => return Err(Error::Busy),
+            Some(false) => {},
+        }
+        proof {
+            o.lemma_view();
+            assert(self.paged@[0].valid());
+        }
+        let (len, a, _) = self.paged[0].lease_info(h.id);
+        proof {
+            reveal(lease_ok);
+            assert(lease_ok(self.pv(0), self.paged@[0].den_log(), h.id));
+        }
+        if k == 0 || k > len - a {
+            return Err(Error::InvalidArgument);
+        }
+        let tid = self.paged[0].next_ticket_exec();
+        if tid == u64::MAX {
+            return Err(Error::IdentifierExhausted);
+        }
+        let mut wslots: Vec<Vec<usize>> = Vec::new();
+        let mut ptabs: Vec<Vec<PageId>> = Vec::new();
+        let mut input_ids: Vec<Token> = Vec::new();
+        let mut positions: Vec<usize> = Vec::new();
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                o.valid(),
+                ov == o@,
+                o.pv(0).leases.contains_key(h.id),
+                o.pv(0).leases[h.id].pending is None,
+                o.pv(0).leases[h.id].c == a,
+                o.pv(0).leases[h.id].toks.len() == len,
+                0 < k <= len - a,
+                tid == o.pv(0).next_ticket,
+                tid < u64::MAX,
+                h.mgr == o.id,
+                self.npaged == o.npaged,
+                self.paged@.len() == o.paged@.len(),
+                self.state@ == o.state@,
+                self.slots@ == o.slots@,
+                self.id == o.id,
+                self.nslab == o.nslab,
+                self.sbytes == o.sbytes,
+                self.b == o.b,
+                self.unit@ == o.unit@,
+                self.per@ == o.per@,
+                self.owner@ == o.owner@,
+                self.fs == o.fs,
+                c <= self.npaged,
+                wslots@.len() == c,
+                ptabs@.len() == c,
+                c > 0 ==> input_ids@ == o.pv(0).leases[h.id].toks.subrange(a as int, (a + k) as int) && positions@.len() == k
+                    && forall|q: int| 0 <= q < k ==> #[trigger] positions@[q] as int == a + q,
+                forall|c2: int| c <= c2 < o.np() ==> #[trigger] self.paged@[c2] == o.paged@[c2],
+                forall|c2: int|
+                    0 <= c2 < c ==> {
+                        let plan = ExecutionPlan {
+                            ticket: Ticket { mgr: o.pv(c2).id, id: tid },
+                            handle: Handle { mgr: o.pv(c2).id, id: h.id },
+                            input_ids: input_ids,
+                            positions: positions,
+                            write_slots: wslots@[c2],
+                            page_table: ptabs@[c2],
+                            block_size: o.b,
+                        };
+                        &&& (#[trigger] self.paged@[c2]).valid()
+                        &&& self.pv(c2) == began(o.pv(c2), h.id, k as nat)
+                        &&& plan_ok(o.pv(c2), h.id, k as nat, plan)
+                        &&& forall|j: int|
+                            0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
+                                o.pv(c2).b,
+                                o.pv(c2).leases[h.id].table,
+                                j,
+                            )) == o.pv(c2).leases[h.id].toks.subrange(0, j + 1)
+                    },
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int] == o.paged@[c as int]);
+                assert(o.paged@[c as int].valid());
+                assert(o.pv(c as int).leases.contains_key(h.id));
+                assert(o.pv(c as int).leases[h.id].toks == o.pv(0).leases[h.id].toks);
+                assert(o.pv(c as int).leases[h.id].c == o.pv(0).leases[h.id].c);
+                assert(o.pv(c as int).leases[h.id].pending == o.pv(0).leases[h.id].pending);
+                assert(o.pv(c as int).next_ticket == tid);
+            }
+            let mid_c = self.paged[c].mgr_id();
+            let ghost p0 = self.paged@;
+            let r = self.paged[c].begin_write(Handle { mgr: mid_c, id: h.id }, k);
+            proof {
+                assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
+            }
+            match r {
+                Ok((t, plan)) => {
+                    let ghost wb = wslots@;
+                    let ghost pb = ptabs@;
+                    if c == 0 {
+                        input_ids = vstd::slice::slice_to_vec(plan.input_ids.as_slice());
+                        positions = vstd::slice::slice_to_vec(plan.positions.as_slice());
+                    }
+                    proof {
+                        assert(plan.input_ids@ == o.pv(c as int).leases[h.id].toks.subrange(a as int, (a + k) as int));
+                        assert(input_ids@ == plan.input_ids@);
+                        assert(positions@ == plan.positions@);
+                    }
+                    wslots.push(plan.write_slots);
+                    ptabs.push(plan.page_table);
+                    proof {
+                        assert forall|c2: int| 0 <= c2 < c + 1 implies {
+                            let pl = ExecutionPlan {
+                                ticket: Ticket { mgr: o.pv(c2).id, id: tid },
+                                handle: Handle { mgr: o.pv(c2).id, id: h.id },
+                                input_ids: input_ids,
+                                positions: positions,
+                                write_slots: wslots@[c2],
+                                page_table: ptabs@[c2],
+                                block_size: o.b,
+                            };
+                            &&& (#[trigger] self.paged@[c2]).valid()
+                            &&& self.pv(c2) == began(o.pv(c2), h.id, k as nat)
+                            &&& plan_ok(o.pv(c2), h.id, k as nat, pl)
+                            &&& forall|j: int|
+                                0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
+                                    o.pv(c2).b,
+                                    o.pv(c2).leases[h.id].table,
+                                    j,
+                                )) == o.pv(c2).leases[h.id].toks.subrange(0, j + 1)
+                        } by {
+                            if c2 < c {
+                                assert(self.paged@[c2] == p0[c2]);
+                                assert(wslots@[c2] == wb[c2]);
+                                assert(ptabs@[c2] == pb[c2]);
+                            } else {
+                                assert(o.pv(c2).b == o.b as nat);
+                            }
+                        }
+                    }
+                },
+                Err(_) => {
+                    proof {
+                        assert(false);
+                    }
+                    return Err(Error::Busy);
+                },
+            }
+            c += 1;
+        }
+        let sl = vstd::slice::slice_to_vec(self.slots.get(&h.id).unwrap().as_slice());
+        let plan = CoordPlan {
+            ticket: Ticket { mgr: self.id, id: tid },
+            handle: h,
+            input_ids,
+            positions,
+            block_size: self.b,
+            write_slots: wslots,
+            page_tables: ptabs,
+            state_slots: sl,
+            init: a == 0,
+        };
+        proof {
+            Self::lemma_begin_post(&o, self, h.id, k as nat, tid, &plan);
+        }
+        Ok((Ticket { mgr: self.id, id: tid }, plan))
+    }
+
+    proof fn lemma_begin_post(o: &Coordinator, fin: &Coordinator, h: u64, k: nat, tid: u64, plan: &CoordPlan)
+        requires
+            o.valid(),
+            o.pv(0).leases.contains_key(h),
+            o.pv(0).leases[h].pending is None,
+            tid == o.pv(0).next_ticket,
+            tid < u64::MAX,
+            0 < k,
+            k <= usize::MAX,
+            o.pv(0).leases[h].c + k <= o.pv(0).leases[h].toks.len(),
+            fin.npaged == o.npaged,
+            fin.paged@.len() == o.paged@.len(),
+            fin.state@ == o.state@,
+            fin.slots@ == o.slots@,
+            fin.id == o.id,
+            fin.nslab == o.nslab,
+            fin.sbytes == o.sbytes,
+            fin.b == o.b,
+            fin.unit@ == o.unit@,
+            fin.per@ == o.per@,
+            fin.owner@ == o.owner@,
+            fin.fs == o.fs,
+            plan.ticket == (Ticket { mgr: o.id, id: tid }),
+            plan.handle.id == h,
+            plan.handle.mgr == o.id,
+            plan.block_size == o.b,
+            plan.state_slots@ == o.slots@[h]@,
+            plan.init == (o.pv(0).leases[h].c == 0),
+            plan.write_slots@.len() == o.np(),
+            plan.page_tables@.len() == o.np(),
+            plan.input_ids@ == o.pv(0).leases[h].toks.subrange(o.pv(0).leases[h].c as int, (o.pv(0).leases[h].c + k) as int),
+            plan.positions@.len() == k,
+            forall|q: int| 0 <= q < k ==> #[trigger] plan.positions@[q] as int == o.pv(0).leases[h].c + q,
+            forall|c2: int|
+                0 <= c2 < o.np() ==> {
+                    let pl = ExecutionPlan {
+                        ticket: Ticket { mgr: o.pv(c2).id, id: tid },
+                        handle: Handle { mgr: o.pv(c2).id, id: h },
+                        input_ids: plan.input_ids,
+                        positions: plan.positions,
+                        write_slots: plan.write_slots@[c2],
+                        page_table: plan.page_tables@[c2],
+                        block_size: o.b,
+                    };
+                    &&& (#[trigger] fin.paged@[c2]).valid()
+                    &&& fin.pv(c2) == began(o.pv(c2), h, k)
+                    &&& plan_ok(o.pv(c2), h, k, pl)
+                    &&& forall|j: int|
+                        0 <= j < o.pv(c2).leases[h].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
+                            o.pv(c2).b,
+                            o.pv(c2).leases[h].table,
+                            j,
+                        )) == o.pv(c2).leases[h].toks.subrange(0, j + 1)
+                },
+        ensures
+            fin.valid(),
+            coord_begin_result(o@, fin@, plan.handle, k as usize, Ok((plan.ticket, *plan))),
+    {
+        assert forall|c: int| 0 <= c < o.np() implies {
+            &&& (#[trigger] fin.paged@[c]).valid()
+            &&& fin.pv(c).own == o.pv(c).own
+            &&& fin.pv(c).p == o.pv(c).p
+            &&& fin.pv(c).b == o.pv(c).b
+            &&& fin.pv(c).ns == o.pv(c).ns
+            &&& fin.pv(c).next_handle == o.pv(c).next_handle
+            &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
+            &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
+            &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+            &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
+            &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
+            &&& fin.pv(c).pend == fin.pv(0).pend
+            &&& fin.pv(c).next_ticket == fin.pv(0).next_ticket
+        } by {
+            assert(o.paged@[c].valid());
+            assert(o.pv(c).leases.contains_key(h));
+            assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
+            assert(o.pv(c).pend == o.pv(0).pend);
+            assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
+            assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
+            assert(fin.pv(0).leases.dom() =~= o.pv(0).leases.dom());
+            assert(fin.paged@[0].valid());
+        }
+        assert forall|j: int| 0 <= j < o.nst() implies {
+            &&& (#[trigger] fin.state@[j]).valid()
+            &&& fin.sv(j).own == o.sv(j).own
+            &&& fin.sv(j).holder == o.sv(j).holder
+            &&& fin.sv(j).p == o.sv(j).p
+            &&& forall|x: int| 0 <= x < o.sv(j).p && x != o.slots@[h]@[j] ==> #[trigger] fin.sv(j).w[x] == o.sv(j).w[x]
+            &&& (fin.pv(0).leases[h].c > 0 ==> fin.sv(j).w[o.slots@[h]@[j] as int] == Some(
+                fin.pv(0).leases[h].toks.subrange(0, fin.pv(0).leases[h].c as int),
+            ))
+        } by {
+            assert(o.state@[j].valid());
+            assert(fin.paged@[0].valid());
+            assert(o.slots@.contains_key(h));
+        }
+        fin.lemma_step_valid(o, h);
+        o.lemma_view();
+        fin.lemma_view();
+        let ov = o@;
+        let l = ov.leases()[h];
+        assert(ov.paged[0] == o.pv(0));
+        assert forall|c: int| 0 <= c < ov.np implies {
+            let lc = ov.paged[c].leases[h];
+            let a = l.c;
+            let z = l.c + k;
+            &&& (#[trigger] plan.write_slots@[c])@.len() == k
+            &&& forall|q: int| 0 <= q < k ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(ov.b, lc.table, a + q)
+            &&& forall|q: int| 0 <= q < k ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < ov.paged[c].p * ov.b
+            &&& forall|q1: int, q2: int|
+                0 <= q1 < k && 0 <= q2 < k && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+            &&& forall|q: int| 0 <= q < k ==> write_page_ok(ov.paged[c], h, #[trigger] lc.table[(a + q) / (ov.b as int)])
+            &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, ov.b) as int)
+            &&& forall|j: int| 0 <= j < a ==> (ov.paged[c].vmap)(#[trigger] slot_of(ov.b, lc.table, j)) == l.toks.subrange(0, j + 1)
+        } by {
+            assert(ov.paged[c] == o.pv(c));
+            assert(o.paged@[c].valid());
+            assert(o.pv(c).b == o.b as nat);
+            assert(o.pv(c).leases.contains_key(h));
+            assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
+            assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
+            let pl = ExecutionPlan {
+                ticket: Ticket { mgr: o.pv(c).id, id: tid },
+                handle: Handle { mgr: o.pv(c).id, id: h },
+                input_ids: plan.input_ids,
+                positions: plan.positions,
+                write_slots: plan.write_slots@[c],
+                page_table: plan.page_tables@[c],
+                block_size: o.b,
+            };
+            assert(fin.paged@[c].valid());
+            assert(plan_ok(o.pv(c), h, k, pl));
+            assert(pl.write_slots@ == plan.write_slots@[c]@);
+            assert(pl.page_table@ == plan.page_tables@[c]@);
+        }
+        assert forall|j: int| 0 <= j < ov.nst() implies {
+            &&& ov.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
+            &&& l.c > 0 ==> ov.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, l.c as int))
+        } by {
+            assert(o.slots@.contains_key(h));
+            assert(ov.state[j] == o.sv(j));
+        }
+        assert(plan.state_slots@ == ov.slots[h]);
+        assert(ov.next_ticket() == tid);
+        assert(ov.id == o.id);
+        assert(ov.b == o.b as nat);
+        assert(ov.leases()[h] == o.pv(0).leases[h]);
+        assert(plan.input_ids@ == l.toks.subrange(l.c as int, (l.c + k) as int));
+        assert(plan.write_slots@.len() == ov.np);
+        assert(plan.page_tables@.len() == ov.np);
+        assert(plan.handle == Handle { mgr: ov.id, id: h });
+        assert(plan.ticket == Ticket { mgr: ov.id, id: ov.next_ticket() });
+        assert(cplan_ok(ov, h, k, *plan));
+        assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began(ov.paged[c], h, k) by {}
+        assert(fin@.state =~= ov.state);
+        assert(fin@.slots =~= ov.slots);
+    }
+}
+
 } // verus!
