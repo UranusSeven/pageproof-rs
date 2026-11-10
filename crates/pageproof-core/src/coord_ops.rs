@@ -1049,6 +1049,22 @@ pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: Comp
     }
 }
 
+/// Plan facts of paged class `c` (one conjunct of `cplan_ok`).
+pub open spec fn cplan_class(o: CoordV, h: u64, n: nat, plan: CoordPlan, c: int) -> bool {
+    let l = o.leases()[h];
+    let lc = o.paged[c].leases[h];
+    let a = l.c;
+    let z = l.c + n;
+    &&& plan.write_slots@[c]@.len() == n
+    &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
+    &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
+    &&& forall|q1: int, q2: int|
+        0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+    &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
+    &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
+    &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
+}
+
 /// Unfolds `cplan_ok` from its parts (kept separate for proof stability).
 pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
     requires
@@ -1060,23 +1076,7 @@ pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
         forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == o.leases()[h].c + q,
         plan.write_slots@.len() == o.np,
         plan.page_tables@.len() == o.np,
-        forall|c: int|
-            0 <= c < o.np ==> {
-                let lc = o.paged[c].leases[h];
-                let a = o.leases()[h].c;
-                let z = o.leases()[h].c + n;
-                &&& (#[trigger] plan.write_slots@[c])@.len() == n
-                &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
-                &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
-                &&& forall|q1: int, q2: int|
-                    0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
-                &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
-                &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
-                &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == o.leases()[h].toks.subrange(
-                    0,
-                    j + 1,
-                )
-            },
+        forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, plan, c),
         plan.state_slots@ == o.slots[h],
         plan.init == (o.leases()[h].c == 0),
         forall|j: int|
@@ -1103,8 +1103,7 @@ pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
         &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
         &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
     } by {
-        let w = plan.write_slots@[c];
-        assert(w@.len() == n);
+        assert(cplan_class(o, h, n, plan, c));
     }
     assert forall|j: int| 0 <= j < o.nst() implies {
         &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
@@ -1545,19 +1544,7 @@ impl Coordinator {
         let ov = o@;
         let l = ov.leases()[h];
         assert(ov.paged[0] == o.pv(0));
-        assert forall|c: int| 0 <= c < ov.np implies {
-            let lc = ov.paged[c].leases[h];
-            let a = l.c;
-            let z = l.c + k;
-            &&& (#[trigger] plan.write_slots@[c])@.len() == k
-            &&& forall|q: int| 0 <= q < k ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(ov.b, lc.table, a + q)
-            &&& forall|q: int| 0 <= q < k ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < ov.paged[c].p * ov.b
-            &&& forall|q1: int, q2: int|
-                0 <= q1 < k && 0 <= q2 < k && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
-            &&& forall|q: int| 0 <= q < k ==> write_page_ok(ov.paged[c], h, #[trigger] lc.table[(a + q) / (ov.b as int)])
-            &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, ov.b) as int)
-            &&& forall|j: int| 0 <= j < a ==> (ov.paged[c].vmap)(#[trigger] slot_of(ov.b, lc.table, j)) == l.toks.subrange(0, j + 1)
-        } by {
+        assert forall|c: int| 0 <= c < ov.np implies #[trigger] cplan_class(ov, h, k, *plan, c) by {
             assert(ov.paged[c] == o.pv(c));
             assert(o.paged@[c].valid());
             assert(o.pv(c).b == o.b as nat);
@@ -1828,6 +1815,190 @@ impl Coordinator {
         }) by {
             assert(fin.state@[j].valid());
         }
+    }
+}
+
+
+/// Read-only view of a lease (C6).
+pub struct CoordRequestView {
+    pub len: usize,
+    pub computed: usize,
+    pub pending: Option<Ticket>,
+    pub block_size: usize,
+    pub lease: LeaseView,
+}
+
+/// Read-only view of the arena (C7).
+pub struct ArenaView {
+    /// `owner[s]`: 0 is free, `c + 1` is class `c`.
+    pub owner: Vec<usize>,
+    /// `|F_c|` per class.
+    pub free_units: Vec<usize>,
+    /// `|R_c|` (with `Prot = ∅`) per class.
+    pub reclaimable: Vec<usize>,
+}
+
+impl Coordinator {
+    /// C6. `inspect(h)`.
+    pub fn inspect(&self, h: Handle) -> (r: Result<CoordRequestView, Error>)
+        requires
+            self.inv(),
+        ensures
+            r is Err <==> !(h.mgr == self@.id && self@.leases().contains_key(h.id)),
+            r is Err ==> r == Err::<CoordRequestView, Error>(Error::InvalidHandle),
+            r matches Ok(v) ==> {
+                let l = self@.leases()[h.id];
+                &&& v.len as nat == l.toks.len()
+                &&& v.computed as nat == l.c
+                &&& v.block_size as nat == self@.b
+                &&& (v.pending is Some) == (l.pending is Some)
+                &&& v.pending matches Some(t) ==> t.mgr == self@.id && Some(t.id) == l.pending
+                &&& v.lease.tables@.len() == self@.np
+                &&& forall|c: int| 0 <= c < self@.np ==> (#[trigger] v.lease.tables@[c])@ == self@.paged[c].leases[h.id].table
+                &&& v.lease.slots@ == self@.slots[h.id]
+            },
+    {
+        if self.lease_live(h).is_none() {
+            return Err(Error::InvalidHandle);
+        }
+        proof {
+            self.lemma_view();
+        }
+        let mut tables: Vec<Vec<PageId>> = Vec::new();
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                self.valid(),
+                h.mgr == self.id,
+                self.pv(0).leases.contains_key(h.id),
+                c <= self.npaged,
+                tables@.len() == c,
+                forall|c2: int| 0 <= c2 < c ==> (#[trigger] tables@[c2])@ == self.pv(c2).leases[h.id].table,
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int].valid());
+                assert(self.pv(c as int).leases.contains_key(h.id));
+            }
+            let mid_c = self.paged[c].mgr_id();
+            let rv = self.paged[c].inspect(Handle { mgr: mid_c, id: h.id });
+            match rv {
+                Ok(v) => {
+                    let ghost tb = tables@;
+                    tables.push(v.pages);
+                    proof {
+                        assert forall|c2: int| 0 <= c2 < c + 1 implies (#[trigger] tables@[c2])@ == self.pv(c2).leases[h.id].table by {
+                            if c2 < c {
+                                assert(tables@[c2] == tb[c2]);
+                            }
+                        }
+                    }
+                },
+                Err(_) => {
+                    proof {
+                        assert(false);
+                    }
+                    return Err(Error::InvalidHandle);
+                },
+            }
+            c += 1;
+        }
+        proof {
+            assert(self.paged@[0].valid());
+        }
+        let r0 = self.paged[0].inspect(Handle { mgr: self.paged[0].mgr_id(), id: h.id });
+        let rv0 = match r0 {
+            Ok(v) => v,
+            Err(_) => {
+                proof {
+                    assert(false);
+                }
+                return Err(Error::InvalidHandle);
+            },
+        };
+        proof {
+            assert(self.slots@.contains_key(h.id));
+        }
+        let slots = vstd::slice::slice_to_vec(self.slots.get(&h.id).unwrap().as_slice());
+        let pending = match rv0.pending {
+            Some(t) => Some(Ticket { mgr: self.id, id: t.id }),
+            None => None,
+        };
+        Ok(CoordRequestView {
+            len: rv0.len,
+            computed: rv0.computed,
+            pending,
+            block_size: self.b,
+            lease: LeaseView { tables, slots },
+        })
+    }
+
+    /// C6 `slot_of(c, h, j)`: the token-slot index of position `j` in paged class `c`.
+    pub fn slot_of(&self, c: usize, h: Handle, j: usize) -> (r: Result<usize, Error>)
+        requires
+            self.inv(),
+        ensures
+            !(h.mgr == self@.id && self@.leases().contains_key(h.id) && (c as nat) < self@.np) ==> r is Err,
+            (h.mgr == self@.id && self@.leases().contains_key(h.id) && (c as nat) < self@.np) ==> {
+                let l = self@.paged[c as int].leases[h.id];
+                &&& (j as nat) < l.toks.len() ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
+                    && slot_of(self@.b, l.table, j as int) < self@.paged[c as int].p * self@.b
+                &&& (j as nat) >= l.toks.len() ==> r == Err::<usize, Error>(Error::InvalidArgument)
+            },
+    {
+        if self.lease_live(h).is_none() || c >= self.npaged {
+            return Err(Error::InvalidHandle);
+        }
+        proof {
+            self.lemma_view();
+            assert(self.paged@[c as int].valid());
+            assert(self.pv(c as int).leases.contains_key(h.id));
+        }
+        let mid_c = self.paged[c].mgr_id();
+        self.paged[c].slot_of(Handle { mgr: mid_c, id: h.id }, j)
+    }
+
+    /// C7. `arena()`: slab owners, free units and reclaimable slabs per class.
+    pub fn arena(&self) -> (r: ArenaView)
+        requires
+            self.inv(),
+        ensures
+            r.owner@ == self@.owner,
+            r.free_units@.len() == self@.ncls(),
+            r.reclaimable@.len() == self@.ncls(),
+            forall|c: int| 0 <= c < self@.ncls() ==> #[trigger] r.free_units@[c] as nat == self@.cfree(c),
+            forall|c: int| 0 <= c < self@.ncls() ==> #[trigger] r.reclaimable@[c] as nat == self@.rcount(c, no_prot(self@)),
+    {
+        proof {
+            self.lemma_view();
+        }
+        let prot: Vec<bool> = vec![false; self.nslab];
+        proof {
+            assert(prot@ =~= no_prot(self@));
+        }
+        let mut fu: Vec<usize> = Vec::new();
+        let mut rc: Vec<usize> = Vec::new();
+        let k = self.unit.len();
+        let mut c: usize = 0;
+        while c < k
+            invariant
+                self.valid(),
+                k as nat == self.ncls(),
+                self@.ncls() == self.ncls(),
+                prot@ == no_prot(self@),
+                prot@.len() == self.nslab,
+                c <= k,
+                fu@.len() == c,
+                rc@.len() == c,
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] fu@[c2] as nat == self@.cfree(c2),
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] rc@[c2] as nat == self@.rcount(c2, no_prot(self@)),
+            decreases k - c,
+        {
+            fu.push(self.class_free(c));
+            rc.push(self.count_reclaimable(c, &prot));
+            c += 1;
+        }
+        ArenaView { owner: vstd::slice::slice_to_vec(self.owner.as_slice()), free_units: fu, reclaimable: rc }
     }
 }
 
