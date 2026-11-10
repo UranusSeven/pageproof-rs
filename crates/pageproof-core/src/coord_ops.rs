@@ -10,6 +10,9 @@ use crate::manager::*;
 use crate::state::*;
 use crate::coord::*;
 use crate::ops_release::*;
+use crate::ops_extend::*;
+use crate::slabplan::*;
+use crate::coord_attach::*;
 
 verus! {
 
@@ -35,6 +38,101 @@ pub open spec fn coord_released(o: CoordV, n: CoordV, h: u64) -> bool {
             w: o.state[j].w.update(o.slots[h][j] as int, None),
             ..o.state[j]
         })
+}
+
+/// C2 demand: `m' - m` blocks in every paged class, nothing in state classes.
+pub open spec fn extend_demand(o: CoordV, d: nat) -> Seq<usize> {
+    Seq::new(o.ncls(), |c: int| if c < o.np { d as usize } else { 0usize })
+}
+
+pub open spec fn no_prot(o: CoordV) -> Seq<bool> {
+    Seq::new(o.nslab, |s: int| false)
+}
+
+/// C2 success relation: `mid` is `o` after the slab plan; then every paged class extended `h` by
+/// `suffix` with fresh pages `fresh[c]`.
+pub open spec fn coord_extended(o: CoordV, mid: CoordV, n: CoordV, h: u64, suffix: Seq<Token>, d: nat, tables: Seq<Seq<PageId>>) -> bool {
+    let l = o.leases()[h];
+    let m = l.table.len();
+    &&& mid.plan_rel(o, extend_demand(o, d), no_prot(o))
+    &&& tables.len() == o.np
+    &&& n.id == o.id
+    &&& n.nslab == o.nslab
+    &&& n.sbytes == o.sbytes
+    &&& n.b == o.b
+    &&& n.unit == o.unit
+    &&& n.per == o.per
+    &&& n.np == o.np
+    &&& n.owner == mid.owner
+    &&& n.paged.len() == o.paged.len()
+    &&& n.state == mid.state
+    &&& n.slots == mid.slots
+    &&& forall|c: int|
+        0 <= c < o.np ==> {
+            let fresh = (#[trigger] tables[c]).subrange(o.paged[c].leases[h].table.len() as int, tables[c].len() as int);
+            &&& tables[c].len() == cdiv(l.toks.len() + suffix.len(), o.b)
+            &&& tables[c].subrange(0, o.paged[c].leases[h].table.len() as int) == o.paged[c].leases[h].table
+            &&& fresh.len() == d
+            &&& fresh.no_duplicates()
+            &&& forall|j: int| 0 <= j < fresh.len() ==> mid.paged[c].is_free(#[trigger] fresh[j])
+            &&& n.paged[c] == extended(mid.paged[c], h, suffix, fresh)
+        }
+}
+
+/// The complete C2 contract.
+pub open spec fn coord_extend_result(o: CoordV, n: CoordV, h: Handle, suffix: Seq<Token>, r: Result<LeaseView, Error>) -> bool {
+    let live = h.mgr == o.id && o.leases().contains_key(h.id);
+    let l = o.leases()[h.id];
+    let l2 = l.toks.len() + suffix.len();
+    let d = (cdiv(l2, o.b) - cdiv(l.toks.len(), o.b)) as nat;
+    let ok = live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(cdiv(l2, o.b));
+    &&& !live ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
+    &&& (live && l.pending is Some) ==> r == Err::<LeaseView, Error>(Error::Busy)
+    &&& (live && l.pending is None && l.c != l.toks.len()) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
+    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
+        Error::InvalidArgument,
+    )
+    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(cdiv(l2, o.b))) ==> r == Err::<
+        LeaseView,
+        Error,
+    >(Error::RequestTooLarge)
+    &&& ok ==> (r is Ok <==> o.cap(extend_demand(o, d), no_prot(o)))
+    &&& (ok && !o.cap(extend_demand(o, d), no_prot(o))) ==> r == Err::<LeaseView, Error>(Error::NoCapacity)
+    &&& r is Err ==> n == o
+    &&& r matches Ok(view) ==> ok && exists|mid: CoordV| #[trigger] coord_extended(o, mid, n, h.id, suffix, d, tables_view(view.tables@))
+}
+
+pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffix: Seq<Token>, view: LeaseView)
+    requires
+        h.mgr == o.id,
+        o.leases().contains_key(h.id),
+        o.leases()[h.id].pending is None,
+        o.leases()[h.id].c == o.leases()[h.id].toks.len(),
+        suffix.len() > 0,
+        o.fits_m(cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b)),
+        o.cap(
+            extend_demand(o, (cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b) - cdiv(o.leases()[h.id].toks.len(), o.b)) as nat),
+            no_prot(o),
+        ),
+        coord_extended(
+            o,
+            mid,
+            n,
+            h.id,
+            suffix,
+            (cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b) - cdiv(o.leases()[h.id].toks.len(), o.b)) as nat,
+            tables_view(view.tables@),
+        ),
+    ensures
+        coord_extend_result(o, n, h, suffix, Ok(view)),
+{
+    let l = o.leases()[h.id];
+    let l2 = l.toks.len() + suffix.len();
+    let d = (cdiv(l2, o.b) - cdiv(l.toks.len(), o.b)) as nat;
+    assert(coord_extended(o, mid, n, h.id, suffix, d, tables_view(view.tables@)));
+    let r = Ok::<LeaseView, Error>(view);
+    assert(r->Ok_0 == view);
+    assert(exists|m2: CoordV| #[trigger] coord_extended(o, m2, n, h.id, suffix, d, tables_view(view.tables@)));
 }
 
 impl Coordinator {
@@ -338,6 +436,502 @@ impl Coordinator {
             w: o@.state[j].w.update(o@.slots[h][j] as int, None),
             ..o@.state[j]
         }) by {}
+    }
+}
+
+
+impl Coordinator {
+    /// Paged table length of a live lease is `cdiv(L, B)`.
+    pub(crate) proof fn lemma_table_len(&self, c: int, h: u64)
+        requires
+            self.valid(),
+            0 <= c < self.np(),
+            self.pv(c).leases.contains_key(h),
+        ensures
+            self.pv(c).leases[h].table.len() == cdiv(self.pv(c).leases[h].toks.len(), self.b as nat),
+    {
+        assert(self.paged@[c].valid());
+        reveal(lease_ok);
+        assert(lease_ok(self.pv(c), self.paged@[c].den_log(), h));
+        let l = self.pv(c).leases[h];
+        let m = l.table.len();
+        let q = cdiv(l.toks.len(), self.b as nat);
+        lemma_cdiv_props(l.toks.len(), self.b as nat);
+        if m < q {
+            lemma_mul_mono(m, (q - 1) as nat, self.b as nat);
+        }
+        if m > q {
+            lemma_mul_mono(q, (m - 1) as nat, self.b as nat);
+        }
+    }
+
+    /// `valid` after extending lease `h` in every paged class (state classes untouched).
+    proof fn lemma_extend_valid(&self, mid: &Coordinator, h: u64, suffix: Seq<Token>)
+        requires
+            mid.valid(),
+            mid.pv(0).leases.contains_key(h),
+            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat)),
+            self.id == mid.id,
+            self.nslab == mid.nslab,
+            self.sbytes == mid.sbytes,
+            self.b == mid.b,
+            self.npaged == mid.npaged,
+            self.unit@ == mid.unit@,
+            self.per@ == mid.per@,
+            self.owner@ == mid.owner@,
+            self.fs == mid.fs,
+            self.paged@.len() == mid.paged@.len(),
+            self.state@ == mid.state@,
+            self.slots@ == mid.slots@,
+            forall|c: int|
+                0 <= c < mid.np() ==> {
+                    &&& (#[trigger] self.paged@[c]).valid()
+                    &&& self.pv(c).own == mid.pv(c).own
+                    &&& self.pv(c).p == mid.pv(c).p
+                    &&& self.pv(c).b == mid.pv(c).b
+                    &&& self.pv(c).ns == mid.pv(c).ns
+                    &&& self.pv(c).pend == mid.pv(c).pend
+                    &&& self.pv(c).next_handle == mid.pv(c).next_handle
+                    &&& self.pv(c).next_ticket == mid.pv(c).next_ticket
+                    &&& self.pv(c).leases == mid.pv(c).leases.insert(
+                        h,
+                        LeaseV {
+                            toks: mid.pv(c).leases[h].toks + suffix,
+                            table: self.pv(c).leases[h].table,
+                            ..mid.pv(c).leases[h]
+                        },
+                    )
+                },
+        ensures
+            self.valid(),
+    {
+        assert(self.cfg_ok());
+        assert(self.pools_ok()) by {
+            assert forall|i: int| 0 <= i < self.np() implies {
+                &&& #[trigger] self.paged@[i].valid()
+                &&& self.pv(i).p == self.cunits(i)
+                &&& self.pv(i).b == self.b as nat
+                &&& self.pv(i).ns == self.pv(0).ns
+            } by {
+                assert(mid.paged@[i].valid());
+                assert(self.paged@[0].valid());
+            }
+            assert forall|j: int| 0 <= j < self.nst() implies {
+                &&& #[trigger] self.state@[j].valid()
+                &&& self.sv(j).p == self.cunits(self.np() + j)
+            } by {
+                assert(mid.state@[j].valid());
+            }
+        }
+        assert(self.own_ok()) by {
+            assert forall|c: int, x: int| 0 <= c < self.ncls() && 0 <= x < self.cunits(c) implies #[trigger] self.cown(c, x)
+                == (self.owner@[x / (self.per_c(c) as int)] == c + 1) by {
+                assert(mid.cown(c, x) == (mid.owner@[x / (mid.per_c(c) as int)] == c + 1));
+                if c < self.np() {
+                    assert(self.paged@[c].valid());
+                }
+            }
+        }
+        assert(self.paged@[0].valid());
+        assert(self.lock_ok()) by {
+            assert forall|i: int| #![trigger self.paged@[i]] 0 <= i < self.np() implies {
+                &&& self.pv(i).leases.dom() == self.pv(0).leases.dom()
+                &&& self.pv(i).pend == self.pv(0).pend
+                &&& self.pv(i).next_handle == self.pv(0).next_handle
+                &&& self.pv(i).next_ticket == self.pv(0).next_ticket
+            } by {
+                assert(mid.paged@[i] == mid.paged@[i]);
+                assert(self.pv(i).leases.dom() =~= mid.pv(i).leases.dom());
+                assert(self.pv(0).leases.dom() =~= mid.pv(0).leases.dom());
+            }
+            assert forall|i: int, h2: u64| 0 <= i < self.np() && #[trigger] self.pv(i).leases.contains_key(h2) implies {
+                &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
+                &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
+                &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+            } by {
+                assert(self.paged@[i].valid());
+                assert(mid.pv(i).leases.contains_key(h2));
+                assert(mid.paged@[i] == mid.paged@[i]);
+                assert(mid.pv(i).leases.contains_key(h));
+            }
+            assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
+                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+            ) by {
+                assert(mid.pv(0).leases.contains_key(h2));
+            }
+        }
+        assert(self.slots_ok()) by {
+            assert(self.slots@.dom() =~= self.pv(0).leases.dom());
+            assert forall|h2: u64, j: int|
+                #![trigger self.slots@[h2]@[j]]
+                self.slots@.contains_key(h2) && 0 <= j < self.nst() implies {
+                let x = self.slots@[h2]@[j];
+                let l2 = self.pv(0).leases[h2];
+                &&& (x as nat) < self.sv(j).p
+                &&& self.sv(j).holder[x as int] == Some(h2)
+                &&& l2.c > 0 ==> self.sv(j).w[x as int] == Some(l2.toks.subrange(0, l2.c as int))
+            } by {
+                assert(mid.slots@.contains_key(h2));
+                if h2 == h {
+                    let l0 = mid.pv(0).leases[h];
+                    let l2 = self.pv(0).leases[h];
+                    if l2.c > 0 {
+                        assert(l2.c == l0.c);
+                        assert(l2.toks == l0.toks + suffix);
+                        reveal(lease_ok);
+                        assert(mid.paged@[0].valid());
+                        assert(lease_ok(mid.pv(0), mid.paged@[0].den_log(), h));
+                        assert(l2.toks.subrange(0, l2.c as int) =~= l0.toks.subrange(0, l0.c as int));
+                    }
+                }
+            }
+            assert forall|j: int, x: int|
+                #![trigger self.sv(j).holder[x]]
+                0 <= j < self.nst() && 0 <= x < self.sv(j).p && self.sv(j).holder[x] is Some implies {
+                let h2 = self.sv(j).holder[x]->Some_0;
+                &&& self.slots@.contains_key(h2)
+                &&& self.slots@[h2]@[j] as int == x
+            } by {
+                assert(self.state@[j] == mid.state@[j]);
+                assert(mid.sv(j).holder[x] is Some);
+            }
+        }
+    }
+
+    /// C2. `extend(h, suffix)` across every class.
+    pub fn extend(&mut self, h: Handle, suffix: &[Token]) -> (r: Result<LeaseView, Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_extend_result(old(self)@, final(self)@, h, suffix@, r),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        match self.lease_live(h) {
+            None => return Err(Error::InvalidHandle),
+            Some(true) => return Err(Error::Busy),
+            Some(false) => {},
+        }
+        proof {
+            o.lemma_view();
+            assert(self.paged@[0].valid());
+        }
+        let (len, c0, _) = self.paged[0].lease_info(h.id);
+        if c0 != len {
+            return Err(Error::InvalidPhase);
+        }
+        if suffix.len() == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let b = self.b;
+        proof {
+            self.lemma_table_len(0, h.id);
+            reveal(lease_ok);
+            assert(lease_ok(self.pv(0), self.paged@[0].den_log(), h.id));
+            self.lemma_nslab_bound();
+            assert(self.fits_m(cdiv(len as nat, b as nat)));
+            lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, cdiv(len as nat, b as nat), 0);
+            assert(self.unit@[0] >= 1);
+            lemma_cdiv_props(len as nat, b as nat);
+            lemma_mul_mono(cdiv(len as nat, b as nat), self.cunits(0), b as nat);
+        }
+        if suffix.len() > MAX_SLOTS as usize - len {
+            proof {
+                assert(!ov.fits_m(cdiv((len + suffix@.len()) as nat, b as nat))) by {
+                    if ov.fits_m(cdiv((len + suffix@.len()) as nat, b as nat)) {
+                        lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, cdiv((len + suffix@.len()) as nat, b as nat), 0);
+                        lemma_cdiv_props((len + suffix@.len()) as nat, b as nat);
+                        lemma_mul_mono(cdiv((len + suffix@.len()) as nat, b as nat), self.cunits(0), b as nat);
+                    }
+                }
+            }
+            return Err(Error::RequestTooLarge);
+        }
+        let l2 = len + suffix.len();
+        let m = (len - 1) / b + 1;
+        let m2 = (l2 - 1) / b + 1;
+        proof {
+            assert(len >= 1);
+            vstd::arithmetic::div_mod::lemma_div_plus_one((len - 1) as int, b as int);
+            vstd::arithmetic::div_mod::lemma_div_plus_one((l2 - 1) as int, b as int);
+            assert(((len - 1 + b) as int) / (b as int) == ((len - 1) as int) / (b as int) + 1);
+            assert(((l2 - 1 + b) as int) / (b as int) == ((l2 - 1) as int) / (b as int) + 1);
+            assert(m as nat == cdiv(len as nat, b as nat));
+            assert(m2 as nat == cdiv(l2 as nat, b as nat));
+            lemma_cdiv_mono(len as nat, l2 as nat, b as nat);
+        }
+        if !self.fits_exec(m2) {
+            return Err(Error::RequestTooLarge);
+        }
+        let dd = m2 - m;
+        let k_all = self.unit.len();
+        let mut d: Vec<usize> = Vec::new();
+        let mut c: usize = 0;
+        while c < k_all
+            invariant
+                k_all as nat == self.ncls(),
+                self.npaged as nat == self.np(),
+                c <= k_all,
+                d@.len() == c,
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] d@[c2] == extend_demand(ov, dd as nat)[c2],
+                ov.ncls() == self.ncls(),
+                ov.np == self.np(),
+            decreases k_all - c,
+        {
+            d.push(if c < self.npaged { dd } else { 0 });
+            c += 1;
+        }
+        let prot: Vec<bool> = vec![false; self.nslab];
+        proof {
+            assert(d@ =~= extend_demand(ov, dd as nat));
+            assert(prot@ =~= no_prot(ov));
+            assert forall|c2: int| 0 <= c2 < d@.len() implies #[trigger] d@[c2] <= max_slots() by {
+                lemma_cdiv_le(l2 as nat, b as nat, max_slots());
+                assert(l2 as nat <= max_slots() * (b as nat)) by (nonlinear_arith) requires l2 <= max_slots(), b >= 1;
+            }
+        }
+        if !self.check_cap(&d, &prot) {
+            return Err(Error::NoCapacity);
+        }
+        let ghost pre = *self;
+        self.run_plan(&d, &prot);
+        let ghost mid = *self;
+        proof {
+            mid.lemma_view();
+            pre.lemma_view();
+            mid.lemma_view_cls();
+            assert forall|c2: int| 0 <= c2 < mid.np() implies (#[trigger] mid.pv(c2)).leases == pre.pv(c2).leases
+                && mid.pv(c2).free_set().len() >= dd && mid.pv(c2).id == pre.pv(c2).id by {
+                assert(mid.paged@[c2] == mid.paged@[c2]);
+                assert(mid@.cfree(c2) >= d@[c2]);
+            }
+        }
+        let mut tables: Vec<Vec<PageId>> = Vec::new();
+        let ghost lv0 = mid.pv(0).leases[h.id];
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                mid.valid(),
+                mid.pv(0).leases.contains_key(h.id),
+                mid.pv(0).leases[h.id].pending is None,
+                mid.pv(0).leases[h.id].c == len,
+                mid.pv(0).leases[h.id].toks.len() == len,
+                l2 == len + suffix@.len(),
+                suffix@.len() > 0,
+                m2 as nat == cdiv(l2 as nat, b as nat),
+                m as nat == cdiv(len as nat, b as nat),
+                dd == m2 - m,
+                b == mid.b,
+                mid.fits_m(m2 as nat),
+                forall|c2: int| 0 <= c2 < mid.np() ==> (#[trigger] mid.pv(c2)).free_set().len() >= dd,
+                self.npaged == mid.npaged,
+                self.paged@.len() == mid.paged@.len(),
+                self.state@ == mid.state@,
+                self.slots@ == mid.slots@,
+                self.id == mid.id,
+                self.nslab == mid.nslab,
+                self.sbytes == mid.sbytes,
+                self.b == mid.b,
+                self.unit@ == mid.unit@,
+                self.per@ == mid.per@,
+                self.owner@ == mid.owner@,
+                self.fs == mid.fs,
+                c <= self.npaged,
+                tables@.len() == c,
+                forall|c2: int| c <= c2 < mid.np() ==> #[trigger] self.paged@[c2] == mid.paged@[c2],
+                forall|c2: int|
+                    0 <= c2 < c ==> (#[trigger] self.paged@[c2]).valid() && extend_result(
+                        mid.pv(c2),
+                        self.pv(c2),
+                        Handle { mgr: mid.pv(c2).id, id: h.id },
+                        suffix@,
+                        Ok(PageTableView { pages: tables@[c2] }),
+                    ),
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int] == mid.paged@[c as int]);
+                assert(mid.paged@[c as int].valid());
+                mid.lemma_table_len(c as int, h.id);
+                assert(mid.pv(c as int).leases[h.id].toks == mid.pv(0).leases[h.id].toks);
+                assert(mid.pv(c as int).leases[h.id].c == mid.pv(0).leases[h.id].c);
+                assert(mid.pv(c as int).leases[h.id].pending == mid.pv(0).leases[h.id].pending);
+                assert(mid.unit@[c as int] >= 1);
+                lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m2 as nat, c as int);
+                lemma_cdiv_props(l2 as nat, b as nat);
+                lemma_mul_mono(m2 as nat, mid.cunits(c as int), b as nat);
+            }
+            let mid_c = self.paged[c].mgr_id();
+            let ghost p0 = self.paged@;
+            let r = self.paged[c].extend(Handle { mgr: mid_c, id: h.id }, suffix);
+            proof {
+                assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
+            }
+            match r {
+                Ok(view) => {
+                    let ghost tb = tables@;
+                    tables.push(view.pages);
+                    proof {
+                        assert forall|c2: int| 0 <= c2 < c + 1 implies (#[trigger] self.paged@[c2]).valid() && extend_result(
+                            mid.pv(c2),
+                            self.pv(c2),
+                            Handle { mgr: mid.pv(c2).id, id: h.id },
+                            suffix@,
+                            Ok(PageTableView { pages: tables@[c2] }),
+                        ) by {
+                            if c2 < c {
+                                assert(self.paged@[c2] == p0[c2]);
+                                assert(tables@[c2] == tb[c2]);
+                            }
+                        }
+                    }
+                },
+                Err(_) => {
+                    proof {
+                        assert(false);
+                    }
+                    return Err(Error::NoCapacity);
+                },
+            }
+            c += 1;
+        }
+        proof {
+            o.lemma_view();
+            pre.lemma_view();
+            assert(mid.pv(0).leases[h.id] == ov.leases()[h.id]) by {
+                assert(ov.paged[0] == pre.pv(0));
+            }
+            Self::lemma_extend_post(&o, &pre, &mid, self, h.id, suffix@, dd as nat, d@, prot@, &tables);
+            assert(self.slots@.contains_key(h.id)) by {
+                assert(mid.slots@.dom() == mid.pv(0).leases.dom());
+            }
+        }
+        let slv = vstd::slice::slice_to_vec(self.slots.get(&h.id).unwrap().as_slice());
+        let lv = LeaseView { tables, slots: slv };
+        proof {
+            assert(ov.leases()[h.id].toks.len() == len);
+            assert(dd as nat == (cdiv(l2 as nat, b as nat) - cdiv(len as nat, b as nat)) as nat);
+            assert(ov.b == b as nat);
+            lemma_extend_ok(ov, mid@, self@, h, suffix@, lv);
+        }
+        Ok(lv)
+    }
+
+    proof fn lemma_extend_post(
+        o: &Coordinator,
+        pre: &Coordinator,
+        mid: &Coordinator,
+        fin: &Coordinator,
+        h: u64,
+        suffix: Seq<Token>,
+        dd: nat,
+        d: Seq<usize>,
+        prot: Seq<bool>,
+        tables: &Vec<Vec<PageId>>,
+    )
+        requires
+            o.valid(),
+            o@ == pre@,
+            pre.valid(),
+            mid.valid(),
+            d == extend_demand(o@, dd),
+            prot == no_prot(o@),
+            mid@.plan_rel(pre@, d, prot),
+            mid.pv(0).leases.contains_key(h),
+            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat)),
+            dd == cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat) - cdiv(
+                mid.pv(0).leases[h].toks.len(),
+                mid.b as nat,
+            ),
+            forall|c2: int| 0 <= c2 < mid.np() ==> (#[trigger] mid.pv(c2)).leases == pre.pv(c2).leases,
+            fin.npaged == mid.npaged,
+            fin.paged@.len() == mid.paged@.len(),
+            fin.state@ == mid.state@,
+            fin.slots@ == mid.slots@,
+            fin.id == mid.id,
+            fin.nslab == mid.nslab,
+            fin.sbytes == mid.sbytes,
+            fin.b == mid.b,
+            fin.unit@ == mid.unit@,
+            fin.per@ == mid.per@,
+            fin.owner@ == mid.owner@,
+            fin.fs == mid.fs,
+            tables@.len() == mid.np(),
+            forall|c2: int|
+                0 <= c2 < mid.np() ==> (#[trigger] fin.paged@[c2]).valid() && extend_result(
+                    mid.pv(c2),
+                    fin.pv(c2),
+                    Handle { mgr: mid.pv(c2).id, id: h },
+                    suffix,
+                    Ok(PageTableView { pages: tables@[c2] }),
+                ),
+        ensures
+            fin.valid(),
+            coord_extended(o@, mid@, fin@, h, suffix, dd, tables_view(tables@)),
+    {
+        assert forall|c: int| 0 <= c < mid.np() implies {
+            &&& (#[trigger] fin.paged@[c]).valid()
+            &&& fin.pv(c).own == mid.pv(c).own
+            &&& fin.pv(c).p == mid.pv(c).p
+            &&& fin.pv(c).b == mid.pv(c).b
+            &&& fin.pv(c).ns == mid.pv(c).ns
+            &&& fin.pv(c).pend == mid.pv(c).pend
+            &&& fin.pv(c).next_handle == mid.pv(c).next_handle
+            &&& fin.pv(c).next_ticket == mid.pv(c).next_ticket
+            &&& fin.pv(c).leases == mid.pv(c).leases.insert(
+                h,
+                LeaseV { toks: mid.pv(c).leases[h].toks + suffix, table: fin.pv(c).leases[h].table, ..mid.pv(c).leases[h] },
+            )
+        } by {
+            let fresh = tables@[c]@.subrange(mid.pv(c).leases[h].table.len() as int, tables@[c]@.len() as int);
+            assert(fin.pv(c) == extended(mid.pv(c), h, suffix, fresh));
+        }
+        assert(mid.pv(0).leases[h] == fin.pv(0).leases[h] || true);
+        fin.lemma_extend_valid(mid, h, suffix);
+        o.lemma_view();
+        pre.lemma_view();
+        mid.lemma_view();
+        fin.lemma_view();
+        let tv = tables_view(tables@);
+        assert forall|c: int| 0 <= c < o@.np implies {
+            let fresh = (#[trigger] tv[c]).subrange(o@.paged[c].leases[h].table.len() as int, tv[c].len() as int);
+            &&& tv[c].len() == cdiv(o@.leases()[h].toks.len() + suffix.len(), o@.b)
+            &&& tv[c].subrange(0, o@.paged[c].leases[h].table.len() as int) == o@.paged[c].leases[h].table
+            &&& fresh.len() == dd
+            &&& fresh.no_duplicates()
+            &&& forall|j: int| 0 <= j < fresh.len() ==> mid@.paged[c].is_free(#[trigger] fresh[j])
+            &&& fin@.paged[c] == extended(mid@.paged[c], h, suffix, fresh)
+        } by {
+            assert(tv[c] == tables@[c]@);
+            assert(o@.paged[c] == pre.pv(c));
+            assert(mid.pv(c).leases == pre.pv(c).leases);
+            assert(mid.paged@[c].valid());
+            assert(mid.pv(c).leases.contains_key(h));
+            assert(mid.pv(c).leases[h].toks == mid.pv(0).leases[h].toks);
+            mid.lemma_table_len(c, h);
+            mid.lemma_table_len(0, h);
+            assert(o@.paged[0] == pre.pv(0));
+            assert(o@.leases()[h] == mid.pv(0).leases[h]);
+            assert(mid@.paged[c] == mid.pv(c));
+            assert(fin@.paged[c] == fin.pv(c));
+            let mv = mid.pv(c);
+            let l = mv.leases[h];
+            let r = Ok::<PageTableView, Error>(PageTableView { pages: tables@[c] });
+            assert(extend_result(mv, fin.pv(c), Handle { mgr: mv.id, id: h }, suffix, r));
+            let view = r->Ok_0;
+            assert(view.pages@ == tables@[c]@);
+            let fresh = view.pages@.subrange(l.table.len() as int, view.pages@.len() as int);
+            assert(view.pages@.len() == cdiv(l.toks.len() + suffix.len(), mv.b));
+            assert(fresh.len() == cdiv(l.toks.len() + suffix.len(), mv.b) - l.table.len());
+            assert(forall|j: int| 0 <= j < fresh.len() ==> mv.is_free(#[trigger] fresh[j]));
+            assert(fin.pv(c) == extended(mv, h, suffix, fresh));
+            assert(l.toks.len() == o@.leases()[h].toks.len());
+            assert(mid@.b == o@.b);
+            assert(mv.b == o@.b);
+        }
+        assert(fin@.state =~= mid@.state);
+        assert(fin@.slots =~= mid@.slots);
     }
 }
 

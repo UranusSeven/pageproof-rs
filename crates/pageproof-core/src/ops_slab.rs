@@ -230,6 +230,24 @@ impl Manager {
         }
     }
 
+    /// `(|T_h|, c_h, pending)` of a live lease.
+    pub fn lease_info(&self, h: u64) -> (r: (usize, usize, bool))
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r.0 as nat == self@.leases[h].toks.len(),
+            r.1 as nat == self@.leases[h].c,
+            r.2 == (self@.leases[h].pending is Some),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let l = self.leases.get(&h).unwrap();
+        (l.toks.len(), l.c, l.pending.is_some())
+    }
+
     pub fn next_handle_exec(&self) -> (r: u64)
         requires
             self.valid(),
