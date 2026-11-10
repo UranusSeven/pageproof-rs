@@ -194,6 +194,15 @@ impl Manager {
         true
     }
 
+    pub fn next_handle_exec(&self) -> (r: u64)
+        requires
+            self.valid(),
+        ensures
+            r == self@.next_handle,
+    {
+        self.next_handle
+    }
+
     /// Every candidate page of key `k` in this class (`Index_c[k]`).
     pub fn candidates(&self, k: &Digest) -> (r: Vec<PageId>)
         requires

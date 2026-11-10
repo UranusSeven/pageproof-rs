@@ -966,4 +966,274 @@ impl Coordinator {
     }
 }
 
+
+impl Coordinator {
+    /// Commits the new lease in every paged class and takes a live slot in every state class.
+    fn attach_commit_all(&mut self, toks: &[Token], tp: Vec<Probe>, Ghost(k): Ghost<nat>, Ghost(m): Ghost<nat>) -> (r: (
+        usize,
+        LeaseView,
+    ))
+        requires
+            old(self).valid(),
+            1 <= toks@.len(),
+            m == cdiv(toks@.len(), old(self).b as nat),
+            k + 1 <= m,
+            m <= usize::MAX,
+            old(self).nst() > 0 ==> k == 0,
+            old(self)@.fits_m(m),
+            old(self).next_handle() < u64::MAX,
+            tp@.len() == old(self).np(),
+            forall|c: int|
+                0 <= c < old(self).np() ==> {
+                    &&& probe_ok(old(self).pv(c), old(self).paged@[c].den_log(), toks@, #[trigger] tp@[c])
+                    &&& tp@[c].hits@.len() == k
+                    &&& old(self).pv(c).free_set().len() >= m - count_active(old(self).pv(c), toks@, k)
+                },
+            forall|j: int| 0 <= j < old(self).nst() ==> #[trigger] old(self).sv(j).free_set().len() >= 1,
+        ensures
+            final(self).valid(),
+            r.0 as nat == k * (old(self).b as nat),
+            r.1.tables@.len() == old(self).np(),
+            r.1.slots@.len() == old(self).nst(),
+            final(self).id == old(self).id,
+            final(self).nslab == old(self).nslab,
+            final(self).sbytes == old(self).sbytes,
+            final(self).b == old(self).b,
+            final(self).npaged == old(self).npaged,
+            final(self).unit@ == old(self).unit@,
+            final(self).per@ == old(self).per@,
+            final(self).owner@ == old(self).owner@,
+            final(self).paged@.len() == old(self).paged@.len(),
+            final(self).state@.len() == old(self).state@.len(),
+            final(self).slots@.dom() == old(self).slots@.dom().insert(old(self).next_handle()),
+            final(self).slots@[old(self).next_handle()]@ == r.1.slots@,
+            forall|h2: u64| #[trigger] old(self).slots@.contains_key(h2) ==> final(self).slots@[h2] == old(self).slots@[h2],
+            forall|c: int|
+                0 <= c < old(self).np() ==> {
+                    &&& (#[trigger] r.1.tables@[c])@.len() == m
+                    &&& attach_choice_k(old(self).pv(c), toks@, r.1.tables@[c]@, k)
+                    &&& final(self).pv(c) == attached(old(self).pv(c), toks@, r.1.tables@[c]@, k)
+                },
+            forall|j: int|
+                0 <= j < old(self).nst() ==> {
+                    &&& old(self).sv(j).free_set().contains(#[trigger] r.1.slots@[j])
+                    &&& final(self).sv(j) == (StateV {
+                        holder: old(self).sv(j).holder.update(r.1.slots@[j] as int, Some(old(self).next_handle())),
+                        w: old(self).sv(j).w.update(r.1.slots@[j] as int, None),
+                        ..old(self).sv(j)
+                    })
+                },
+    {
+        let ghost mid = *self;
+        let ghost h = mid.next_handle();
+        let mut tables: Vec<Vec<PageId>> = Vec::new();
+        let mut cached: usize = 0;
+        let mut tp = tp;
+        proof {
+            assert(self.paged@[0].valid());
+        }
+        let hid = self.paged[0].next_handle_exec();
+        let mut c: usize = 0;
+        proof {
+            mid.lemma_view();
+        }
+        while c < self.npaged
+            invariant
+                mid.valid(),
+                h == mid.next_handle(),
+                h < u64::MAX,
+                1 <= toks@.len(),
+                m == cdiv(toks@.len(), mid.b as nat),
+                k + 1 <= m,
+                mid@.fits_m(m),
+                self.npaged == mid.npaged,
+                self.paged@.len() == mid.paged@.len(),
+                self.state@ == mid.state@,
+                self.slots@ == mid.slots@,
+                self.b == mid.b,
+                self.id == mid.id,
+                self.nslab == mid.nslab,
+                self.sbytes == mid.sbytes,
+                self.unit@ == mid.unit@,
+                self.per@ == mid.per@,
+                self.owner@ == mid.owner@,
+                self.fs == mid.fs,
+                c <= self.npaged,
+                tp@.len() == mid.np(),
+                tables@.len() == c,
+                c > 0 ==> cached as nat == k * (mid.b as nat),
+                forall|c2: int|
+                    c <= c2 < mid.np() ==> {
+                        &&& probe_ok(mid.pv(c2), mid.paged@[c2].den_log(), toks@, #[trigger] tp@[c2])
+                        &&& tp@[c2].hits@.len() == k
+                        &&& mid.pv(c2).free_set().len() >= m - count_active(mid.pv(c2), toks@, k)
+                        &&& self.paged@[c2] == mid.paged@[c2]
+                    },
+                forall|c2: int|
+                    0 <= c2 < c ==> {
+                        &&& (#[trigger] self.paged@[c2]).valid()
+                        &&& tables@[c2]@.len() == m
+                        &&& attach_choice_k(mid.pv(c2), toks@, tables@[c2]@, k)
+                        &&& self.pv(c2) == attached(mid.pv(c2), toks@, tables@[c2]@, k)
+                    },
+            decreases self.npaged - c,
+        {
+            let pr = copy_probe(&tp[c]);
+            proof {
+                assert(self.paged@[c as int] == mid.paged@[c as int]);
+                assert(mid.paged@[c as int].valid());
+                lemma_probe_ok_views(mid.pv(c as int), mid.paged@[c as int].den_log(), toks@, tp@[c as int], pr);
+                assert(mid.unit@[c as int] >= 1);
+                lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m, c as int);
+                lemma_cdiv_props(toks@.len(), mid.b as nat);
+                lemma_mul_mono(m, mid.cunits(c as int), mid.b as nat);
+                assert(mid.pv(c as int).next_handle == h);
+            }
+            let ghost p0 = self.paged@;
+            let (hh, ch, view) = self.paged[c].attach_commit(toks, pr);
+            proof {
+                assert forall|c2: int| 0 <= c2 < self.paged@.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
+            }
+            cached = ch;
+            tables.push(view.pages);
+            proof {
+                assert forall|c2: int|
+                    0 <= c2 < c + 1 implies {
+                    &&& (#[trigger] self.paged@[c2]).valid()
+                    &&& tables@[c2]@.len() == m
+                    &&& attach_choice_k(mid.pv(c2), toks@, tables@[c2]@, k)
+                    &&& self.pv(c2) == attached(mid.pv(c2), toks@, tables@[c2]@, k)
+                } by {
+                    if c2 < c {
+                        assert(self.paged@[c2] == p0[c2]);
+                    }
+                }
+            }
+            c += 1;
+        }
+        let ghost tabs = tables@;
+        proof {
+            assert forall|c2: int| 0 <= c2 < mid.np() implies (#[trigger] self.paged@[c2]).valid() && tabs[c2]@.len() == m
+                && attach_choice_k(mid.pv(c2), toks@, tabs[c2]@, k) && self.pv(c2) == attached(mid.pv(c2), toks@, tabs[c2]@, k) by {
+                assert(self.paged@[c2].valid());
+            }
+        }
+        // State classes.
+        let mut sl: Vec<usize> = Vec::new();
+        let mut j: usize = 0;
+        let ghost pg = self.paged@;
+        while j < self.state.len()
+            invariant
+                mid.valid(),
+                h == mid.next_handle(),
+                self.state@.len() == mid.state@.len(),
+                self.paged@ == pg,
+                j <= self.state@.len(),
+                sl@.len() == j,
+                forall|j2: int| j <= j2 < mid.nst() ==> #[trigger] self.state@[j2] == mid.state@[j2],
+                forall|j2: int| 0 <= j2 < mid.nst() ==> #[trigger] mid.sv(j2).free_set().len() >= 1,
+                forall|j2: int|
+                    0 <= j2 < j ==> {
+                        &&& (#[trigger] self.state@[j2]).valid()
+                        &&& mid.sv(j2).free_set().contains(sl@[j2])
+                        &&& self.sv(j2) == (StateV {
+                            holder: mid.sv(j2).holder.update(sl@[j2] as int, Some(h)),
+                            w: mid.sv(j2).w.update(sl@[j2] as int, None),
+                            ..mid.sv(j2)
+                        })
+                    },
+            decreases self.state@.len() - j,
+        {
+            proof {
+                assert(self.state@[j as int] == mid.state@[j as int]);
+                assert(mid.state@[j as int].valid());
+                mid.paged@[0].lemma_handles_lt();
+                assert forall|y: int| 0 <= y < mid.sv(j as int).p implies #[trigger] mid.sv(j as int).holder[y] != Some(h) by {
+                    if mid.sv(j as int).holder[y] == Some(h) {
+                        assert(mid.slots@.contains_key(h));
+                    }
+                }
+            }
+            let ghost s0 = self.state@;
+            let x = self.state[j].acquire(Ghost(h));
+            proof {
+                assert forall|j2: int| 0 <= j2 < s0.len() && j2 != j implies #[trigger] self.state@[j2] == s0[j2] by {}
+            }
+            sl.push(x);
+            proof {
+                assert forall|j2: int|
+                    0 <= j2 < j + 1 implies {
+                    &&& (#[trigger] self.state@[j2]).valid()
+                    &&& mid.sv(j2).free_set().contains(sl@[j2])
+                    &&& self.sv(j2) == (StateV {
+                        holder: mid.sv(j2).holder.update(sl@[j2] as int, Some(h)),
+                        w: mid.sv(j2).w.update(sl@[j2] as int, None),
+                        ..mid.sv(j2)
+                    })
+                } by {
+                    if j2 < j {
+                        assert(self.state@[j2] == s0[j2]);
+                    }
+                }
+            }
+            j += 1;
+        }
+        proof {
+            mid.paged@[0].lemma_handles_lt();
+            assert(!mid.slots@.contains_key(h)) by {
+                if mid.slots@.contains_key(h) {
+                    assert(mid.pv(0).leases.contains_key(h));
+                }
+            }
+        }
+        let slv = vstd::slice::slice_to_vec(sl.as_slice());
+        self.slots.insert(hid, slv);
+        proof {
+            assert(self.slots@.dom() =~= mid.slots@.dom().insert(h));
+            let tv = tables@.map_values(|t: Vec<PageId>| t@);
+            assert forall|c2: int| 0 <= c2 < mid.np() implies {
+                &&& (#[trigger] self.paged@[c2]).valid()
+                &&& attach_choice_k(mid.pv(c2), toks@, tv[c2], k)
+                &&& self.pv(c2) == attached(mid.pv(c2), toks@, tv[c2], k)
+            } by {
+                assert(self.paged@[c2] == pg[c2]);
+                assert(tv[c2] == tabs[c2]@);
+            }
+            assert forall|j2: int| 0 <= j2 < mid.nst() implies {
+                &&& (#[trigger] self.state@[j2]).valid()
+                &&& mid.sv(j2).free_set().contains(sl@[j2])
+                &&& self.sv(j2) == (StateV {
+                    holder: mid.sv(j2).holder.update(sl@[j2] as int, Some(h)),
+                    w: mid.sv(j2).w.update(sl@[j2] as int, None),
+                    ..mid.sv(j2)
+                })
+            } by {
+                assert(self.state@[j2].valid());
+            }
+            self.lemma_attach_valid(&mid, toks@, k, h, tv, sl@);
+            assert forall|c2: int| 0 <= c2 < mid.np() implies {
+                &&& (#[trigger] tables@[c2])@.len() == m
+                &&& attach_choice_k(mid.pv(c2), toks@, tables@[c2]@, k)
+                &&& self.pv(c2) == attached(mid.pv(c2), toks@, tables@[c2]@, k)
+            } by {
+                assert(self.paged@[c2] == pg[c2]);
+            }
+        }
+        let lv = LeaseView { tables, slots: sl };
+        proof {
+            assert forall|j2: int| 0 <= j2 < mid.nst() implies {
+                &&& mid.sv(j2).free_set().contains(#[trigger] lv.slots@[j2])
+                &&& self.sv(j2) == (StateV {
+                    holder: mid.sv(j2).holder.update(lv.slots@[j2] as int, Some(h)),
+                    w: mid.sv(j2).w.update(lv.slots@[j2] as int, None),
+                    ..mid.sv(j2)
+                })
+            } by {
+                assert(self.state@[j2].valid());
+            }
+        }
+        (cached, lv)
+    }
+}
+
 } // verus!
