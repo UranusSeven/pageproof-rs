@@ -167,6 +167,8 @@ impl Coordinator {
             (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending is Some)
                 ==> r == Err::<Vec<Token>, Error>(Error::Busy),
             r is Err ==> final(self)@ == old(self)@,
+            (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending is None)
+                ==> r is Ok,
             r matches Ok(toks) ==> {
                 &&& h.mgr == old(self)@.id
                 &&& old(self)@.leases().contains_key(h.id)
@@ -2109,6 +2111,26 @@ impl Coordinator {
 verus! {
 
 impl Coordinator {
+    /// Public facts about the configuration of a valid coordinator.
+    pub proof fn lemma_public_shape(&self)
+        requires
+            self.inv(),
+        ensures
+            self@.np >= 1,
+            self@.paged.len() == self@.np,
+            self@.ncls() == self@.np + self@.nst(),
+            self@.b >= 1,
+            self@.slots.dom() == self@.leases().dom(),
+            forall|c: int| 0 <= c < self@.np ==> (#[trigger] self@.paged[c]).leases.dom() == self@.leases().dom()
+                && self@.paged[c].next_handle == self@.next_handle() && self@.paged[c].pend == self@.pend(),
+    {
+        self.lemma_view();
+        assert forall|c: int| 0 <= c < self@.np implies (#[trigger] self@.paged[c]).leases.dom() == self@.leases().dom()
+            && self@.paged[c].next_handle == self@.next_handle() && self@.paged[c].pend == self@.pend() by {
+            assert(self.paged@[c] == self.paged@[c]);
+        }
+    }
+
     pub closed spec fn num_leases(&self) -> nat {
         self.paged@[0].num_leases()
     }
