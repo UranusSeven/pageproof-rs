@@ -38,7 +38,7 @@ pub fn fresh_attach() -> (r: Option<usize>)
                 Err(e) => {
                     proof {
                         // |F| = P = 4 on a fresh manager, and d = m - u <= 1, so this is unreachable.
-                        pageproof_core::types::lemma_free_of(4, v.refs);
+                        pageproof_core::types::lemma_free_of(4, v.refs, v.own);
                         assert forall|b: usize| #[trigger] v.free_set().contains(b) <==> (b as nat) < 4 by {}
                         vstd::set_lib::range_set_properties::<usize>(0usize, 4usize);
                         assert(v.free_set() =~= Set::<usize>::range(0usize, 4usize));

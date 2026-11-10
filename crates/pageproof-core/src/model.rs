@@ -24,6 +24,7 @@ pub open spec fn cfg_ok(v: MgrV, log: Log) -> bool {
     &&& v.holders.len() == v.p
     &&& v.pdep.len() == v.p
     &&& v.ptoks.len() == v.p
+    &&& v.own.len() == v.p
     &&& log.contains_key(seed_of(v.ns))
     &&& log[seed_of(v.ns)] == seed_input(v.ns)
 }
@@ -81,6 +82,9 @@ pub open spec fn page_ok(v: MgrV, log: Log, x: PageId) -> bool {
     &&& v.refs[x as int] <= v.next_handle
     &&& v.refs[x as int] > 1 ==> v.keys[x as int] is Some
     &&& v.keys[x as int] is Some ==> pub_ok(v, log, x)
+    // I13: only owned units are referenced or published.
+    &&& v.refs[x as int] > 0 ==> v.own[x as int]
+    &&& v.keys[x as int] is Some ==> v.own[x as int]
 }
 
 /// I9 (Pending -> lease direction) and the derived `c_h = a` invariant.

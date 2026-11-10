@@ -24,11 +24,19 @@ pub open spec fn revoke(keys: Seq<Option<Digest>>, fresh: Seq<PageId>) -> Seq<Op
     Seq::new(keys.len(), |x: int| if fresh.contains(x as PageId) { None } else { keys[x] })
 }
 
-/// Legal page-table choice for `attach` (C1 success postconditions on the table).
+/// Legal page-table choice for `attach` (C1 success postconditions on the table), at an exact
+/// `k*` of this class.
 pub open spec fn attach_choice(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> bool {
+    &&& is_kstar(v, toks, table.len(), kstar)
+    &&& attach_choice_k(v, toks, table, kstar)
+}
+
+/// Legal page-table choice for a given hit prefix `k` (no maximality: the coordinator's joint
+/// `k*` may be shorter than this class's own run).
+pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> bool {
     &&& 1 <= toks.len() <= v.p * v.b
     &&& blocks_for(toks.len(), v.b, table.len())
-    &&& is_kstar(v, toks, table.len(), kstar)
+    &&& kstar + 1 <= table.len()
     &&& table.no_duplicates()
     &&& forall|i: int| 0 <= i < table.len() ==> (#[trigger] table[i] as nat) < v.p
     // i < k*: chosen from the call-time Index; an active candidate is used whenever one exists.
@@ -38,7 +46,7 @@ pub open spec fn attach_choice(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, ks
             v.key_of(toks, i as nat),
         ) ==> v.refs[table[i] as int] > 0)
     // i >= k*: fresh pages taken from F (distinct from the hit pages by no_duplicates).
-    &&& forall|i: int| #![trigger table[i]] kstar <= i < table.len() ==> v.refs[table[i] as int] == 0
+    &&& forall|i: int| #![trigger table[i]] kstar <= i < table.len() ==> v.refs[table[i] as int] == 0 && v.own[table[i] as int]
     &&& v.next_handle < u64::MAX
 }
 
@@ -262,7 +270,7 @@ proof fn lemma_suffix_contains(table: Seq<PageId>, k: int, i: int)
 pub proof fn lemma_attach_inv(v: MgrV, log: Log, toks: Seq<Token>, table: Seq<PageId>, kstar: nat)
     requires
         inv(v, log),
-        attach_choice(v, toks, table, kstar),
+        attach_choice_k(v, toks, table, kstar),
         kstar > 0 ==> chain_logged(log, v.ns, toks, v.b, (kstar - 1) as nat),
     ensures
         inv(attached(v, toks, table, kstar), log),
@@ -389,10 +397,12 @@ fn probe(
     toks: &[Token],
     b: usize,
     m: usize,
+    cap: usize,
     Ghost(v): Ghost<MgrV>,
     Tracked(log): Tracked<&mut DenLog>,
-) -> (r: (Vec<(PageId, bool)>, Digest))
+) -> (r: (Vec<(PageId, bool)>, Digest, Vec<Digest>))
     requires
+        cap + 1 <= m,
         index.wf(keys@),
         keys@ == v.keys,
         refs@ == v.refs,
@@ -406,18 +416,25 @@ fn probe(
         toks@.len() <= max_slots(),
     ensures
         old(log)@.submap_of(final(log)@),
-        is_kstar(v, toks@, m as nat, r.0@.len() as nat),
+        is_kcap(v, toks@, cap as nat, r.0@.len() as nat),
         hit_ok(v, toks@, r.0@),
+        r.2@.len() == r.0@.len(),
+        forall|j: int| #![trigger r.2@[j]] 0 <= j < r.2@.len() ==> r.2@[j] == v.key_of(toks@, j as nat),
         r.0@.len() > 0 ==> chain_logged(final(log)@, v.ns, toks@, v.b, (r.0@.len() - 1) as nat),
         r.1 == chain_parent(v.seed(), toks@, v.b, r.0@.len() as nat),
 {
     let ghost log0 = log@;
     let mut hits: Vec<(PageId, bool)> = Vec::new();
+    let mut ks: Vec<Digest> = Vec::new();
     let mut head: Digest = *seed;
     let mut i: usize = 0;
     let mut stop = false;
-    while i + 1 < m && !stop
+    while i < cap && !stop
         invariant
+            cap + 1 <= m,
+            i <= cap,
+            ks@.len() == i,
+            forall|j: int| #![trigger ks@[j]] 0 <= j < ks@.len() ==> ks@[j] == v.key_of(toks@, j as nat),
             index.wf(keys@),
             keys@ == v.keys,
             refs@ == v.refs,
@@ -435,8 +452,8 @@ fn probe(
             hit_ok(v, toks@, hits@),
             i > 0 ==> chain_logged(log@, v.ns, toks@, v.b, (i - 1) as nat),
             head == chain_parent(v.seed(), toks@, v.b, i as nat),
-            stop ==> i + 1 < m && !v.has_hit(v.key_of(toks@, i as nat)),
-        decreases m - i, if stop { 0int } else { 1int },
+            stop ==> i < cap && !v.has_hit(v.key_of(toks@, i as nat)),
+        decreases cap - i, if stop { 0int } else { 1int },
     {
         proof {
             lemma_mul_mono((i + 1) as nat, (m - 1) as nat, v.b);
@@ -471,9 +488,18 @@ fn probe(
                         assert(!v.has_active_hit(k));
                     }
                 }
+                let ghost ks0 = ks@;
                 hits.push(x);
+                ks.push(k);
                 head = k;
                 i = i + 1;
+                proof {
+                    assert forall|j: int| #![trigger ks@[j]] 0 <= j < ks@.len() implies ks@[j] == v.key_of(toks@, j as nat) by {
+                        if j < ks0.len() {
+                            assert(ks0[j] == ks@[j]);
+                        }
+                    }
+                }
                 proof {
                     assert forall|j: int| #![trigger hits@[j]] 0 <= j < hits@.len() implies {
                         &&& in_index(v.keys, v.key_of(toks@, j as nat), hits@[j].0)
@@ -493,7 +519,7 @@ fn probe(
             assert(in_index(v.keys, v.key_of(toks@, j), hits@[j as int].0));
         }
     }
-    (hits, head)
+    (hits, head, ks)
 }
 
 fn count_hits_active(hits: &Vec<(PageId, bool)>) -> (u: usize)
@@ -519,13 +545,20 @@ fn count_hits_active(hits: &Vec<(PageId, bool)>) -> (u: usize)
 }
 
 /// Commit, part 1: take the hit pages; inactive (free) cache pages are reactivated.
-fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>, Ghost(refs): Ghost<Seq<u64>>) -> (table: Vec<PageId>)
+fn take_hits(
+    free: &mut IdxSet,
+    hits: &Vec<(PageId, bool)>,
+    Ghost(p): Ghost<nat>,
+    Ghost(refs): Ghost<Seq<u64>>,
+    Ghost(own): Ghost<Seq<bool>>,
+) -> (table: Vec<PageId>)
     requires
         p <= max_slots(),
         refs.len() == p,
+        forall|j: int| #![trigger hits@[j]] 0 <= j < hits@.len() ==> own[hits@[j].0 as int],
         old(free).wf(),
         old(free).universe() == p,
-        old(free)@ == free_of(p, refs),
+        old(free)@ == free_of(p, refs, own),
         forall|j: int|
             #![trigger hits@[j]]
             0 <= j < hits@.len() ==> (hits@[j].0 as nat) < p && hits@[j].1 == (refs[hits@[j].0 as int] > 0),
@@ -536,7 +569,7 @@ fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>
         final(free).universe() == p,
         table@.len() == hits@.len(),
         forall|j: int| #![trigger table@[j]] 0 <= j < hits@.len() ==> table@[j] == hits@[j].0,
-        forall|y: PageId| #[trigger] final(free)@.contains(y) <==> (free_of(p, refs).contains(y) && !table@.contains(y)),
+        forall|y: PageId| #[trigger] final(free)@.contains(y) <==> (free_of(p, refs, own).contains(y) && !table@.contains(y)),
         final(free)@.len() + (hits@.len() - n_active(hits@, hits@.len() as nat)) == old(free)@.len(),
         n_active(hits@, hits@.len() as nat) <= hits@.len(),
 {
@@ -544,7 +577,7 @@ fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>
     let mut table: Vec<PageId> = Vec::new();
     let mut j: usize = 0;
     proof {
-        lemma_free_of(p, refs);
+        lemma_free_of(p, refs, own);
     }
     while j < hits.len()
         invariant
@@ -552,8 +585,10 @@ fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>
             refs.len() == p,
             free.wf(),
             free.universe() == p,
-            f0 == free_of(p, refs),
-            forall|y: PageId| #[trigger] free_of(p, refs).contains(y) <==> ((y as nat) < p && refs[y as int] == 0),
+            f0 == free_of(p, refs, own),
+            forall|y: PageId| #[trigger] free_of(p, refs, own).contains(y) <==> ((y as nat) < p && refs[y as int] == 0
+                && own[y as int]),
+            forall|k: int| #![trigger hits@[k]] 0 <= k < hits@.len() ==> own[hits@[k].0 as int],
             forall|k: int|
                 #![trigger hits@[k]]
                 0 <= k < hits@.len() ==> (hits@[k].0 as nat) < p && hits@[k].1 == (refs[hits@[k].0 as int] > 0),
@@ -563,7 +598,7 @@ fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>
             0 <= j <= hits@.len(),
             table@.len() == j,
             forall|k: int| #![trigger table@[k]] 0 <= k < j ==> table@[k] == hits@[k].0,
-            forall|y: PageId| #[trigger] free@.contains(y) <==> (free_of(p, refs).contains(y) && !table@.contains(y)),
+            forall|y: PageId| #[trigger] free@.contains(y) <==> (free_of(p, refs, own).contains(y) && !table@.contains(y)),
             free@.len() + (j - n_active(hits@, j as nat)) == f0.len(),
             n_active(hits@, j as nat) <= j,
         decreases hits@.len() - j,
@@ -591,7 +626,7 @@ fn take_hits(free: &mut IdxSet, hits: &Vec<(PageId, bool)>, Ghost(p): Ghost<nat>
         }
         table.push(x);
         proof {
-            assert forall|y: PageId| #[trigger] free@.contains(y) <==> (free_of(p, refs).contains(y)
+            assert forall|y: PageId| #[trigger] free@.contains(y) <==> (free_of(p, refs, own).contains(y)
                 && !table@.contains(y)) by {
                 vstd::seq_lib::lemma_seq_contains_after_push(t0, x, y);
             }
@@ -782,7 +817,314 @@ fn inc_pages(refs: &mut Vec<u64>, tbl: &Vec<PageId>)
 // C1
 // ---------------------------------------------------------------------------------------------
 
+/// Result of a prefix probe of one paged class: hit pages (with their active flag), the chain
+/// head after the run, and the chained keys of the run.
+pub struct Probe {
+    pub hits: Vec<(PageId, bool)>,
+    pub head: Digest,
+    pub keys: Vec<Digest>,
+}
+
+/// A probe's hits are valid in state `v`: each is an Index candidate for its chained key, active
+/// iff referenced, and an active candidate is chosen whenever one exists; the chain is logged.
+pub open spec fn probe_ok(v: MgrV, log: Log, toks: Seq<Token>, pr: Probe) -> bool {
+    let k = pr.hits@.len();
+    &&& hit_ok(v, toks, pr.hits@)
+    &&& pr.keys@.len() == k
+    &&& forall|j: int| #![trigger pr.keys@[j]] 0 <= j < k ==> pr.keys@[j] == v.key_of(toks, j as nat)
+    &&& k > 0 ==> chain_logged(log, v.ns, toks, v.b, (k - 1) as nat)
+    &&& pr.head == chain_parent(v.seed(), toks, v.b, k as nat)
+    &&& (k + 1) * v.b <= toks.len() + v.b
+}
+
+/// The hits of a probe are owned, distinct pages below `P`.
+pub proof fn lemma_probe_pages(v: MgrV, log: Log, toks: Seq<Token>, pr: Probe)
+    requires
+        inv(v, log),
+        probe_ok(v, log, toks, pr),
+        pr.hits@.len() * v.b <= toks.len(),
+    ensures
+        forall|j: int|
+            #![trigger pr.hits@[j]]
+            0 <= j < pr.hits@.len() ==> (pr.hits@[j].0 as nat) < v.p && pr.hits@[j].1 == (v.refs[pr.hits@[j].0 as int]
+                > 0) && v.own[pr.hits@[j].0 as int],
+        forall|j1: int, j2: int|
+            0 <= j1 < pr.hits@.len() && 0 <= j2 < pr.hits@.len() && j1 != j2 ==> #[trigger] pr.hits@[j1].0
+                != #[trigger] pr.hits@[j2].0,
+{
+    let hits = pr.hits@;
+    let kstar = hits.len();
+    assert forall|j: int| #![trigger hits[j]] 0 <= j < hits.len() implies (hits[j].0 as nat) < v.p
+        && hits[j].1 == (v.refs[hits[j].0 as int] > 0) && v.own[hits[j].0 as int] by {
+        assert(in_index(v.keys, v.key_of(toks, j as nat), hits[j].0));
+        reveal(page_ok);
+        assert(page_ok(v, log, hits[j].0));
+    }
+    assert forall|j1: int, j2: int|
+        0 <= j1 < hits.len() && 0 <= j2 < hits.len() && j1 != j2 implies #[trigger] hits[j1].0 != #[trigger] hits[j2].0 by {
+        if hits[j1].0 == hits[j2].0 {
+            lemma_mul_mono((j1 + 1) as nat, kstar as nat, v.b);
+            lemma_mul_mono((j2 + 1) as nat, kstar as nat, v.b);
+            lemma_chain_logged_le(log, v.ns, toks, v.b, j1 as nat, (kstar - 1) as nat);
+            lemma_chain_logged_le(log, v.ns, toks, v.b, j2 as nat, (kstar - 1) as nat);
+            assert(in_index(v.keys, v.key_of(toks, j1 as nat), hits[j1].0));
+            assert(in_index(v.keys, v.key_of(toks, j2 as nat), hits[j2].0));
+            lemma_hit_pages_distinct(v, log, toks, j1 as nat, j2 as nat, hits[j1].0);
+        }
+    }
+}
+
 impl Manager {
+    /// Probe phase of C1: the longest indexed prefix of complete-block keys, capped at `cap`.
+    /// Changes nothing but the ghost E8 log.
+    pub fn probe_prefix(&mut self, toks: &[Token], cap: usize) -> (r: Probe)
+        requires
+            old(self).valid(),
+            1 <= toks@.len() <= old(self)@.p * old(self)@.b,
+            cap + 1 <= cdiv(toks@.len(), old(self)@.b),
+        ensures
+            final(self).valid(),
+            final(self)@ == old(self)@,
+            old(self).den_log().submap_of(final(self).den_log()),
+            is_kcap(old(self)@, toks@, cap as nat, r.hits@.len() as nat),
+            probe_ok(old(self)@, final(self).den_log(), toks@, r),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log0 = self.den_log();
+        let b = self.b;
+        let n = toks.len();
+        proof {
+            assert(b as nat <= v.p * v.b) by (nonlinear_arith) requires v.p >= 1, b as nat == v.b;
+        }
+        let m = (n + b - 1) / b;
+        proof {
+            lemma_cdiv_props(n as nat, b as nat);
+            assert(m as nat == cdiv(n as nat, b as nat));
+        }
+        let (hits, head, keys) = probe(
+            &self.index,
+            &self.keys,
+            &self.refs,
+            &self.seed,
+            toks,
+            b,
+            m,
+            cap,
+            Ghost(v),
+            Tracked(self.log.borrow_mut()),
+        );
+        proof {
+            lemma_inv_log_mono(v, log0, self.den_log());
+            lemma_mul_mono((hits@.len() + 1) as nat, m as nat, v.b);
+            lemma_mul_succ((m - 1) as nat, v.b);
+        }
+        Probe { hits, head, keys }
+    }
+
+    /// Shortens a probe to its first `k` hits (the coordinator's joint `k*`).
+    pub fn truncate_probe(&self, pr: Probe, k: usize, Ghost(toks): Ghost<Seq<Token>>) -> (r: Probe)
+        requires
+            self.valid(),
+            probe_ok(self@, self.den_log(), toks, pr),
+            k <= pr.hits@.len(),
+        ensures
+            probe_ok(self@, self.den_log(), toks, r),
+            r.hits@ == pr.hits@.subrange(0, k as int),
+    {
+        let ghost v = self@;
+        let ghost log = self.den_log();
+        let hits = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(pr.hits.as_slice(), 0, k));
+        let keys = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(pr.keys.as_slice(), 0, k));
+        let head = if k == 0 { self.seed } else { pr.keys[k - 1] };
+        proof {
+            self.lemma_valid();
+            let r = Probe { hits, head, keys };
+            assert forall|j: int| #![trigger hits@[j]] 0 <= j < hits@.len() implies {
+                &&& in_index(v.keys, v.key_of(toks, j as nat), hits@[j].0)
+                &&& hits@[j].1 == v.has_active_hit(v.key_of(toks, j as nat))
+                &&& hits@[j].1 == (v.refs[hits@[j].0 as int] > 0)
+            } by {
+                assert(hits@[j] == pr.hits@[j]);
+            }
+            assert forall|j: int| #![trigger keys@[j]] 0 <= j < k implies keys@[j] == v.key_of(toks, j as nat) by {
+                assert(keys@[j] == pr.keys@[j]);
+            }
+            if k > 0 {
+                lemma_chain_logged_le(log, v.ns, toks, v.b, (k - 1) as nat, (pr.hits@.len() - 1) as nat);
+            }
+            lemma_mul_mono((k + 1) as nat, (pr.hits@.len() + 1) as nat, v.b);
+        }
+        Probe { hits, head, keys }
+    }
+
+    /// Commit phase of C1: build the table from the probe's hits plus fresh pages from `F`.
+    pub fn attach_commit(&mut self, toks: &[Token], pr: Probe) -> (r: (Handle, usize, PageTableView))
+        requires
+            old(self).valid(),
+            1 <= toks@.len() <= old(self)@.p * old(self)@.b,
+            old(self)@.next_handle < u64::MAX,
+            probe_ok(old(self)@, old(self).den_log(), toks@, pr),
+            pr.hits@.len() + 1 <= cdiv(toks@.len(), old(self)@.b),
+            old(self)@.free_set().len() >= cdiv(toks@.len(), old(self)@.b) - count_active(
+                old(self)@,
+                toks@,
+                pr.hits@.len() as nat,
+            ),
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            r.0 == (Handle { mgr: old(self)@.id, id: old(self)@.next_handle }),
+            r.1 as nat == pr.hits@.len() * old(self)@.b,
+            r.2.pages@.len() == cdiv(toks@.len(), old(self)@.b),
+            attach_choice_k(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
+            final(self)@ == attached(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log1 = self.den_log();
+        let b = self.b;
+        let p = self.p;
+        let n = toks.len();
+        proof {
+            assert(b as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires p >= 1;
+            assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
+        }
+        let m = (n + b - 1) / b;
+        proof {
+            lemma_cdiv_props(n as nat, b as nat);
+            assert(m as nat == cdiv(n as nat, b as nat));
+            assert(blocks_for(n as nat, b as nat, m as nat));
+        }
+        let hits = pr.hits;
+        let head = pr.head;
+        let kstar = hits.len();
+        proof {
+            lemma_n_active_eq(v, toks@, hits@, kstar as nat);
+            lemma_mul_mono(kstar as nat, (m - 1) as nat, v.b);
+            lemma_mul_mono((kstar + 1) as nat, m as nat, v.b);
+            lemma_cdiv_props(n as nat, v.b);
+            lemma_probe_pages(v, log1, toks@, Probe { hits, head, keys: pr.keys });
+        }
+        proof {
+            assert forall|j: int| #![trigger hits@[j]] 0 <= j < hits@.len() implies (hits@[j].0 as nat) < v.p
+                && hits@[j].1 == (v.refs[hits@[j].0 as int] > 0) && v.own[hits@[j].0 as int] by {
+                assert(in_index(v.keys, v.key_of(toks@, j as nat), hits@[j].0));
+                reveal(page_ok);
+                assert(page_ok(v, log1, hits@[j].0));
+            }
+            assert forall|j1: int, j2: int|
+                0 <= j1 < hits@.len() && 0 <= j2 < hits@.len() && j1 != j2 implies #[trigger] hits@[j1].0
+                != #[trigger] hits@[j2].0 by {
+                if hits@[j1].0 == hits@[j2].0 {
+                    lemma_mul_mono((j1 + 1) as nat, kstar as nat, v.b);
+                    lemma_mul_mono((j2 + 1) as nat, kstar as nat, v.b);
+                    lemma_chain_logged_le(log1, v.ns, toks@, v.b, j1 as nat, (kstar - 1) as nat);
+                    lemma_chain_logged_le(log1, v.ns, toks@, v.b, j2 as nat, (kstar - 1) as nat);
+                    assert(in_index(v.keys, v.key_of(toks@, j1 as nat), hits@[j1].0));
+                    assert(in_index(v.keys, v.key_of(toks@, j2 as nat), hits@[j2].0));
+                    lemma_hit_pages_distinct(v, log1, toks@, j1 as nat, j2 as nat, hits@[j1].0);
+                }
+            }
+        }
+        let mut table = take_hits(&mut self.free, &hits, Ghost(p as nat), Ghost(v.refs), Ghost(v.own));
+        let ghost tab_h = table@;
+        proof {
+            assert(table@.no_duplicates()) by {
+                assert forall|i: int, j: int| 0 <= i < table@.len() && 0 <= j < table@.len() && i != j implies table@[i]
+                    != table@[j] by {
+                    assert(table@[i] == hits@[i].0);
+                    assert(table@[j] == hits@[j].0);
+                }
+            }
+        }
+        take_fresh(&mut self.free, &mut self.keys, &mut self.index, &mut table, m - kstar, Ghost(p as nat));
+        proof {
+            lemma_free_of(p as nat, v.refs, v.own);
+            assert forall|i: int| 0 <= i < table@.len() implies (#[trigger] table@[i] as nat) < v.p && v.refs[table@[i] as int]
+                < u64::MAX by {
+                if i < kstar {
+                    assert(table@[i] == tab_h[i]);
+                    assert(tab_h[i] == hits@[i].0);
+                } else {
+                    assert(free_of(p as nat, v.refs, v.own).contains(table@[i]));
+                }
+                assert(page_ok(v, log1, table@[i])) by {
+                    reveal(page_ok);
+                }
+                reveal(page_ok);
+            }
+        }
+        inc_pages(&mut self.refs, &table);
+        let h = self.next_handle;
+        self.next_handle = h + 1;
+        let tcopy = vstd::slice::slice_to_vec(table.as_slice());
+        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: None, head };
+        self.leases.insert(h, lease);
+        let ghost v2 = attached(v, toks@, table@, kstar as nat);
+        proof {
+            // The choice is legal.
+            assert forall|i: int| #![trigger table@[i]] 0 <= i < kstar implies in_index(
+                v.keys,
+                v.key_of(toks@, i as nat),
+                table@[i],
+            ) && (v.has_active_hit(v.key_of(toks@, i as nat)) ==> v.refs[table@[i] as int] > 0) by {
+                assert(table@[i] == tab_h[i]);
+                assert(tab_h[i] == hits@[i].0);
+            }
+            assert forall|i: int| #![trigger table@[i]] kstar <= i < table@.len() implies v.refs[table@[i] as int]
+                == 0 && v.own[table@[i] as int] by {
+                assert(free_of(p as nat, v.refs, v.own).contains(table@[i]));
+            }
+            assert(attach_choice_k(v, toks@, table@, kstar as nat));
+            lemma_attach_inv(v, log1, toks@, table@, kstar as nat);
+        }
+        self.g = Ghost(v2);
+        proof {
+            lemma_slot_decomp(kstar as nat, 0, v.b);
+            assert(self.leases@.dom() =~= v2.leases.dom());
+            assert forall|h2: u64| #[trigger] self.leases@.contains_key(h2) implies lease_view(self.leases@[h2])
+                == v2.leases[h2] && Self::head_ok(v2, self.leases@[h2]) by {
+                if h2 != h {
+                    assert(Self::head_ok(v, self.leases@[h2]));
+                } else {
+                    assert(lease_view(self.leases@[h2]).toks =~= toks@);
+                }
+            }
+            lemma_free_of(p as nat, self.refs@, v.own);
+            lemma_free_of(p as nat, v.refs, v.own);
+            assert(table@.subrange(0, table@.len() as int) =~= table@);
+            assert forall|y: PageId| #[trigger] self.free@.contains(y) <==> v2.free_set().contains(y) by {
+                if tab_h.contains(y) {
+                    let k = choose|k: int| 0 <= k < tab_h.len() && tab_h[k] == y;
+                    assert(table@.subrange(0, tab_h.len() as int)[k] == y);
+                    assert(table@[k] == y);
+                }
+                if (y as nat) < v.p {
+                    if table@.contains(y) {
+                        let k = choose|k: int| 0 <= k < table@.len() && table@[k] == y;
+                        assert(v.refs[table@[k] as int] < u64::MAX);
+                        assert(self.refs@[y as int] == v.refs[y as int] + 1);
+                    } else {
+                        assert(self.refs@[y as int] == v.refs[y as int]);
+                    }
+                }
+            }
+            assert(self.free@ =~= v2.free_set());
+        }
+        let ghost cached = kstar * b;
+        proof {
+            assert((cached as nat) / v.b == kstar as nat);
+        }
+        (Handle { mgr: self.id, id: h }, kstar * b, PageTableView { pages: table })
+    }
+
     /// C1. `attach(T)`: reserve pages for all of `T`, reusing the longest indexed prefix of
     /// complete blocks except the last logical block (D2/D3).
     pub fn attach(&mut self, toks: &[Token]) -> (r: Result<(Handle, usize, PageTableView), Error>)
@@ -812,37 +1154,21 @@ impl Manager {
         }
         proof {
             assert(b as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires p >= 1;
-            assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
         }
         let m = (n + b - 1) / b;
         let ghost v = self@;
-        let ghost log0 = self.den_log();
         proof {
             lemma_cdiv_props(n as nat, b as nat);
             assert(m as nat == cdiv(n as nat, b as nat));
-            assert(blocks_for(n as nat, b as nat, m as nat));
         }
-        let (hits, head) = probe(
-            &self.index,
-            &self.keys,
-            &self.refs,
-            &self.seed,
-            toks,
-            b,
-            m,
-            Ghost(v),
-            Tracked(self.log.borrow_mut()),
-        );
-        let kstar = hits.len();
-        let u = count_hits_active(&hits);
-        let ghost log1 = self.den_log();
+        let pr = self.probe_prefix(toks, m - 1);
+        let kstar = pr.hits.len();
+        let u = count_hits_active(&pr.hits);
         proof {
-            lemma_n_active_eq(v, toks@, hits@, kstar as nat);
-            lemma_inv_log_mono(v, log0, log1);
-            lemma_mul_mono(kstar as nat, (m - 1) as nat, v.b);
+            lemma_n_active_eq(v, toks@, pr.hits@, kstar as nat);
+            assert(is_kstar(v, toks@, m as nat, kstar as nat));
         }
-        let need = m - u;
-        if self.free.len() < need {
+        if self.free.len() < m - u {
             proof {
                 assert(is_kstar(v, toks@, m as nat, kstar as nat) && v.free_set().len() < m - count_active(
                     v,
@@ -852,116 +1178,15 @@ impl Manager {
             }
             return Err(Error::NoCapacity);
         }
-        // Hits are distinct pages below P.
+        let ghost log1 = self.den_log();
+        let (h, cached, view) = self.attach_commit(toks, pr);
         proof {
-            assert forall|j: int| #![trigger hits@[j]] 0 <= j < hits@.len() implies (hits@[j].0 as nat) < v.p
-                && hits@[j].1 == (v.refs[hits@[j].0 as int] > 0) by {
-                assert(in_index(v.keys, v.key_of(toks@, j as nat), hits@[j].0));
-            }
-            assert forall|j1: int, j2: int|
-                0 <= j1 < hits@.len() && 0 <= j2 < hits@.len() && j1 != j2 implies #[trigger] hits@[j1].0
-                != #[trigger] hits@[j2].0 by {
-                if hits@[j1].0 == hits@[j2].0 {
-                    lemma_mul_mono((j1 + 1) as nat, kstar as nat, v.b);
-                    lemma_mul_mono((j2 + 1) as nat, kstar as nat, v.b);
-                    lemma_chain_logged_le(log1, v.ns, toks@, v.b, j1 as nat, (kstar - 1) as nat);
-                    lemma_chain_logged_le(log1, v.ns, toks@, v.b, j2 as nat, (kstar - 1) as nat);
-                    assert(in_index(v.keys, v.key_of(toks@, j1 as nat), hits@[j1].0));
-                    assert(in_index(v.keys, v.key_of(toks@, j2 as nat), hits@[j2].0));
-                    lemma_hit_pages_distinct(v, log1, toks@, j1 as nat, j2 as nat, hits@[j1].0);
-                }
+            assert(attach_choice(v, toks@, view.pages@, kstar as nat));
+            assert((cached as nat) / v.b == kstar as nat) by {
+                lemma_slot_decomp(kstar as nat, 0, v.b);
             }
         }
-        let mut table = take_hits(&mut self.free, &hits, Ghost(p as nat), Ghost(v.refs));
-        let ghost tab_h = table@;
-        proof {
-            assert(table@.no_duplicates()) by {
-                assert forall|i: int, j: int| 0 <= i < table@.len() && 0 <= j < table@.len() && i != j implies table@[i]
-                    != table@[j] by {
-                    assert(table@[i] == hits@[i].0);
-                    assert(table@[j] == hits@[j].0);
-                }
-            }
-        }
-        take_fresh(&mut self.free, &mut self.keys, &mut self.index, &mut table, m - kstar, Ghost(p as nat));
-        proof {
-            lemma_free_of(p as nat, v.refs);
-            assert forall|i: int| 0 <= i < table@.len() implies (#[trigger] table@[i] as nat) < v.p && v.refs[table@[i] as int]
-                < u64::MAX by {
-                if i < kstar {
-                    assert(table@[i] == tab_h[i]);
-                    assert(tab_h[i] == hits@[i].0);
-                } else {
-                    assert(free_of(p as nat, v.refs).contains(table@[i]));
-                }
-                assert(page_ok(v, log1, table@[i])) by {
-                    reveal(page_ok);
-                }
-                reveal(page_ok);
-            }
-        }
-        inc_pages(&mut self.refs, &table);
-        let h = self.next_handle;
-        self.next_handle = h + 1;
-        let tcopy = vstd::slice::slice_to_vec(table.as_slice());
-        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: None, head };
-        self.leases.insert(h, lease);
-        let ghost v2 = attached(v, toks@, table@, kstar as nat);
-        proof {
-            // The choice is legal.
-            assert forall|i: int| #![trigger table@[i]] 0 <= i < kstar implies in_index(
-                v.keys,
-                v.key_of(toks@, i as nat),
-                table@[i],
-            ) && (v.has_active_hit(v.key_of(toks@, i as nat)) ==> v.refs[table@[i] as int] > 0) by {
-                assert(table@[i] == tab_h[i]);
-                assert(tab_h[i] == hits@[i].0);
-            }
-            assert forall|i: int| #![trigger table@[i]] kstar <= i < table@.len() implies v.refs[table@[i] as int]
-                == 0 by {
-                assert(free_of(p as nat, v.refs).contains(table@[i]));
-            }
-            assert(attach_choice(v, toks@, table@, kstar as nat));
-            lemma_attach_inv(v, log1, toks@, table@, kstar as nat);
-        }
-        self.g = Ghost(v2);
-        proof {
-            lemma_slot_decomp(kstar as nat, 0, v.b);
-            assert(self.leases@.dom() =~= v2.leases.dom());
-            assert forall|h2: u64| #[trigger] self.leases@.contains_key(h2) implies lease_view(self.leases@[h2])
-                == v2.leases[h2] && Self::head_ok(v2, self.leases@[h2]) by {
-                if h2 != h {
-                    assert(Self::head_ok(v, self.leases@[h2]));
-                } else {
-                    assert(lease_view(self.leases@[h2]).toks =~= toks@);
-                }
-            }
-            lemma_free_of(p as nat, self.refs@);
-            lemma_free_of(p as nat, v.refs);
-            assert(table@.subrange(0, table@.len() as int) =~= table@);
-            assert forall|y: PageId| #[trigger] self.free@.contains(y) <==> v2.free_set().contains(y) by {
-                if tab_h.contains(y) {
-                    let k = choose|k: int| 0 <= k < tab_h.len() && tab_h[k] == y;
-                    assert(table@.subrange(0, tab_h.len() as int)[k] == y);
-                    assert(table@[k] == y);
-                }
-                if (y as nat) < v.p {
-                    if table@.contains(y) {
-                        let k = choose|k: int| 0 <= k < table@.len() && table@[k] == y;
-                        assert(v.refs[table@[k] as int] < u64::MAX);
-                        assert(self.refs@[y as int] == v.refs[y as int] + 1);
-                    } else {
-                        assert(self.refs@[y as int] == v.refs[y as int]);
-                    }
-                }
-            }
-            assert(self.free@ =~= v2.free_set());
-        }
-        let ghost cached = kstar * b;
-        proof {
-            assert((cached as nat) / v.b == kstar as nat);
-        }
-        Ok((Handle { mgr: self.id, id: h }, kstar * b, PageTableView { pages: table }))
+        Ok((h, cached, view))
     }
 }
 

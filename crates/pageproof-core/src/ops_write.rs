@@ -385,6 +385,7 @@ pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64) -> bool {
     &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: None, ..l })
     &&& v2.pend == v.pend.remove(t)
     &&& v2.refs == v.refs
+    &&& v2.own == v.own
     &&& v2.holders == v.holders
     &&& v2.next_handle == v.next_handle
     &&& v2.next_ticket == v.next_ticket
@@ -897,7 +898,7 @@ impl Manager {
             }
             assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
             }
-            lemma_free_of(v.p, v.refs);
+            lemma_free_of(v.p, v.refs, v.own);
             // §9.0 (c)
             reveal(lease_ok);
             assert forall|j: int| a <= j < z implies #[trigger] (j / (v.b as int)) < lv.table.len() by {

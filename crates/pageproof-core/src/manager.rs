@@ -64,6 +64,8 @@ pub struct Manager {
     pub(crate) refs: Vec<u64>,
     pub(crate) keys: Vec<Option<Digest>>,
     pub(crate) free: IdxSet,
+    /// v0.3: concrete ownership mask (`U_c`).
+    pub(crate) own: Vec<bool>,
     pub(crate) index: KeyIndex,
     pub(crate) next_handle: u64,
     pub(crate) next_ticket: u64,
@@ -107,6 +109,7 @@ impl Manager {
         &&& self.seed == v.seed()
         &&& v.refs == self.refs@
         &&& v.keys == self.keys@
+        &&& v.own == self.own@
         &&& v.next_handle == self.next_handle
         &&& v.next_ticket == self.next_ticket
         &&& self.leases@.dom() == v.leases.dom()
@@ -217,8 +220,13 @@ impl Manager {
 // C0 create
 // ---------------------------------------------------------------------------------------------
 
-/// The abstract initial state.
+/// The abstract initial state (every unit owned: the v0.2.1 configuration).
 pub open spec fn initial(id: u64, p: nat, b: nat, ns: Seq<u8>) -> MgrV {
+    initial_own(id, p, b, ns, true)
+}
+
+/// The abstract initial state with every unit owned (`o`) or unowned (`!o`).
+pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool) -> MgrV {
     MgrV {
         id,
         p,
@@ -234,16 +242,42 @@ pub open spec fn initial(id: u64, p: nat, b: nat, ns: Seq<u8>) -> MgrV {
         holders: Seq::new(p, |i: int| Set::empty()),
         pdep: Seq::new(p, |i: int| 0nat),
         ptoks: Seq::new(p, |i: int| Seq::empty()),
+        own: Seq::new(p, |i: int| o),
     }
 }
 
 impl Manager {
-    /// C0. `create(P, B, Namespace)`.
+    /// C0. `create(P, B, Namespace)`: every page owned (v0.2.1).
     pub fn create(p: usize, b: usize, ns: &[u8]) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
                 &&& m@ == initial(m@.id, p as nat, b as nat, ns@)
+            },
+            r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+    {
+        Self::create_own(p, b, ns, true)
+    }
+
+    /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs).
+    pub fn create_empty(p: usize, b: usize, ns: &[u8]) -> (r: Result<Manager, Error>)
+        ensures
+            r matches Ok(m) ==> {
+                &&& m.valid()
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false)
+            },
+            r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+    {
+        Self::create_own(p, b, ns, false)
+    }
+
+    fn create_own(p: usize, b: usize, ns: &[u8], o: bool) -> (r: Result<Manager, Error>)
+        ensures
+            r matches Ok(m) ==> {
+                &&& m.valid()
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
@@ -279,10 +313,12 @@ impl Manager {
         let seed = hash_seed(ns, Tracked(&mut log));
         let refs: Vec<u64> = vec![0u64; p];
         let keys: Vec<Option<Digest>> = vec![None; p];
-        let ghost v = initial(id, p as nat, b as nat, ns@);
+        let ghost v = initial_own(id, p as nat, b as nat, ns@, o);
         assert(refs@ =~= v.refs);
         assert(keys@ =~= v.keys);
-        let free = IdxSet::new_full(p);
+        let own: Vec<bool> = vec![o; p];
+        assert(own@ =~= v.own);
+        let free = if o { IdxSet::new_full(p) } else { IdxSet::new_empty(p) };
         let index = KeyIndex::new(Ghost(keys@));
         let m = Manager {
             id,
@@ -295,6 +331,7 @@ impl Manager {
             refs,
             keys,
             free,
+            own,
             index,
             next_handle: 0,
             next_ticket: 0,
