@@ -232,6 +232,83 @@ impl CoordV {
     }
 
     /// Slabs class `c` gained since `o` / lost since `o`.
+    pub open spec fn gpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
+        |s: int| self.owner[s] == c + 1 && o.owner[s] != c + 1
+    }
+
+    pub open spec fn lpred(self, o: CoordV, c: int) -> spec_fn(int) -> bool {
+        |s: int| o.owner[s] == c + 1 && self.owner[s] != c + 1
+    }
+
+    /// Slabs class `c` gained since `o`.
+    pub open spec fn gained(self, o: CoordV, c: int) -> nat {
+        cnt(self.nslab as int, self.gpred(o, c))
+    }
+
+    /// Slabs class `c` lost since `o`.
+    pub open spec fn lost(self, o: CoordV, c: int) -> nat {
+        cnt(self.nslab as int, self.lpred(o, c))
+    }
+
+    pub open spec fn lostf(self, o: CoordV) -> spec_fn(int) -> nat {
+        |c: int| self.lost(o, c)
+    }
+
+    pub open spec fn gainedf(self, o: CoordV) -> spec_fn(int) -> nat {
+        |c: int| self.gained(o, c)
+    }
+
+    /// `self` is `o` after the slab plan of §3.5 for demand `d` and protection `prot`:
+    /// - leases, references, tickets and slots are unchanged; pools differ only in ownership, in
+    ///   keys revoked on slabs that changed owner, and in the provenance of free state units;
+    /// - every slab that changed owner was free, or idle and unprotected, in `o`; keys were
+    ///   revoked only on unreferenced pages of unprotected slabs;
+    /// - class `c` gained exactly `need_c` slabs and lost at most `give_c`;
+    /// - slabs were reclaimed only when free slabs did not suffice: exactly
+    ///   `max(0, Σ need - |FS|)` of them;
+    /// - every class now has at least `d_c` free units.
+    pub open spec fn plan_rel(self, o: CoordV, d: Seq<usize>, prot: Seq<bool>) -> bool {
+        let tot = o.sum_need(d);
+        &&& self.id == o.id
+        &&& self.b == o.b
+        &&& self.sbytes == o.sbytes
+        &&& self.nslab == o.nslab
+        &&& self.per == o.per
+        &&& self.unit == o.unit
+        &&& self.np == o.np
+        &&& self.paged.len() == o.paged.len()
+        &&& self.state.len() == o.state.len()
+        &&& self.owner.len() == o.owner.len()
+        &&& self.slots == o.slots
+        &&& forall|i: int|
+            0 <= i < o.paged.len() ==> #[trigger] self.paged[i] == (MgrV {
+                own: self.paged[i].own,
+                keys: self.paged[i].keys,
+                ..o.paged[i]
+            })
+        &&& forall|j: int|
+            0 <= j < o.state.len() ==> #[trigger] self.state[j] == (StateV {
+                own: self.state[j].own,
+                w: self.state[j].w,
+                ..o.state[j]
+            })
+        &&& forall|j: int, x: int|
+            0 <= j < o.state.len() && 0 <= x < o.state[j].p && o.state[j].holder[x] is Some ==> #[trigger] self.state[j].w[x]
+                == o.state[j].w[x]
+        &&& forall|i: int, x: int|
+            0 <= i < o.paged.len() && 0 <= x < o.paged[i].p ==> #[trigger] self.paged[i].keys[x] == o.paged[i].keys[x] || (
+            self.paged[i].keys[x] is None && o.paged[i].refs[x] == 0 && !prot[x / (o.per[i] as int)])
+        &&& forall|s: int|
+            0 <= s < o.nslab && #[trigger] self.owner[s] != o.owner[s] ==> o.owner[s] == 0 || (!prot[s] && o.slab_idle(
+                o.owner[s] - 1,
+                s as nat,
+            ))
+        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.gained(o, c) == o.need(c, d[c] as nat) && self.lost(o, c)
+            <= o.give(c, d[c] as nat, prot)
+        &&& nsum(o.ncls() as int, self.lostf(o)) == if tot > o.fcount() { (tot - o.fcount()) as nat } else { 0nat }
+        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.cfree(c) >= d[c]
+    }
+
     /// The joint `k*` of C1.
     pub open spec fn joint_k(self, toks: Seq<Token>, m: nat, k: nat) -> bool {
         &&& k + 1 <= m

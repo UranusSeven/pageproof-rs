@@ -6,6 +6,8 @@ use crate::arith::*;
 use crate::cnt::*;
 use crate::coord::*;
 use crate::ops_slab::in_range;
+use crate::types::MgrV;
+use crate::state::StateV;
 
 verus! {
 
@@ -253,6 +255,363 @@ pub proof fn lemma_no_donor(o: CoordV, c: int, d: Seq<usize>, prot: Seq<bool>)
     lemma_nsum_zero(k, o.givef(d, prot));
     lemma_nsum_le(k, o.needf(d), c);
     lemma_cdiv_props((d[c] - o.cfree(c)) as nat, o.per_c(c));
+}
+
+/// Gained/lost bookkeeping for granting free slab `s` to class `c`, which has lost nothing.
+pub proof fn lemma_gl_grant(o0: CoordV, b: CoordV, n: CoordV, s: int, c: int)
+    requires
+        shape_ok(o0),
+        slab_moved(n, b, s),
+        b.nslab == o0.nslab,
+        b.ncls() == o0.ncls(),
+        0 <= c < o0.ncls(),
+        b.owner[s] == 0,
+        n.owner[s] == c + 1,
+        b.lost(o0, c) == 0,
+    ensures
+        n.gained(o0, c) == b.gained(o0, c) + 1,
+        n.lost(o0, c) == 0,
+        forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c ==> #[trigger] n.gained(o0, c2) == b.gained(o0, c2),
+        forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c ==> #[trigger] n.lost(o0, c2) == b.lost(o0, c2),
+        o0.owner[s] != c + 1,
+{
+    let ns = o0.nslab as int;
+    if o0.owner[s] == c + 1 {
+        lemma_cnt_ge1(ns, b.lpred(o0, c), s);
+    }
+    assert forall|i: int| 0 <= i < ns && i != s implies #[trigger] (b.gpred(o0, c))(i) == (n.gpred(o0, c))(i) by {}
+    lemma_cnt_point(ns, b.gpred(o0, c), n.gpred(o0, c), s);
+    assert forall|i: int| 0 <= i < ns && i != s implies #[trigger] (b.lpred(o0, c))(i) == (n.lpred(o0, c))(i) by {}
+    lemma_cnt_point(ns, b.lpred(o0, c), n.lpred(o0, c), s);
+    assert forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c implies n.gained(o0, c2) == b.gained(o0, c2) && n.lost(o0, c2)
+        == b.lost(o0, c2) by {
+        assert forall|i: int| 0 <= i < ns implies #[trigger] (b.gpred(o0, c2))(i) == (n.gpred(o0, c2))(i) by {}
+        lemma_cnt_ext(ns, b.gpred(o0, c2), n.gpred(o0, c2));
+        assert forall|i: int| 0 <= i < ns implies #[trigger] (b.lpred(o0, c2))(i) == (n.lpred(o0, c2))(i) by {}
+        lemma_cnt_ext(ns, b.lpred(o0, c2), n.lpred(o0, c2));
+    }
+}
+
+/// Gained/lost bookkeeping for reclaiming slab `s` from class `c`, which has gained nothing.
+pub proof fn lemma_gl_reclaim(o0: CoordV, b: CoordV, n: CoordV, s: int, c: int)
+    requires
+        shape_ok(o0),
+        slab_moved(n, b, s),
+        b.nslab == o0.nslab,
+        b.ncls() == o0.ncls(),
+        0 <= c < o0.ncls(),
+        b.owner[s] == c + 1,
+        n.owner[s] == 0,
+        b.gained(o0, c) == 0,
+    ensures
+        n.lost(o0, c) == b.lost(o0, c) + 1,
+        n.gained(o0, c) == 0,
+        forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c ==> #[trigger] n.gained(o0, c2) == b.gained(o0, c2),
+        forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c ==> #[trigger] n.lost(o0, c2) == b.lost(o0, c2),
+        o0.owner[s] == c + 1,
+{
+    let ns = o0.nslab as int;
+    if o0.owner[s] != c + 1 {
+        lemma_cnt_ge1(ns, b.gpred(o0, c), s);
+    }
+    assert forall|i: int| 0 <= i < ns && i != s implies #[trigger] (b.gpred(o0, c))(i) == (n.gpred(o0, c))(i) by {}
+    lemma_cnt_point(ns, b.gpred(o0, c), n.gpred(o0, c), s);
+    assert forall|i: int| 0 <= i < ns && i != s implies #[trigger] (b.lpred(o0, c))(i) == (n.lpred(o0, c))(i) by {}
+    lemma_cnt_point(ns, b.lpred(o0, c), n.lpred(o0, c), s);
+    assert forall|c2: int| 0 <= c2 < o0.ncls() && c2 != c implies n.gained(o0, c2) == b.gained(o0, c2) && n.lost(o0, c2)
+        == b.lost(o0, c2) by {
+        assert forall|i: int| 0 <= i < ns implies #[trigger] (b.gpred(o0, c2))(i) == (n.gpred(o0, c2))(i) by {}
+        lemma_cnt_ext(ns, b.gpred(o0, c2), n.gpred(o0, c2));
+        assert forall|i: int| 0 <= i < ns implies #[trigger] (b.lpred(o0, c2))(i) == (n.lpred(o0, c2))(i) by {}
+        lemma_cnt_ext(ns, b.lpred(o0, c2), n.lpred(o0, c2));
+    }
+}
+
+/// A class with a deficit needs at least one slab.
+pub proof fn lemma_deficit_need(o: CoordV, c: int, d: Seq<usize>)
+    requires
+        shape_ok(o),
+        0 <= c < o.ncls(),
+        d.len() == o.ncls(),
+        o.cfree(c) < d[c],
+    ensures
+        o.need(c, d[c] as nat) >= 1,
+        o.sum_need(d) >= 1,
+{
+    lemma_cdiv_props((d[c] - o.cfree(c)) as nat, o.per_c(c));
+    lemma_nsum_le(o.ncls() as int, o.needf(d), c);
+}
+
+/// View-level invariant of the slab plan loop, relative to the start state `ov`.
+pub open spec fn pinv(n: CoordV, ov: CoordV, d: Seq<usize>, prot: Seq<bool>) -> bool {
+    let k = ov.ncls() as int;
+    &&& shape_ok(ov)
+    &&& same_shape(n, ov)
+    &&& n.owner.len() == ov.owner.len()
+    &&& d.len() == ov.ncls()
+    &&& n.cap(d, prot)
+    &&& forall|c: int| 0 <= c < k ==> #[trigger] n.need(c, d[c] as nat) + n.gained(ov, c) == ov.need(c, d[c] as nat)
+    &&& forall|c: int| 0 <= c < k ==> #[trigger] n.give(c, d[c] as nat, prot) + n.lost(ov, c) == ov.give(c, d[c] as nat, prot)
+    &&& forall|c: int| 0 <= c < k && #[trigger] n.lost(ov, c) > 0 ==> n.cfree(c) >= d[c]
+    &&& forall|c: int| 0 <= c < k && #[trigger] n.gained(ov, c) > 0 ==> n.cfree(c) < d[c] + ov.per_c(c)
+    &&& n.fcount() + nsum(k, n.gainedf(ov)) == ov.fcount() + nsum(k, n.lostf(ov))
+    &&& forall|s: int|
+        0 <= s < ov.nslab && #[trigger] n.owner[s] != ov.owner[s] ==> ov.owner[s] == 0 || (!prot[s] && ov.slab_idle(
+            ov.owner[s] - 1,
+            s as nat,
+        ))
+    &&& forall|c: int, s: int|
+        0 <= c < k && 0 <= s < ov.nslab && n.owner[s] == c + 1 && ov.owner[s] == c + 1 && #[trigger] n.slab_idle(c, s as nat)
+            ==> ov.slab_idle(c, s as nat)
+}
+
+/// Reclaim happens only when free slabs run out; afterwards the next step is a grant.
+pub open spec fn pbrk(n: CoordV, ov: CoordV, d: Seq<usize>) -> bool {
+    let k = ov.ncls() as int;
+    &&& nsum(k, n.lostf(ov)) > 0 ==> n.fcount() <= 1
+    &&& nsum(k, n.lostf(ov)) > 0 && n.fcount() == 1 ==> exists|c: int| 0 <= c < k && #[trigger] n.cfree(c) < d[c]
+}
+
+pub proof fn lemma_pinv_init(ov: CoordV, d: Seq<usize>, prot: Seq<bool>)
+    requires
+        shape_ok(ov),
+        d.len() == ov.ncls(),
+        ov.cap(d, prot),
+    ensures
+        pinv(ov, ov, d, prot),
+        pbrk(ov, ov, d),
+{
+    let k = ov.ncls() as int;
+    assert forall|c: int| 0 <= c < k implies #[trigger] ov.lost(ov, c) == 0 by {
+        assert forall|i: int| 0 <= i < ov.nslab implies !#[trigger] (ov.lpred(ov, c))(i) by {}
+        lemma_cnt_zero(ov.nslab as int, ov.lpred(ov, c));
+    }
+    assert forall|c: int| 0 <= c < k implies #[trigger] ov.gained(ov, c) == 0 by {
+        assert forall|i: int| 0 <= i < ov.nslab implies !#[trigger] (ov.gpred(ov, c))(i) by {}
+        lemma_cnt_zero(ov.nslab as int, ov.gpred(ov, c));
+    }
+    assert forall|c: int| 0 <= c < k implies #[trigger] (ov.lostf(ov))(c) == 0 by {
+        assert(ov.lost(ov, c) == 0);
+    }
+    lemma_nsum_zero(k, ov.lostf(ov));
+    assert forall|c: int| 0 <= c < k implies #[trigger] (ov.gainedf(ov))(c) == 0 by {
+        assert(ov.gained(ov, c) == 0);
+    }
+    lemma_nsum_zero(k, ov.gainedf(ov));
+}
+
+pub proof fn lemma_pinv_grant(ov: CoordV, bv: CoordV, nv: CoordV, s: int, c: int, d: Seq<usize>, prot: Seq<bool>)
+    requires
+        pinv(bv, ov, d, prot),
+        pbrk(bv, ov, d),
+        slab_moved(nv, bv, s),
+        0 <= c < ov.ncls(),
+        bv.owner[s] == 0,
+        nv.owner[s] == c + 1,
+        nv.cfree(c) == bv.cfree(c) + ov.per_c(c),
+        forall|c2: int| 0 <= c2 < ov.ncls() && c2 != c ==> #[trigger] nv.cfree(c2) == bv.cfree(c2),
+        bv.cfree(c) < d[c],
+        bv.fcount() >= 1,
+    ensures
+        pinv(nv, ov, d, prot),
+        pbrk(nv, ov, d),
+        nv.sum_need(d) + nv.sum_give(d, prot) < bv.sum_need(d) + bv.sum_give(d, prot),
+{
+    let k = ov.ncls() as int;
+    lemma_grant_step(bv, nv, s, c, d, prot);
+    if bv.lost(ov, c) > 0 {
+        assert(bv.cfree(c) >= d[c]);
+    }
+    lemma_gl_grant(ov, bv, nv, s, c);
+    assert forall|c2: int| 0 <= c2 < k implies #[trigger] nv.need(c2, d[c2] as nat) + nv.gained(ov, c2) == ov.need(
+        c2,
+        d[c2] as nat,
+    ) by {
+        assert(bv.need(c2, d[c2] as nat) + bv.gained(ov, c2) == ov.need(c2, d[c2] as nat));
+        if c2 != c {
+            assert(nv.gained(ov, c2) == bv.gained(ov, c2));
+            assert(nv.need(c2, d[c2] as nat) == bv.need(c2, d[c2] as nat));
+        }
+    }
+    assert forall|c2: int| 0 <= c2 < k implies #[trigger] nv.give(c2, d[c2] as nat, prot) + nv.lost(ov, c2) == ov.give(
+        c2,
+        d[c2] as nat,
+        prot,
+    ) by {
+        assert(bv.give(c2, d[c2] as nat, prot) + bv.lost(ov, c2) == ov.give(c2, d[c2] as nat, prot));
+        assert(nv.give(c2, d[c2] as nat, prot) == bv.give(c2, d[c2] as nat, prot));
+        if c2 != c {
+            assert(nv.lost(ov, c2) == bv.lost(ov, c2));
+        }
+    }
+    assert forall|c2: int| 0 <= c2 < k && #[trigger] nv.lost(ov, c2) > 0 implies nv.cfree(c2) >= d[c2] by {
+        if c2 != c {
+            assert(nv.lost(ov, c2) == bv.lost(ov, c2));
+            assert(bv.lost(ov, c2) > 0);
+        }
+    }
+    assert forall|c2: int| 0 <= c2 < k && #[trigger] nv.gained(ov, c2) > 0 implies nv.cfree(c2) < d[c2] + ov.per_c(c2) by {
+        if c2 != c {
+            assert(nv.gained(ov, c2) == bv.gained(ov, c2));
+            assert(bv.gained(ov, c2) > 0);
+        }
+    }
+    assert forall|c2: int| 0 <= c2 < k implies #[trigger] (bv.lostf(ov))(c2) == (nv.lostf(ov))(c2) by {
+        if c2 != c {
+            assert(nv.lost(ov, c2) == bv.lost(ov, c2));
+        }
+    }
+    lemma_nsum_ext(k, bv.lostf(ov), nv.lostf(ov));
+    assert forall|c2: int| 0 <= c2 < k && c2 != c implies #[trigger] (bv.gainedf(ov))(c2) == (nv.gainedf(ov))(c2) by {
+        assert(nv.gained(ov, c2) == bv.gained(ov, c2));
+    }
+    lemma_nsum_point(k, bv.gainedf(ov), nv.gainedf(ov), c);
+    assert forall|s2: int| 0 <= s2 < ov.nslab && #[trigger] nv.owner[s2] != ov.owner[s2] implies ov.owner[s2] == 0 || (
+    !prot[s2] && ov.slab_idle(ov.owner[s2] - 1, s2 as nat)) by {
+        if s2 != s {
+            assert(nv.owner[s2] == bv.owner[s2]);
+        } else if ov.owner[s2] != 0 {
+            assert(bv.owner[s2] != ov.owner[s2]);
+        }
+    }
+    assert forall|c2: int, s2: int|
+        0 <= c2 < k && 0 <= s2 < ov.nslab && nv.owner[s2] == c2 + 1 && ov.owner[s2] == c2 + 1 && #[trigger] nv.slab_idle(
+            c2,
+            s2 as nat,
+        ) implies ov.slab_idle(c2, s2 as nat) by {
+        if s2 != s {
+            assert(nv.owner[s2] == bv.owner[s2]);
+            assert(nv.slab_idle(c2, s2 as nat) == bv.slab_idle(c2, s2 as nat));
+        }
+    }
+}
+
+pub proof fn lemma_pinv_reclaim(
+    ov: CoordV,
+    bv: CoordV,
+    nv: CoordV,
+    s: int,
+    c2: int,
+    c: int,
+    d: Seq<usize>,
+    prot: Seq<bool>,
+)
+    requires
+        pinv(bv, ov, d, prot),
+        slab_moved(nv, bv, s),
+        0 <= c2 < ov.ncls(),
+        0 <= c < ov.ncls(),
+        bv.reclaimable(c2, prot, s),
+        nv.owner[s] == 0,
+        nv.cfree(c2) + ov.per_c(c2) == bv.cfree(c2),
+        forall|c3: int| 0 <= c3 < ov.ncls() && c3 != c2 ==> #[trigger] nv.cfree(c3) == bv.cfree(c3),
+        bv.cfree(c2) >= d[c2] + ov.per_c(c2),
+        bv.cfree(c) < d[c],
+        bv.fcount() == 0,
+    ensures
+        pinv(nv, ov, d, prot),
+        pbrk(nv, ov, d),
+        nv.sum_need(d) + nv.sum_give(d, prot) < bv.sum_need(d) + bv.sum_give(d, prot),
+{
+    let k = ov.ncls() as int;
+    lemma_reclaim_step(bv, nv, s, c2, d, prot);
+    if bv.gained(ov, c2) > 0 {
+        assert(bv.cfree(c2) < d[c2] + ov.per_c(c2));
+    }
+    lemma_gl_reclaim(ov, bv, nv, s, c2);
+    assert(c2 != c);
+    assert forall|c3: int| 0 <= c3 < k implies #[trigger] nv.need(c3, d[c3] as nat) + nv.gained(ov, c3) == ov.need(
+        c3,
+        d[c3] as nat,
+    ) by {
+        assert(bv.need(c3, d[c3] as nat) + bv.gained(ov, c3) == ov.need(c3, d[c3] as nat));
+        assert(nv.need(c3, d[c3] as nat) == bv.need(c3, d[c3] as nat));
+        if c3 != c2 {
+            assert(nv.gained(ov, c3) == bv.gained(ov, c3));
+        }
+    }
+    assert forall|c3: int| 0 <= c3 < k implies #[trigger] nv.give(c3, d[c3] as nat, prot) + nv.lost(ov, c3) == ov.give(
+        c3,
+        d[c3] as nat,
+        prot,
+    ) by {
+        assert(bv.give(c3, d[c3] as nat, prot) + bv.lost(ov, c3) == ov.give(c3, d[c3] as nat, prot));
+        if c3 != c2 {
+            assert(nv.lost(ov, c3) == bv.lost(ov, c3));
+            assert(nv.give(c3, d[c3] as nat, prot) == bv.give(c3, d[c3] as nat, prot));
+        }
+    }
+    assert forall|c3: int| 0 <= c3 < k && #[trigger] nv.lost(ov, c3) > 0 implies nv.cfree(c3) >= d[c3] by {
+        if c3 != c2 {
+            assert(nv.lost(ov, c3) == bv.lost(ov, c3));
+            assert(bv.lost(ov, c3) > 0);
+        }
+    }
+    assert forall|c3: int| 0 <= c3 < k && #[trigger] nv.gained(ov, c3) > 0 implies nv.cfree(c3) < d[c3] + ov.per_c(c3) by {
+        if c3 != c2 {
+            assert(nv.gained(ov, c3) == bv.gained(ov, c3));
+            assert(bv.gained(ov, c3) > 0);
+        }
+    }
+    assert forall|c3: int| 0 <= c3 < k && c3 != c2 implies #[trigger] (bv.lostf(ov))(c3) == (nv.lostf(ov))(c3) by {
+        assert(nv.lost(ov, c3) == bv.lost(ov, c3));
+    }
+    lemma_nsum_point(k, bv.lostf(ov), nv.lostf(ov), c2);
+    assert forall|c3: int| 0 <= c3 < k implies #[trigger] (bv.gainedf(ov))(c3) == (nv.gainedf(ov))(c3) by {
+        if c3 != c2 {
+            assert(nv.gained(ov, c3) == bv.gained(ov, c3));
+        }
+    }
+    lemma_nsum_ext(k, bv.gainedf(ov), nv.gainedf(ov));
+    assert(nv.cfree(c) < d[c]);
+    assert forall|s2: int| 0 <= s2 < ov.nslab && #[trigger] nv.owner[s2] != ov.owner[s2] implies ov.owner[s2] == 0 || (
+    !prot[s2] && ov.slab_idle(ov.owner[s2] - 1, s2 as nat)) by {
+        if s2 != s {
+            assert(nv.owner[s2] == bv.owner[s2]);
+        } else {
+            assert(ov.owner[s] == c2 + 1);
+            assert(bv.owner[s] == c2 + 1);
+            assert(bv.slab_idle(c2, s as nat));
+        }
+    }
+    assert forall|c3: int, s2: int|
+        0 <= c3 < k && 0 <= s2 < ov.nslab && nv.owner[s2] == c3 + 1 && ov.owner[s2] == c3 + 1 && #[trigger] nv.slab_idle(
+            c3,
+            s2 as nat,
+        ) implies ov.slab_idle(c3, s2 as nat) by {
+        if s2 != s {
+            assert(nv.owner[s2] == bv.owner[s2]);
+            assert(nv.slab_idle(c3, s2 as nat) == bv.slab_idle(c3, s2 as nat));
+        }
+    }
+}
+
+pub proof fn lemma_pinv_final(nv: CoordV, ov: CoordV, d: Seq<usize>, prot: Seq<bool>)
+    requires
+        pinv(nv, ov, d, prot),
+        forall|c: int| 0 <= c < ov.ncls() ==> #[trigger] nv.cfree(c) >= d[c],
+        nsum(ov.ncls() as int, nv.lostf(ov)) > 0 ==> nv.fcount() == 0,
+    ensures
+        forall|c: int| 0 <= c < ov.ncls() ==> #[trigger] nv.gained(ov, c) == ov.need(c, d[c] as nat) && nv.lost(ov, c)
+            <= ov.give(c, d[c] as nat, prot),
+        nsum(ov.ncls() as int, nv.lostf(ov)) == if ov.sum_need(d) > ov.fcount() {
+            (ov.sum_need(d) - ov.fcount()) as nat
+        } else {
+            0nat
+        },
+{
+    let k = ov.ncls() as int;
+    assert forall|c: int| 0 <= c < k implies #[trigger] nv.gained(ov, c) == ov.need(c, d[c] as nat) && nv.lost(ov, c)
+        <= ov.give(c, d[c] as nat, prot) by {
+        assert(nv.cfree(c) >= d[c]);
+        assert(nv.need(c, d[c] as nat) == 0);
+        assert(nv.need(c, d[c] as nat) + nv.gained(ov, c) == ov.need(c, d[c] as nat));
+        assert(nv.give(c, d[c] as nat, prot) + nv.lost(ov, c) == ov.give(c, d[c] as nat, prot));
+    }
+    assert forall|c: int| 0 <= c < k implies #[trigger] (nv.gainedf(ov))(c) == (ov.needf(d))(c) by {
+        assert(nv.gained(ov, c) == ov.need(c, d[c] as nat));
+    }
+    lemma_nsum_ext(k, nv.gainedf(ov), ov.needf(d));
 }
 
 impl Coordinator {
@@ -611,9 +970,78 @@ impl Coordinator {
         None
     }
 
+    /// The view-level frame of a sequence of slab moves.
+    pub(crate) proof fn lemma_frame_view(&self, o: &Coordinator, prot: Seq<bool>)
+        requires
+            o.valid(),
+            self.valid(),
+            self.slab_frame(o, prot),
+        ensures
+            self@.id == o@.id,
+            self@.b == o@.b,
+            self@.sbytes == o@.sbytes,
+            self@.nslab == o@.nslab,
+            self@.per == o@.per,
+            self@.unit == o@.unit,
+            self@.np == o@.np,
+            self@.paged.len() == o@.paged.len(),
+            self@.state.len() == o@.state.len(),
+            self@.owner.len() == o@.owner.len(),
+            self@.slots == o@.slots,
+            forall|i: int|
+                0 <= i < o@.paged.len() ==> #[trigger] self@.paged[i] == (MgrV {
+                    own: self@.paged[i].own,
+                    keys: self@.paged[i].keys,
+                    ..o@.paged[i]
+                }),
+            forall|j: int|
+                0 <= j < o@.state.len() ==> #[trigger] self@.state[j] == (StateV {
+                    own: self@.state[j].own,
+                    w: self@.state[j].w,
+                    ..o@.state[j]
+                }),
+            forall|j: int, x: int|
+                0 <= j < o@.state.len() && 0 <= x < o@.state[j].p && o@.state[j].holder[x] is Some ==> #[trigger] self@.state[
+                j].w[x] == o@.state[j].w[x],
+            forall|i: int, x: int|
+                0 <= i < o@.paged.len() && 0 <= x < o@.paged[i].p ==> #[trigger] self@.paged[i].keys[x] == o@.paged[i].keys[x]
+                    || (self@.paged[i].keys[x] is None && o@.paged[i].refs[x] == 0 && !prot[x / (o@.per[i] as int)]),
+    {
+        self.lemma_view();
+        o.lemma_view();
+        assert forall|i: int| 0 <= i < o@.paged.len() implies #[trigger] self@.paged[i] == (MgrV {
+            own: self@.paged[i].own,
+            keys: self@.paged[i].keys,
+            ..o@.paged[i]
+        }) by {
+            assert(self.paged@[i] == self.paged@[i]);
+        }
+        assert forall|j: int| 0 <= j < o@.state.len() implies #[trigger] self@.state[j] == (StateV {
+            own: self@.state[j].own,
+            w: self@.state[j].w,
+            ..o@.state[j]
+        }) by {
+            assert(self.state@[j] == self.state@[j]);
+        }
+        assert forall|j: int, x: int|
+            0 <= j < o@.state.len() && 0 <= x < o@.state[j].p && o@.state[j].holder[x] is Some implies #[trigger] self@.state[
+            j].w[x] == o@.state[j].w[x] by {
+            assert(self.state@[j] == self.state@[j]);
+            assert(self.sv(j).w[x] == o.sv(j).w[x]);
+        }
+        assert forall|i: int, x: int|
+            0 <= i < o@.paged.len() && 0 <= x < o@.paged[i].p implies #[trigger] self@.paged[i].keys[x] == o@.paged[i].keys[x]
+            || (self@.paged[i].keys[x] is None && o@.paged[i].refs[x] == 0 && !prot[x / (o@.per[i] as int)]) by {
+            assert(self.paged@[i] == self.paged@[i]);
+            assert(self.pv(i).keys[x] == o.pv(i).keys[x] || (self.pv(i).keys[x] is None && o.pv(i).refs[x] == 0 && !prot[x / (
+            self.per_c(i) as int)]));
+        }
+        assert(self@.slots =~= o@.slots);
+    }
+
     /// The slab plan of §3.5: while some class has a deficit, give it a free slab, or else
     /// reclaim an idle unprotected slab from a class that keeps `d_c` free units without it.
-    /// Requires `Cap(d, prot)`; afterwards every class has `|F_c| >= d_c`.
+    /// Requires `Cap(d, prot)`; establishes `plan_rel`.
     pub(crate) fn run_plan(&mut self, d: &Vec<usize>, prot: &Vec<bool>)
         requires
             old(self).valid(),
@@ -624,16 +1052,23 @@ impl Coordinator {
         ensures
             final(self).valid(),
             final(self).slab_frame(old(self), prot@),
-            forall|c: int| 0 <= c < final(self).ncls() ==> #[trigger] final(self)@.cfree(c) >= d@[c],
+            final(self)@.plan_rel(old(self)@, d@, prot@),
             final(self).ncls() == old(self).ncls(),
             final(self).nslab == old(self).nslab,
     {
         let ghost o = *self;
+        let ghost ov = o@;
         proof {
             lemma_slab_frame_refl(self, prot@);
+            o.lemma_shape();
+            lemma_pinv_init(ov, d@, prot@);
         }
         loop
             invariant_except_break
+                pbrk(self@, ov, d@),
+            invariant
+                o.valid(),
+                ov == o@,
                 self.valid(),
                 self.slab_frame(&o, prot@),
                 self.ncls() == o.ncls(),
@@ -641,14 +1076,10 @@ impl Coordinator {
                 d@.len() == self.ncls(),
                 prot@.len() == self.nslab,
                 forall|c: int| 0 <= c < d@.len() ==> #[trigger] d@[c] <= max_slots(),
-                self@.cap(d@, prot@),
-            invariant
-                self.valid(),
-                self.slab_frame(&o, prot@),
-                self.ncls() == o.ncls(),
-                self.nslab == o.nslab,
+                pinv(self@, ov, d@, prot@),
             ensures
-                forall|c: int| 0 <= c < self.ncls() ==> #[trigger] self@.cfree(c) >= d@[c],
+                forall|c: int| 0 <= c < ov.ncls() ==> #[trigger] self@.cfree(c) >= d@[c],
+                nsum(ov.ncls() as int, self@.lostf(ov)) > 0 ==> self@.fcount() == 0,
             decreases self@.sum_need(d@) + self@.sum_give(d@, prot@),
         {
             proof {
@@ -666,6 +1097,8 @@ impl Coordinator {
                         let s = self.fs.peek();
                         proof {
                             assert(self.owner@[s as int] == 0);
+                            self.lemma_view();
+                            lemma_cnt_set(self.nslab as int, self@.fpred(), self.fs@);
                         }
                         self.grant_slab(s, c, Ghost(prot@));
                         proof {
@@ -674,7 +1107,7 @@ impl Coordinator {
                             self.lemma_view_cls();
                             before.lemma_view_cls();
                             self.lemma_moved_view(&before, s as int);
-                            lemma_grant_step(bv, self@, s as int, c as int, d@, prot@);
+                            lemma_pinv_grant(ov, bv, self@, s as int, c as int, d@, prot@);
                             lemma_slab_frame_trans(&o, &before, self, prot@);
                         }
                     } else {
@@ -693,6 +1126,7 @@ impl Coordinator {
                                 proof {
                                     self.lemma_view_cls();
                                     self.lemma_view();
+                                    lemma_cnt_set(self.nslab as int, self@.fpred(), self.fs@);
                                 }
                                 self.reclaim_slab(s, c2, Ghost(prot@));
                                 proof {
@@ -701,7 +1135,7 @@ impl Coordinator {
                                     self.lemma_view_cls();
                                     before.lemma_view_cls();
                                     self.lemma_moved_view(&before, s as int);
-                                    lemma_reclaim_step(bv, self@, s as int, c2 as int, d@, prot@);
+                                    lemma_pinv_reclaim(ov, bv, self@, s as int, c2 as int, c as int, d@, prot@);
                                     lemma_slab_frame_trans(&o, &before, self, prot@);
                                 }
                             },
@@ -709,6 +1143,10 @@ impl Coordinator {
                     }
                 },
             }
+        }
+        proof {
+            self.lemma_frame_view(&o, prot@);
+            lemma_pinv_final(self@, ov, d@, prot@);
         }
     }
 

@@ -55,6 +55,19 @@ pub proof fn lemma_cnt_point(n: int, f: spec_fn(int) -> bool, g: spec_fn(int) ->
     }
 }
 
+pub proof fn lemma_cnt_ge1(n: int, f: spec_fn(int) -> bool, s: int)
+    requires
+        0 <= s < n,
+        f(s),
+    ensures
+        cnt(n, f) >= 1,
+    decreases n,
+{
+    if s < n - 1 {
+        lemma_cnt_ge1(n - 1, f, s);
+    }
+}
+
 pub proof fn lemma_cnt_pos(n: int, f: spec_fn(int) -> bool)
     requires
         cnt(n, f) > 0,
