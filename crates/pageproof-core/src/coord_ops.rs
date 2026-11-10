@@ -11,6 +11,7 @@ use crate::state::*;
 use crate::coord::*;
 use crate::ops_release::*;
 use crate::ops_extend::*;
+use crate::ops_write::*;
 use crate::slabplan::*;
 use crate::coord_attach::*;
 
@@ -932,6 +933,268 @@ impl Coordinator {
         }
         assert(fin@.state =~= mid@.state);
         assert(fin@.slots =~= mid@.slots);
+    }
+}
+
+
+/// Execution plan of the coordinator: one per paged class, plus the live state slots.
+pub struct CoordPlan {
+    pub ticket: Ticket,
+    pub handle: Handle,
+    pub input_ids: Vec<Token>,
+    pub positions: Vec<usize>,
+    pub block_size: usize,
+    /// Per paged class: write slots of `[a, z)` and the page mapping of `[0, z)`.
+    pub write_slots: Vec<Vec<usize>>,
+    pub page_tables: Vec<Vec<PageId>>,
+    /// Per state class: `σ_h^c`.
+    pub state_slots: Vec<usize>,
+    /// The state slots start from the initial state (`a == 0`, E10).
+    pub init: bool,
+}
+
+/// C3 plan correctness across classes.
+pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan) -> bool {
+    let l = o.leases()[h];
+    let a = l.c;
+    let z = l.c + n;
+    &&& plan.ticket == Ticket { mgr: o.id, id: o.next_ticket() }
+    &&& plan.handle == Handle { mgr: o.id, id: h }
+    &&& plan.block_size as nat == o.b
+    &&& plan.input_ids@ == l.toks.subrange(a as int, z as int)
+    &&& plan.positions@.len() == n
+    &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == a + q
+    &&& plan.write_slots@.len() == o.np
+    &&& plan.page_tables@.len() == o.np
+    &&& forall|c: int|
+        0 <= c < o.np ==> {
+            let lc = o.paged[c].leases[h];
+            &&& (#[trigger] plan.write_slots@[c])@.len() == n
+            &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
+            &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
+            &&& forall|q1: int, q2: int|
+                0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+            &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
+            &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
+            // §9.0 (b) per class.
+            &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
+        }
+    &&& plan.state_slots@ == o.slots[h]
+    &&& plan.init == (a == 0)
+    &&& forall|j: int|
+        0 <= j < o.nst() ==> {
+            &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
+            &&& a > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, a as int))
+        }
+}
+
+/// The same lease/ticket update in every paged class, everything else unchanged.
+pub open spec fn paged_step(o: CoordV, n: CoordV) -> bool {
+    &&& n.id == o.id
+    &&& n.nslab == o.nslab
+    &&& n.sbytes == o.sbytes
+    &&& n.b == o.b
+    &&& n.unit == o.unit
+    &&& n.per == o.per
+    &&& n.np == o.np
+    &&& n.owner == o.owner
+    &&& n.paged.len() == o.paged.len()
+    &&& n.state.len() == o.state.len()
+    &&& n.slots == o.slots
+}
+
+pub open spec fn coord_begin_result(o: CoordV, n: CoordV, h: Handle, k: usize, r: Result<(Ticket, CoordPlan), Error>) -> bool {
+    let live = h.mgr == o.id && o.leases().contains_key(h.id);
+    let l = o.leases()[h.id];
+    &&& !live ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidHandle)
+    &&& (live && l.pending is Some) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
+    &&& (live && l.pending is None && !(0 < k && l.c + k <= l.toks.len())) ==> r == Err::<(Ticket, CoordPlan), Error>(
+        Error::InvalidArgument,
+    )
+    &&& (live && l.pending is None && 0 < k && l.c + k <= l.toks.len()) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
+    &&& (live && l.pending is None && 0 < k && l.c + k <= l.toks.len() && o.next_ticket() == u64::MAX) ==> r == Err::<
+        (Ticket, CoordPlan),
+        Error,
+    >(Error::IdentifierExhausted)
+    &&& r is Err ==> n == o
+    &&& r matches Ok((t, plan)) ==> {
+        &&& live
+        &&& t == plan.ticket
+        &&& cplan_ok(o, h.id, k as nat, plan)
+        &&& paged_step(o, n)
+        &&& n.state == o.state
+        &&& forall|c: int| 0 <= c < o.np ==> #[trigger] n.paged[c] == began(o.paged[c], h.id, k as nat)
+    }
+}
+
+pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, r: Result<usize, Error>) -> bool {
+    let live = t.mgr == o.id && o.pend().contains_key(t.id);
+    &&& !live ==> r == Err::<usize, Error>(Error::InvalidTicket)
+    &&& live ==> r is Ok
+    &&& r is Err ==> n == o
+    &&& r matches Ok(z) ==> {
+        let pr = o.pend()[t.id];
+        let h = pr.lease;
+        let l = o.leases()[h];
+        &&& live
+        &&& z as nat == pr.z
+        &&& paged_step(o, n)
+        &&& forall|c: int| 0 <= c < o.np ==> #[trigger] finish_rel(o.paged[c], n.paged[c], t.id)
+        // §9.0 (c) for state classes: every live slot now holds the state after `T_h[0:z]`.
+        &&& forall|j: int|
+            0 <= j < o.nst() ==> #[trigger] n.state[j] == (StateV {
+                w: o.state[j].w.update(o.slots[h][j] as int, Some(l.toks.subrange(0, pr.z as int))),
+                ..o.state[j]
+            })
+    }
+}
+
+impl Coordinator {
+    /// Validity after a lockstep step that changes only leases (frontier/pending), tickets and the
+    /// ghost KV state in every paged class, and only provenance of live slots in state classes.
+    proof fn lemma_step_valid(&self, o: &Coordinator, h: u64)
+        requires
+            o.valid(),
+            o.pv(0).leases.contains_key(h),
+            self.id == o.id,
+            self.nslab == o.nslab,
+            self.sbytes == o.sbytes,
+            self.b == o.b,
+            self.npaged == o.npaged,
+            self.unit@ == o.unit@,
+            self.per@ == o.per@,
+            self.owner@ == o.owner@,
+            self.fs == o.fs,
+            self.paged@.len() == o.paged@.len(),
+            self.state@.len() == o.state@.len(),
+            self.slots@ == o.slots@,
+            forall|c: int|
+                0 <= c < o.np() ==> {
+                    &&& (#[trigger] self.paged@[c]).valid()
+                    &&& self.pv(c).own == o.pv(c).own
+                    &&& self.pv(c).p == o.pv(c).p
+                    &&& self.pv(c).b == o.pv(c).b
+                    &&& self.pv(c).ns == o.pv(c).ns
+                    &&& self.pv(c).next_handle == o.pv(c).next_handle
+                    &&& self.pv(c).leases.dom() == o.pv(c).leases.dom()
+                    &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> self.pv(c).leases[h2]
+                        == o.pv(c).leases[h2]
+                    &&& self.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+                    &&& self.pv(c).leases[h].c == self.pv(0).leases[h].c
+                    &&& self.pv(c).leases[h].pending == self.pv(0).leases[h].pending
+                    &&& self.pv(c).pend == self.pv(0).pend
+                    &&& self.pv(c).next_ticket == self.pv(0).next_ticket
+                },
+            forall|j: int|
+                0 <= j < o.nst() ==> {
+                    &&& (#[trigger] self.state@[j]).valid()
+                    &&& self.sv(j).own == o.sv(j).own
+                    &&& self.sv(j).holder == o.sv(j).holder
+                    &&& self.sv(j).p == o.sv(j).p
+                    &&& forall|x: int| 0 <= x < o.sv(j).p && x != o.slots@[h]@[j] ==> #[trigger] self.sv(j).w[x] == o.sv(j).w[x]
+                    &&& (self.pv(0).leases[h].c > 0 ==> self.sv(j).w[o.slots@[h]@[j] as int] == Some(
+                        self.pv(0).leases[h].toks.subrange(0, self.pv(0).leases[h].c as int),
+                    ))
+                },
+        ensures
+            self.valid(),
+    {
+        assert(self.paged@[0].valid());
+        assert(self.cfg_ok());
+        assert(self.pools_ok()) by {
+            assert forall|i: int| 0 <= i < self.np() implies {
+                &&& #[trigger] self.paged@[i].valid()
+                &&& self.pv(i).p == self.cunits(i)
+                &&& self.pv(i).b == self.b as nat
+                &&& self.pv(i).ns == self.pv(0).ns
+            } by {
+                assert(o.paged@[i].valid());
+            }
+            assert forall|j: int| 0 <= j < self.nst() implies {
+                &&& #[trigger] self.state@[j].valid()
+                &&& self.sv(j).p == self.cunits(self.np() + j)
+            } by {
+                assert(o.state@[j].valid());
+            }
+        }
+        assert(self.own_ok()) by {
+            assert forall|c: int, x: int| 0 <= c < self.ncls() && 0 <= x < self.cunits(c) implies #[trigger] self.cown(c, x)
+                == (self.owner@[x / (self.per_c(c) as int)] == c + 1) by {
+                assert(o.cown(c, x) == (o.owner@[x / (o.per_c(c) as int)] == c + 1));
+                if c < self.np() {
+                    assert(self.paged@[c].valid());
+                } else {
+                    assert(self.state@[c - self.np()].valid());
+                }
+            }
+        }
+        assert(self.lock_ok()) by {
+            assert forall|i: int| #![trigger self.paged@[i]] 0 <= i < self.np() implies {
+                &&& self.pv(i).leases.dom() == self.pv(0).leases.dom()
+                &&& self.pv(i).pend == self.pv(0).pend
+                &&& self.pv(i).next_handle == self.pv(0).next_handle
+                &&& self.pv(i).next_ticket == self.pv(0).next_ticket
+            } by {
+                assert(o.paged@[i] == o.paged@[i]);
+            }
+            assert forall|i: int, h2: u64| 0 <= i < self.np() && #[trigger] self.pv(i).leases.contains_key(h2) implies {
+                &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
+                &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
+                &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+            } by {
+                assert(self.paged@[i].valid());
+                assert(o.pv(i).leases.contains_key(h2));
+                assert(o.paged@[i] == o.paged@[i]);
+                if h2 != h {
+                    assert(o.pv(0).leases.contains_key(h2));
+                    assert(self.pv(0).leases[h2] == o.pv(0).leases[h2]);
+                } else {
+                    assert(o.pv(i).leases[h].toks == o.pv(0).leases[h].toks);
+                    assert(self.pv(0).leases[h].toks == o.pv(0).leases[h].toks);
+                }
+            }
+            assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
+                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+            ) by {
+                assert(o.pv(0).leases.contains_key(h2));
+                if h2 != h {
+                    assert(self.pv(0).leases[h2] == o.pv(0).leases[h2]);
+                }
+            }
+        }
+        assert(self.slots_ok()) by {
+            assert(self.slots@.dom() =~= self.pv(0).leases.dom());
+            assert forall|h2: u64, j: int|
+                #![trigger self.slots@[h2]@[j]]
+                self.slots@.contains_key(h2) && 0 <= j < self.nst() implies {
+                let x = self.slots@[h2]@[j];
+                let l2 = self.pv(0).leases[h2];
+                &&& (x as nat) < self.sv(j).p
+                &&& self.sv(j).holder[x as int] == Some(h2)
+                &&& l2.c > 0 ==> self.sv(j).w[x as int] == Some(l2.toks.subrange(0, l2.c as int))
+            } by {
+                assert(o.slots@.contains_key(h2));
+                assert(self.state@[j].valid());
+                if h2 != h {
+                    let x = o.slots@[h2]@[j];
+                    assert(o.sv(j).holder[x as int] == Some(h2));
+                    let y = o.slots@[h]@[j];
+                    assert(o.sv(j).holder[y as int] == Some(h));
+                    assert(x != y);
+                    assert(self.pv(0).leases[h2] == o.pv(0).leases[h2]);
+                }
+            }
+            assert forall|j: int, x: int|
+                #![trigger self.sv(j).holder[x]]
+                0 <= j < self.nst() && 0 <= x < self.sv(j).p && self.sv(j).holder[x] is Some implies {
+                let h2 = self.sv(j).holder[x]->Some_0;
+                &&& self.slots@.contains_key(h2)
+                &&& self.slots@[h2]@[j] as int == x
+            } by {
+                assert(self.state@[j].valid());
+                assert(o.sv(j).holder[x] is Some);
+            }
+        }
     }
 }
 
