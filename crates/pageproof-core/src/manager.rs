@@ -20,7 +20,7 @@ exec static NEXT_MGR: AtomicU64 ensures true { AtomicU64::new(0) }
 
 /// Allocates a fresh manager id; `None` once the id space is exhausted (never wraps). Retries a
 /// bounded number of times if another thread races the compare-exchange.
-fn fresh_mgr_id() -> (r: Option<u64>) {
+pub(crate) fn fresh_mgr_id() -> (r: Option<u64>) {
     let mut tries: u32 = 0;
     while tries < 1024
         decreases 1024 - tries,

@@ -157,6 +157,7 @@ impl StatePool {
                 own: Seq::new(old(self)@.p, |x: int| if in_range(x, lo as nat, n as nat) { true } else { old(self)@.own[x] }),
                 ..old(self)@
             }),
+            final(self)@.free_set().len() == old(self)@.free_set().len() + n,
     {
         let ghost v = self@;
         proof {
@@ -179,11 +180,14 @@ impl StatePool {
                 forall|y: usize| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && self.own@[y as int]
                     && v.holder[y as int] is None),
                 forall|y: int| 0 <= y < v.p ==> #[trigger] self.used@[y] == (v.holder[y] is Some),
+                self.free@.len() == v.free_set().len() + (x - lo),
             decreases lo + n - x,
         {
             proof {
                 assert(in_range(x as int, lo as nat, n as nat));
                 assert(v.holder[x as int] is None);
+                assert(!self.free@.contains(x));
+                vstd::set::lemma_set_insert_len(self.free@, x);
             }
             self.free.insert(x);
             self.own.set(x, true);
@@ -214,6 +218,7 @@ impl StatePool {
                 w: Seq::new(old(self)@.p, |x: int| if in_range(x, lo as nat, n as nat) { None } else { old(self)@.w[x] }),
                 ..old(self)@
             }),
+            final(self)@.free_set().len() + n == old(self)@.free_set().len(),
     {
         let ghost v = self@;
         proof {
@@ -236,10 +241,13 @@ impl StatePool {
                 forall|y: usize| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && self.own@[y as int]
                     && v.holder[y as int] is None),
                 forall|y: int| 0 <= y < v.p ==> #[trigger] self.used@[y] == (v.holder[y] is Some),
+                self.free@.len() + (x - lo) == v.free_set().len(),
             decreases lo + n - x,
         {
             proof {
                 assert(in_range(x as int, lo as nat, n as nat));
+                assert(self.free@.contains(x));
+                vstd::set::lemma_set_remove_len(self.free@, x);
             }
             self.free.remove(x);
             self.own.set(x, false);
@@ -270,6 +278,7 @@ impl StatePool {
         ensures
             final(self).valid(),
             old(self)@.free_set().contains(x),
+            final(self)@.free_set().len() + 1 == old(self)@.free_set().len(),
             final(self)@ == (StateV {
                 holder: old(self)@.holder.update(x as int, Some(h)),
                 w: old(self)@.w.update(x as int, None),
@@ -280,7 +289,11 @@ impl StatePool {
         proof {
             self.lemma_free();
         }
+        let ghost f0 = self.free@;
         let x = self.free.pop_any();
+        proof {
+            vstd::set::lemma_set_remove_len(f0, x);
+        }
         self.used.set(x, true);
         let ghost v2 = StateV { holder: v.holder.update(x as int, Some(h)), w: v.w.update(x as int, None), ..v };
         self.g = Ghost(v2);

@@ -173,7 +173,7 @@ pub open spec fn n_active(hits: Seq<(PageId, bool)>, j: nat) -> nat
     }
 }
 
-proof fn lemma_n_active_eq(v: MgrV, toks: Seq<Token>, hits: Seq<(PageId, bool)>, j: nat)
+pub proof fn lemma_n_active_eq(v: MgrV, toks: Seq<Token>, hits: Seq<(PageId, bool)>, j: nat)
     requires
         hit_ok(v, toks, hits),
         j <= hits.len(),
@@ -522,7 +522,7 @@ fn probe(
     (hits, head, ks)
 }
 
-fn count_hits_active(hits: &Vec<(PageId, bool)>) -> (u: usize)
+pub fn count_hits_active(hits: &Vec<(PageId, bool)>) -> (u: usize)
     ensures
         u as nat == n_active(hits@, hits@.len() as nat),
         u <= hits@.len(),

@@ -228,6 +228,7 @@ impl Manager {
             final(self).valid(),
             final(self).den_log() == old(self).den_log(),
             final(self)@ == granted(old(self)@, lo as nat, n as nat),
+            final(self)@.free_set().len() == old(self)@.free_set().len() + n,
     {
         proof {
             self.lemma_valid();
@@ -237,6 +238,7 @@ impl Manager {
         let mut x = lo;
         proof {
             lemma_free_of(v.p, v.refs, v.own);
+            assert(self.free@ == v.free_set());
             reveal(page_ok);
             assert forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n implies v.refs[y] == 0 by {
                 assert(in_range(y, lo as nat, n as nat));
@@ -256,11 +258,14 @@ impl Manager {
                 forall|y: PageId| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && v.refs[y as int] == 0
                     && self.own@[y as int]),
                 forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n ==> v.refs[y] == 0,
+                self.free@.len() == v.free_set().len() + (x - lo),
             decreases lo + n - x,
         {
             proof {
                 assert(in_range(x as int, lo as nat, n as nat));
                 assert(!self.own@[x as int]);
+                assert(!self.free@.contains(x));
+                vstd::set::lemma_set_insert_len(self.free@, x);
             }
             self.free.insert(x);
             self.own.set(x, true);
@@ -288,6 +293,7 @@ impl Manager {
             final(self).valid(),
             final(self).den_log() == old(self).den_log(),
             final(self)@ == reclaimed(old(self)@, lo as nat, n as nat),
+            final(self)@.free_set().len() + n == old(self)@.free_set().len(),
     {
         proof {
             self.lemma_valid();
@@ -313,11 +319,14 @@ impl Manager {
                 forall|y: int| 0 <= y < v.p ==> #[trigger] self.keys@[y] == if lo <= y < x { None } else { v.keys[y] },
                 forall|y: PageId| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && v.refs[y as int] == 0
                     && self.own@[y as int]),
+                self.free@.len() + (x - lo) == v.free_set().len(),
             decreases lo + n - x,
         {
             proof {
                 assert(in_range(x as int, lo as nat, n as nat));
                 assert(self.own@[x as int] && v.refs[x as int] == 0);
+                assert(self.free@.contains(x));
+                vstd::set::lemma_set_remove_len(self.free@, x);
             }
             self.free.remove(x);
             self.own.set(x, false);
