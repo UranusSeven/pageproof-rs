@@ -432,6 +432,322 @@ impl Coordinator {
         None
     }
 
+    /// `need_c` and `give_c` for one class, executable.
+    pub(crate) fn need_give(&self, c: usize, d: usize, prot: &Vec<bool>) -> (r: (usize, usize))
+        requires
+            self.valid(),
+            (c as nat) < self.ncls(),
+            prot@.len() == self.nslab,
+        ensures
+            r.0 as nat == self@.need(c as int, d as nat),
+            r.1 as nat == self@.give(c as int, d as nat, prot@),
+            r.0 <= d,
+            r.1 <= self.nslab,
+    {
+        proof {
+            self.lemma_shape();
+        }
+        let f = self.class_free(c);
+        let p = self.per[c];
+        if d <= f {
+            let lim = (f - d) / p;
+            let rc = self.count_reclaimable(c, prot);
+            (0, if rc <= lim { rc } else { lim })
+        } else {
+            let x = d - f;
+            let q = (x - 1) / p;
+            proof {
+                vstd::arithmetic::div_mod::lemma_div_plus_one((x - 1) as int, p as int);
+                assert(((x - 1 + p) as int) / (p as int) == q + 1);
+                assert(cdiv(x as nat, p as nat) == q + 1);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator((x - 1) as int, 1, p as int);
+                assert(q <= x - 1);
+            }
+            (q + 1, 0)
+        }
+    }
+
+    /// `Cap(d, Prot)`, executable (exact).
+    pub(crate) fn check_cap(&self, d: &Vec<usize>, prot: &Vec<bool>) -> (r: bool)
+        requires
+            self.valid(),
+            d@.len() == self.ncls(),
+            prot@.len() == self.nslab,
+            forall|c: int| 0 <= c < d@.len() ==> #[trigger] d@[c] <= max_slots(),
+        ensures
+            r == self@.cap(d@, prot@),
+    {
+        proof {
+            self.lemma_shape();
+        }
+        let k = self.unit.len();
+        let mut tn: u64 = 0;
+        let mut tg: u64 = 0;
+        let mut c: usize = 0;
+        while c < k
+            invariant
+                self.valid(),
+                k as nat == self.ncls(),
+                d@.len() == self.ncls(),
+                prot@.len() == self.nslab,
+                forall|c2: int| 0 <= c2 < d@.len() ==> #[trigger] d@[c2] <= max_slots(),
+                c <= k,
+                k < 0x1_0000,
+                tn as nat == nsum(c as int, self@.needf(d@)),
+                tg as nat == nsum(c as int, self@.givef(d@, prot@)),
+                tn as nat <= c * max_slots(),
+                tg as nat <= c * max_slots(),
+            decreases k - c,
+        {
+            let (nd, gv) = self.need_give(c, d[c], prot);
+            proof {
+                self.lemma_nslab_bound();
+                assert((c + 1) * max_slots() <= 0x1_0000 * max_slots()) by (nonlinear_arith) requires c + 1 <= 0x1_0000;
+                lemma_mul_succ(c as nat, max_slots());
+            }
+            tn = tn + nd as u64;
+            tg = tg + gv as u64;
+            c += 1;
+        }
+        let f = self.free_slab_count();
+        proof {
+            self.lemma_nslab_bound();
+            assert(k * max_slots() <= 0x1_0000 * max_slots()) by (nonlinear_arith) requires k <= 0x1_0000;
+        }
+        tn <= f as u64 + tg
+    }
+
+    pub(crate) proof fn lemma_nslab_bound(&self)
+        requires
+            self.valid(),
+        ensures
+            self.nslab as nat <= max_slots(),
+            forall|c: int| 0 <= c < self.ncls() ==> #[trigger] self.cunits(c) <= max_slots(),
+    {
+        assert forall|c: int| 0 <= c < self.ncls() implies #[trigger] self.cunits(c) <= max_slots() by {
+            assert(self.unit@[c] >= 1);
+            assert(self.cunits(c) <= max_slots()) by (nonlinear_arith)
+                requires self.cunits(c) * (self.b as nat) <= max_slots(), self.b >= 1;
+        }
+        assert(self.unit@[0] >= 1);
+        assert(self.cunits(0) <= max_slots());
+        assert(self.nslab as nat <= self.cunits(0)) by (nonlinear_arith)
+            requires self.cunits(0) == (self.nslab as nat) * self.per_c(0), self.per_c(0) >= 1;
+    }
+
+    /// First class with a deficit (`|F_c| < d_c`), if any.
+    pub(crate) fn find_deficit(&self, d: &Vec<usize>) -> (r: Option<usize>)
+        requires
+            self.valid(),
+            d@.len() == self.ncls(),
+        ensures
+            r is None ==> forall|c: int| 0 <= c < self.ncls() ==> #[trigger] self@.cfree(c) >= d@[c],
+            r matches Some(c) ==> (c as nat) < self.ncls() && self@.cfree(c as int) < d@[c as int],
+    {
+        let k = self.unit.len();
+        let mut c: usize = 0;
+        while c < k
+            invariant
+                self.valid(),
+                k as nat == self.ncls(),
+                d@.len() == self.ncls(),
+                c <= k,
+                forall|c2: int| 0 <= c2 < c ==> #[trigger] self@.cfree(c2) >= d@[c2],
+            decreases k - c,
+        {
+            if self.class_free(c) < d[c] {
+                return Some(c);
+            }
+            c += 1;
+        }
+        None
+    }
+
+    /// A class `c` with `|F_c| >= d_c + n_c` and a reclaimable slab, with that slab.
+    pub(crate) fn find_donor(&self, d: &Vec<usize>, prot: &Vec<bool>) -> (r: Option<(usize, usize)>)
+        requires
+            self.valid(),
+            d@.len() == self.ncls(),
+            prot@.len() == self.nslab,
+            forall|c: int| 0 <= c < d@.len() ==> #[trigger] d@[c] <= max_slots(),
+        ensures
+            r is None ==> forall|c: int| 0 <= c < self.ncls() ==> self@.cfree(c) < d@[c] + self@.per_c(c) || #[trigger] self@.rcount(
+                c,
+                prot@,
+            ) == 0,
+            r matches Some((c, s)) ==> (c as nat) < self.ncls() && (s as nat) < self.nslab && self@.cfree(c as int) >= d@[c as int]
+                + self@.per_c(c as int) && self@.reclaimable(c as int, prot@, s as int),
+    {
+        proof {
+            self.lemma_shape();
+        }
+        let k = self.unit.len();
+        let mut c: usize = 0;
+        while c < k
+            invariant
+                self.valid(),
+                k as nat == self.ncls(),
+                d@.len() == self.ncls(),
+                prot@.len() == self.nslab,
+                forall|c2: int| 0 <= c2 < d@.len() ==> #[trigger] d@[c2] <= max_slots(),
+                forall|c2: int| 0 <= c2 < self.ncls() ==> #[trigger] self@.per_c(c2) == self.per_c(c2),
+                c <= k,
+                forall|c2: int| 0 <= c2 < c ==> self@.cfree(c2) < d@[c2] + self@.per_c(c2) || #[trigger] self@.rcount(c2, prot@)
+                    == 0,
+            decreases k - c,
+        {
+            let f = self.class_free(c);
+            let p = self.per[c];
+            if f >= p && f - p >= d[c] {
+                match self.find_reclaimable(c, prot) {
+                    Some(s) => {
+                        return Some((c, s));
+                    },
+                    None => {},
+                }
+            }
+            c += 1;
+        }
+        None
+    }
+
+    /// The slab plan of §3.5: while some class has a deficit, give it a free slab, or else
+    /// reclaim an idle unprotected slab from a class that keeps `d_c` free units without it.
+    /// Requires `Cap(d, prot)`; afterwards every class has `|F_c| >= d_c`.
+    pub(crate) fn run_plan(&mut self, d: &Vec<usize>, prot: &Vec<bool>)
+        requires
+            old(self).valid(),
+            d@.len() == old(self).ncls(),
+            prot@.len() == old(self).nslab,
+            forall|c: int| 0 <= c < d@.len() ==> #[trigger] d@[c] <= max_slots(),
+            old(self)@.cap(d@, prot@),
+        ensures
+            final(self).valid(),
+            final(self).slab_frame(old(self), prot@),
+            forall|c: int| 0 <= c < final(self).ncls() ==> #[trigger] final(self)@.cfree(c) >= d@[c],
+            final(self).ncls() == old(self).ncls(),
+            final(self).nslab == old(self).nslab,
+    {
+        let ghost o = *self;
+        proof {
+            lemma_slab_frame_refl(self, prot@);
+        }
+        loop
+            invariant_except_break
+                self.valid(),
+                self.slab_frame(&o, prot@),
+                self.ncls() == o.ncls(),
+                self.nslab == o.nslab,
+                d@.len() == self.ncls(),
+                prot@.len() == self.nslab,
+                forall|c: int| 0 <= c < d@.len() ==> #[trigger] d@[c] <= max_slots(),
+                self@.cap(d@, prot@),
+            invariant
+                self.valid(),
+                self.slab_frame(&o, prot@),
+                self.ncls() == o.ncls(),
+                self.nslab == o.nslab,
+            ensures
+                forall|c: int| 0 <= c < self.ncls() ==> #[trigger] self@.cfree(c) >= d@[c],
+            decreases self@.sum_need(d@) + self@.sum_give(d@, prot@),
+        {
+            proof {
+                self.lemma_shape();
+            }
+            let def = self.find_deficit(d);
+            match def {
+                None => {
+                    break;
+                },
+                Some(c) => {
+                    let ghost before = *self;
+                    let ghost bv = self@;
+                    if self.fs.len() > 0 {
+                        let s = self.fs.peek();
+                        proof {
+                            assert(self.owner@[s as int] == 0);
+                        }
+                        self.grant_slab(s, c, Ghost(prot@));
+                        proof {
+                            self.lemma_view();
+                            before.lemma_view();
+                            self.lemma_view_cls();
+                            before.lemma_view_cls();
+                            self.lemma_moved_view(&before, s as int);
+                            lemma_grant_step(bv, self@, s as int, c as int, d@, prot@);
+                            lemma_slab_frame_trans(&o, &before, self, prot@);
+                        }
+                    } else {
+                        let don = self.find_donor(d, prot);
+                        match don {
+                            None => {
+                                proof {
+                                    self.lemma_view();
+                                    lemma_cnt_set(self.nslab as int, self@.fpred(), self.fs@);
+                                    lemma_no_donor(self@, c as int, d@, prot@);
+                                }
+                                assert(false);
+                                break;
+                            },
+                            Some((c2, s)) => {
+                                proof {
+                                    self.lemma_view_cls();
+                                    self.lemma_view();
+                                }
+                                self.reclaim_slab(s, c2, Ghost(prot@));
+                                proof {
+                                    self.lemma_view();
+                                    before.lemma_view();
+                                    self.lemma_view_cls();
+                                    before.lemma_view_cls();
+                                    self.lemma_moved_view(&before, s as int);
+                                    lemma_reclaim_step(bv, self@, s as int, c2 as int, d@, prot@);
+                                    lemma_slab_frame_trans(&o, &before, self, prot@);
+                                }
+                            },
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    /// `moved` lifts to the public view.
+    pub(crate) proof fn lemma_moved_view(&self, o: &Coordinator, s: int)
+        requires
+            self.moved(o, s),
+        ensures
+            slab_moved(self@, o@, s),
+    {
+        self.lemma_view();
+        o.lemma_view();
+        self.lemma_view_cls();
+        o.lemma_view_cls();
+        assert forall|c2: int, s2: int|
+            0 <= c2 < o@.ncls() && 0 <= s2 < o@.nslab && s2 != s implies #[trigger] self@.slab_idle(c2, s2 as nat) == o@.slab_idle(
+            c2,
+            s2 as nat,
+        ) by {
+            let p = o.per_c(c2);
+            assert(o.unit@[c2] >= 1);
+            assert forall|x: int| #[trigger] in_range(x, (s2 as nat) * p, p) implies self.cidle(c2, x) == o.cidle(c2, x) by {
+                lemma_mul_mono((s2 + 1) as nat, o.nslab as nat, p);
+                lemma_mul_succ(s2 as nat, p);
+                crate::coord::lemma_slab_of(x, p, s2 as nat);
+            }
+            if self.slab_idle(c2, s2 as nat) {
+                assert forall|x: int| #[trigger] in_range(x, (s2 as nat) * p, p) implies o.cidle(c2, x) by {
+                    assert(self.cidle(c2, x) == o.cidle(c2, x));
+                }
+            }
+            if o.slab_idle(c2, s2 as nat) {
+                assert forall|x: int| #[trigger] in_range(x, (s2 as nat) * p, p) implies self.cidle(c2, x) by {
+                    assert(self.cidle(c2, x) == o.cidle(c2, x));
+                }
+            }
+        }
+    }
+
     /// `|FS|`, executable.
     pub(crate) fn free_slab_count(&self) -> (r: usize)
         requires
