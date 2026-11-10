@@ -462,7 +462,7 @@ proof fn lemma_write_slot_page(v: MgrV, table: Seq<PageId>, j: int, pg: int, off
 }
 
 /// Facts about a pending ticket's lease used by `finish_write`.
-proof fn lemma_finish_facts(v: MgrV, log: Log, t: u64)
+pub proof fn lemma_finish_facts(v: MgrV, log: Log, t: u64)
     requires
         inv(v, log),
         v.pend.contains_key(t),

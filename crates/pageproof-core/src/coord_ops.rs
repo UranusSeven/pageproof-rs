@@ -1027,8 +1027,8 @@ pub open spec fn coord_begin_result(o: CoordV, n: CoordV, h: Handle, k: usize, r
     }
 }
 
-pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, r: Result<usize, Error>) -> bool {
-    let live = t.mgr == o.id && o.pend().contains_key(t.id);
+pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: Completion, r: Result<usize, Error>) -> bool {
+    let live = t.mgr == o.id && o.pend().contains_key(t.id) && comp.ticket == t;
     &&& !live ==> r == Err::<usize, Error>(Error::InvalidTicket)
     &&& live ==> r is Ok
     &&& r is Err ==> n == o
@@ -1047,6 +1047,72 @@ pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, r: Result<
                 ..o.state[j]
             })
     }
+}
+
+/// Unfolds `cplan_ok` from its parts (kept separate for proof stability).
+pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
+    requires
+        plan.ticket == (Ticket { mgr: o.id, id: o.next_ticket() }),
+        plan.handle == (Handle { mgr: o.id, id: h }),
+        plan.block_size as nat == o.b,
+        plan.input_ids@ == o.leases()[h].toks.subrange(o.leases()[h].c as int, (o.leases()[h].c + n) as int),
+        plan.positions@.len() == n,
+        forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == o.leases()[h].c + q,
+        plan.write_slots@.len() == o.np,
+        plan.page_tables@.len() == o.np,
+        forall|c: int|
+            0 <= c < o.np ==> {
+                let lc = o.paged[c].leases[h];
+                let a = o.leases()[h].c;
+                let z = o.leases()[h].c + n;
+                &&& (#[trigger] plan.write_slots@[c])@.len() == n
+                &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
+                &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
+                &&& forall|q1: int, q2: int|
+                    0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+                &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
+                &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
+                &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == o.leases()[h].toks.subrange(
+                    0,
+                    j + 1,
+                )
+            },
+        plan.state_slots@ == o.slots[h],
+        plan.init == (o.leases()[h].c == 0),
+        forall|j: int|
+            0 <= j < o.nst() ==> {
+                &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
+                &&& o.leases()[h].c > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(
+                    o.leases()[h].toks.subrange(0, o.leases()[h].c as int),
+                )
+            },
+    ensures
+        cplan_ok(o, h, n, plan),
+{
+    let l = o.leases()[h];
+    let a = l.c;
+    let z = l.c + n;
+    assert forall|c: int| 0 <= c < o.np implies {
+        let lc = o.paged[c].leases[h];
+        &&& (#[trigger] plan.write_slots@[c])@.len() == n
+        &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
+        &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
+        &&& forall|q1: int, q2: int|
+            0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+        &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
+        &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
+        &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
+    } by {
+        let w = plan.write_slots@[c];
+        assert(w@.len() == n);
+    }
+    assert forall|j: int| 0 <= j < o.nst() implies {
+        &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
+        &&& a > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, a as int))
+    } by {}
+    assert(plan.input_ids@ == l.toks.subrange(a as int, z as int));
+    assert(forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == a + q);
+    assert(plan.init == (a == 0));
 }
 
 impl Coordinator {
@@ -1524,15 +1590,244 @@ impl Coordinator {
         assert(ov.id == o.id);
         assert(ov.b == o.b as nat);
         assert(ov.leases()[h] == o.pv(0).leases[h]);
-        assert(plan.input_ids@ == l.toks.subrange(l.c as int, (l.c + k) as int));
-        assert(plan.write_slots@.len() == ov.np);
-        assert(plan.page_tables@.len() == ov.np);
-        assert(plan.handle == Handle { mgr: ov.id, id: h });
-        assert(plan.ticket == Ticket { mgr: ov.id, id: ov.next_ticket() });
+        lemma_cplan_ok(ov, h, k, *plan);
         assert(cplan_ok(ov, h, k, *plan));
         assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began(ov.paged[c], h, k) by {}
         assert(fin@.state =~= ov.state);
         assert(fin@.slots =~= ov.slots);
+    }
+}
+
+
+impl Coordinator {
+    /// C4. `finish_write(ticket, completion)`: consumes the ticket in every paged class, publishes
+    /// new blocks, and records the state after `T_h[0:z]` in every live state slot.
+    pub fn finish_write(&mut self, t: Ticket, completion: Completion) -> (r: Result<usize, Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_finish_result(old(self)@, final(self)@, t, completion, r),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        proof {
+            o.lemma_view();
+            assert(self.paged@[0].valid());
+        }
+        if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id {
+            return Err(Error::InvalidTicket);
+        }
+        let (hid, a, z) = match self.paged[0].pend_info(t.id) {
+            None => return Err(Error::InvalidTicket),
+            Some(x) => x,
+        };
+        proof {
+            assert(self.paged@[0].valid());
+            assert(inv(self.pv(0), self.paged@[0].den_log()));
+            lemma_finish_facts(self.pv(0), self.paged@[0].den_log(), t.id);
+        }
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                o.valid(),
+                ov == o@,
+                o.pv(0).pend.contains_key(t.id),
+                o.pv(0).pend[t.id].lease == hid,
+                t.mgr == o.id,
+                self.npaged == o.npaged,
+                self.paged@.len() == o.paged@.len(),
+                self.state@ == o.state@,
+                self.slots@ == o.slots@,
+                self.id == o.id,
+                self.nslab == o.nslab,
+                self.sbytes == o.sbytes,
+                self.b == o.b,
+                self.unit@ == o.unit@,
+                self.per@ == o.per@,
+                self.owner@ == o.owner@,
+                self.fs == o.fs,
+                c <= self.npaged,
+                forall|c2: int| c <= c2 < o.np() ==> #[trigger] self.paged@[c2] == o.paged@[c2],
+                forall|c2: int|
+                    0 <= c2 < c ==> (#[trigger] self.paged@[c2]).valid() && finish_rel(o.pv(c2), self.pv(c2), t.id),
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int] == o.paged@[c as int]);
+                assert(o.paged@[c as int].valid());
+                assert(o.pv(c as int).pend == o.pv(0).pend);
+            }
+            let mid_c = self.paged[c].mgr_id();
+            let tc = Ticket { mgr: mid_c, id: t.id };
+            let ghost p0 = self.paged@;
+            let r = self.paged[c].finish_write(tc, Completion { ticket: tc });
+            proof {
+                assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
+            }
+            match r {
+                Ok(_) => {},
+                Err(_) => {
+                    proof {
+                        assert(false);
+                    }
+                    return Err(Error::InvalidTicket);
+                },
+            }
+            proof {
+                assert forall|c2: int| 0 <= c2 < c + 1 implies (#[trigger] self.paged@[c2]).valid() && finish_rel(
+                    o.pv(c2),
+                    self.pv(c2),
+                    t.id,
+                ) by {
+                    if c2 < c {
+                        assert(self.paged@[c2] == p0[c2]);
+                    }
+                }
+            }
+            c += 1;
+        }
+        // State classes: ghost provenance of each live slot becomes `T_h[0:z]`.
+        let ghost tau = o.pv(0).leases[hid].toks.subrange(0, z as int);
+        proof {
+            assert(o.slots@.contains_key(hid)) by {
+                assert(o.pv(0).leases.contains_key(hid));
+            }
+        }
+        let sl = vstd::slice::slice_to_vec(self.slots.get(&hid).unwrap().as_slice());
+        let ghost pg = self.paged@;
+        let mut j: usize = 0;
+        while j < self.state.len()
+            invariant
+                o.valid(),
+                o.slots@.contains_key(hid),
+                sl@ == o.slots@[hid]@,
+                self.paged@ == pg,
+                self.slots@ == o.slots@,
+                self.state@.len() == o.state@.len(),
+                j <= self.state@.len(),
+                forall|j2: int| j <= j2 < o.nst() ==> #[trigger] self.state@[j2] == o.state@[j2],
+                forall|j2: int|
+                    0 <= j2 < j ==> (#[trigger] self.state@[j2]).valid() && self.sv(j2) == (StateV {
+                        w: o.sv(j2).w.update(sl@[j2] as int, Some(tau)),
+                        ..o.sv(j2)
+                    }),
+            decreases self.state@.len() - j,
+        {
+            proof {
+                assert(self.state@[j as int] == o.state@[j as int]);
+                assert(o.state@[j as int].valid());
+                assert(o.slots@[hid]@.len() == o.nst());
+            }
+            let x = sl[j];
+            let ghost s0 = self.state@;
+            self.state[j].set_w(x, Ghost(tau));
+            proof {
+                assert forall|j2: int| 0 <= j2 < s0.len() && j2 != j implies #[trigger] self.state@[j2] == s0[j2] by {}
+                assert forall|j2: int| 0 <= j2 < j + 1 implies (#[trigger] self.state@[j2]).valid() && self.sv(j2) == (StateV {
+                    w: o.sv(j2).w.update(sl@[j2] as int, Some(tau)),
+                    ..o.sv(j2)
+                }) by {
+                    if j2 < j {
+                        assert(self.state@[j2] == s0[j2]);
+                    }
+                }
+            }
+            j += 1;
+        }
+        proof {
+            Self::lemma_finish_post(&o, self, t.id, hid, z as nat, tau);
+            o.lemma_view();
+            assert(t == Ticket { mgr: o.id, id: t.id });
+            assert(completion == Completion { ticket: Ticket { mgr: o.id, id: t.id } });
+        }
+        Ok(z)
+    }
+
+    proof fn lemma_finish_post(o: &Coordinator, fin: &Coordinator, t: u64, h: u64, z: nat, tau: Seq<Token>)
+        requires
+            o.valid(),
+            o.pv(0).pend.contains_key(t),
+            o.pv(0).pend[t].lease == h,
+            o.pv(0).pend[t].z == z,
+            tau == o.pv(0).leases[h].toks.subrange(0, z as int),
+            o.slots@.contains_key(h),
+            fin.npaged == o.npaged,
+            fin.paged@.len() == o.paged@.len(),
+            fin.slots@ == o.slots@,
+            fin.id == o.id,
+            fin.nslab == o.nslab,
+            fin.sbytes == o.sbytes,
+            fin.b == o.b,
+            fin.unit@ == o.unit@,
+            fin.per@ == o.per@,
+            fin.owner@ == o.owner@,
+            fin.fs == o.fs,
+            fin.state@.len() == o.state@.len(),
+            forall|c2: int| 0 <= c2 < o.np() ==> (#[trigger] fin.paged@[c2]).valid() && finish_rel(o.pv(c2), fin.pv(c2), t),
+            forall|j2: int|
+                0 <= j2 < o.nst() ==> (#[trigger] fin.state@[j2]).valid() && fin.sv(j2) == (StateV {
+                    w: o.sv(j2).w.update(o.slots@[h]@[j2] as int, Some(tau)),
+                    ..o.sv(j2)
+                }),
+        ensures
+            fin.valid(),
+            coord_finish_result(o@, fin@, Ticket { mgr: o.id, id: t }, Completion { ticket: Ticket { mgr: o.id, id: t } }, Ok(z as usize)),
+    {
+        assert(o.paged@[0].valid());
+        lemma_finish_facts(o.pv(0), o.paged@[0].den_log(), t);
+        assert forall|c: int| 0 <= c < o.np() implies {
+            &&& (#[trigger] fin.paged@[c]).valid()
+            &&& fin.pv(c).own == o.pv(c).own
+            &&& fin.pv(c).p == o.pv(c).p
+            &&& fin.pv(c).b == o.pv(c).b
+            &&& fin.pv(c).ns == o.pv(c).ns
+            &&& fin.pv(c).next_handle == o.pv(c).next_handle
+            &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
+            &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
+            &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+            &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
+            &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
+            &&& fin.pv(c).pend == fin.pv(0).pend
+            &&& fin.pv(c).next_ticket == fin.pv(0).next_ticket
+        } by {
+            assert(o.paged@[c].valid());
+            assert(o.pv(c).pend == o.pv(0).pend);
+            assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
+            assert(fin.paged@[0].valid());
+            assert(finish_rel(o.pv(0), fin.pv(0), t));
+            assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
+        }
+        assert(finish_rel(o.pv(0), fin.pv(0), t)) by {
+            assert(fin.paged@[0].valid());
+        }
+        assert forall|j: int| 0 <= j < o.nst() implies {
+            &&& (#[trigger] fin.state@[j]).valid()
+            &&& fin.sv(j).own == o.sv(j).own
+            &&& fin.sv(j).holder == o.sv(j).holder
+            &&& fin.sv(j).p == o.sv(j).p
+            &&& forall|x: int| 0 <= x < o.sv(j).p && x != o.slots@[h]@[j] ==> #[trigger] fin.sv(j).w[x] == o.sv(j).w[x]
+            &&& (fin.pv(0).leases[h].c > 0 ==> fin.sv(j).w[o.slots@[h]@[j] as int] == Some(
+                fin.pv(0).leases[h].toks.subrange(0, fin.pv(0).leases[h].c as int),
+            ))
+        } by {
+            assert(fin.state@[j].valid());
+            assert(o.slots@[h]@.len() == o.nst());
+            assert((o.slots@[h]@[j] as nat) < o.sv(j).p);
+        }
+        fin.lemma_step_valid(o, h);
+        o.lemma_view();
+        fin.lemma_view();
+        assert(fin@.slots =~= o@.slots);
+        assert forall|c: int| 0 <= c < o@.np implies #[trigger] finish_rel(o@.paged[c], fin@.paged[c], t) by {
+            assert(fin.paged@[c].valid());
+        }
+        assert forall|j: int| 0 <= j < o@.nst() implies #[trigger] fin@.state[j] == (StateV {
+            w: o@.state[j].w.update(o@.slots[h][j] as int, Some(o@.leases()[h].toks.subrange(0, o@.pend()[t].z as int))),
+            ..o@.state[j]
+        }) by {
+            assert(fin.state@[j].valid());
+        }
     }
 }
 

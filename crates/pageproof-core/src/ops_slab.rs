@@ -248,6 +248,24 @@ impl Manager {
         (l.toks.len(), l.c, l.pending.is_some())
     }
 
+    /// `Pending[t]` as `(lease, a, z)`, if live.
+    pub fn pend_info(&self, t: u64) -> (r: Option<(u64, usize, usize)>)
+        requires
+            self.valid(),
+        ensures
+            r is None <==> !self@.pend.contains_key(t),
+            r matches Some((h, a, z)) ==> h == self@.pend[t].lease && a as nat == self@.pend[t].a && z as nat == self@.pend[t].z,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        match self.pend.get(&t) {
+            None => None,
+            Some(p) => Some((p.lease, p.a, p.z)),
+        }
+    }
+
     pub fn next_handle_exec(&self) -> (r: u64)
         requires
             self.valid(),
