@@ -14,6 +14,7 @@ use crate::manager::*;
 use crate::idxset::IdxSet;
 use crate::state::*;
 use crate::ops_slab::*;
+use crate::cnt::*;
 
 verus! {
 
@@ -160,11 +161,19 @@ impl CoordV {
         forall|x: int| #[trigger] in_range(x, s * self.per_c(c), self.per_c(c)) ==> self.cidle(c, x)
     }
 
-    /// `R_c`: reclaimable slabs of class `c` outside `prot` (§3.5).
-    pub open spec fn reclaimable(self, c: int, prot: Seq<bool>) -> Set<usize> {
-        Set::<usize>::range(0, self.nslab as usize).filter(
-            |s: usize| self.owner[s as int] == c + 1 && !prot[s as int] && self.slab_idle(c, s as nat),
-        )
+    /// `|FS|`: the number of free slabs.
+    pub open spec fn fcount(self) -> nat {
+        cnt(self.nslab as int, |s: int| self.owner[s] == 0)
+    }
+
+    /// Slab `s` is reclaimable from class `c` outside `prot` (a member of `R_c`, §3.5).
+    pub open spec fn reclaimable(self, c: int, prot: Seq<bool>, s: int) -> bool {
+        self.owner[s] == c + 1 && !prot[s] && self.slab_idle(c, s as nat)
+    }
+
+    /// `|R_c|`.
+    pub open spec fn rcount(self, c: int, prot: Seq<bool>) -> nat {
+        cnt(self.nslab as int, |s: int| self.reclaimable(c, prot, s))
     }
 
     /// `need_c`.
@@ -180,7 +189,7 @@ impl CoordV {
     pub open spec fn give(self, c: int, d: nat, prot: Seq<bool>) -> nat {
         if self.cfree(c) >= d {
             let lim = ((self.cfree(c) - d) as nat) / self.per_c(c);
-            let r = self.reclaimable(c, prot).len();
+            let r = self.rcount(c, prot);
             if r <= lim {
                 r
             } else {
@@ -191,29 +200,64 @@ impl CoordV {
         }
     }
 
-    pub open spec fn sum_need(self, d: Seq<nat>, k: int) -> nat
+    pub open spec fn sum_need(self, d: Seq<usize>, k: int) -> nat
         decreases k,
     {
         if k <= 0 {
             0
         } else {
-            self.sum_need(d, k - 1) + self.need(k - 1, d[k - 1])
+            self.sum_need(d, k - 1) + self.need(k - 1, d[k - 1] as nat)
         }
     }
 
-    pub open spec fn sum_give(self, d: Seq<nat>, prot: Seq<bool>, k: int) -> nat
+    pub open spec fn sum_give(self, d: Seq<usize>, prot: Seq<bool>, k: int) -> nat
         decreases k,
     {
         if k <= 0 {
             0
         } else {
-            self.sum_give(d, prot, k - 1) + self.give(k - 1, d[k - 1], prot)
+            self.sum_give(d, prot, k - 1) + self.give(k - 1, d[k - 1] as nat, prot)
         }
     }
 
     /// `Cap(d, Prot)` of §3.5.
-    pub open spec fn cap(self, d: Seq<nat>, prot: Seq<bool>) -> bool {
-        self.sum_need(d, self.ncls() as int) <= self.free_slabs().len() + self.sum_give(d, prot, self.ncls() as int)
+    pub open spec fn cap(self, d: Seq<usize>, prot: Seq<bool>) -> bool {
+        self.sum_need(d, self.ncls() as int) <= self.fcount() + self.sum_give(d, prot, self.ncls() as int)
+    }
+
+    /// Slabs class `c` gained since `o` / lost since `o`.
+    pub open spec fn gained(self, o: CoordV, c: int) -> nat {
+        cnt(self.nslab as int, |s: int| self.owner[s] == c + 1 && o.owner[s] != c + 1)
+    }
+
+    pub open spec fn lost(self, o: CoordV, c: int) -> nat {
+        cnt(self.nslab as int, |s: int| o.owner[s] == c + 1 && self.owner[s] != c + 1)
+    }
+
+    pub open spec fn sum_lost(self, o: CoordV, k: int) -> nat
+        decreases k,
+    {
+        if k <= 0 {
+            0
+        } else {
+            self.sum_lost(o, k - 1) + self.lost(o, k - 1)
+        }
+    }
+
+    /// The slab plan of §3.5 rules 1–3 took `o` to `self` for demand `d` and protection `prot`:
+    /// class `c` gained exactly `need_c` slabs and gave up at most `give_c`; every slab that changed
+    /// owner was free or idle and unprotected; reclaim happened exactly when free slabs ran out.
+    pub open spec fn plan_done(self, o: CoordV, d: Seq<usize>, prot: Seq<bool>) -> bool {
+        let tot = o.sum_need(d, o.ncls() as int);
+        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.gained(o, c) == o.need(c, d[c] as nat) && self.lost(o, c)
+            <= o.give(c, d[c] as nat, prot)
+        &&& forall|s: int|
+            0 <= s < o.nslab && #[trigger] self.owner[s] != o.owner[s] ==> o.owner[s] == 0 || (!prot[s] && o.slab_idle(
+                o.owner[s] - 1,
+                s as nat,
+            ))
+        &&& self.sum_lost(o, o.ncls() as int) == if tot > o.fcount() { (tot - o.fcount()) as nat } else { 0nat }
+        &&& forall|c: int| 0 <= c < o.ncls() ==> #[trigger] self.cfree(c) >= d[c]
     }
 
     /// The joint `k*` of C1.
@@ -231,10 +275,10 @@ impl CoordV {
     }
 
     /// C1 demand `d_c`: `m - u_c` for paged classes, 1 for state classes.
-    pub open spec fn attach_demand(self, toks: Seq<Token>, m: nat, k: nat) -> Seq<nat> {
+    pub open spec fn attach_demand(self, toks: Seq<Token>, m: nat, k: nat) -> Seq<usize> {
         Seq::new(
             self.ncls(),
-            |c: int| if c < self.np { (m - count_active(self.paged[c], toks, k)) as nat } else { 1nat },
+            |c: int| if c < self.np { (m - count_active(self.paged[c], toks, k)) as usize } else { 1usize },
         )
     }
 
@@ -356,18 +400,6 @@ impl Coordinator {
                 }
             }
         }
-    }
-
-    pub(crate) proof fn lemma_free_slabs(&self)
-        requires
-            self.valid(),
-        ensures
-            self@.free_slabs() == self.fs@,
-            self@.free_slabs().len() <= self.nslab,
-    {
-        vstd::set_lib::range_set_properties::<usize>(0usize, self.nslab);
-        assert(self@.free_slabs() =~= self.fs@);
-        self.fs.lemma_bounds();
     }
 
     // ------------------------------------------------------------------ abstract accessors

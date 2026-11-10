@@ -17,6 +17,7 @@ pub mod ops_extend;
 pub mod ops_write;
 pub mod ops_slab;
 pub mod state;
+pub mod cnt;
 pub mod coord;
 
 use vstd::prelude::*;
