@@ -103,6 +103,9 @@ pub ghost struct MgrV {
     /// Proof bookkeeping for published pages: block depth `q-1` and covered prefix `tau`.
     pub pdep: Seq<nat>,
     pub ptoks: Seq<Seq<Token>>,
+    /// v0.3: unit is in a slab owned by this class (`U_c`). Unowned units have ref 0, no key, and
+    /// are not free (I13).
+    pub own: Seq<bool>,
 }
 
 impl MgrV {
@@ -115,13 +118,13 @@ impl MgrV {
         chain_key(self.seed(), toks, self.b, i)
     }
 
-    /// `F = { b | ref[b] = 0 }` (I3).
+    /// `F = { b in U_c | ref[b] = 0 }` (I3).
     pub open spec fn free_set(self) -> Set<PageId> {
-        free_of(self.p, self.refs)
+        free_of(self.p, self.refs, self.own)
     }
 
     pub open spec fn is_free(self, b: PageId) -> bool {
-        (b as nat) < self.p && self.refs[b as int] == 0
+        (b as nat) < self.p && self.refs[b as int] == 0 && self.own[b as int]
     }
 
     /// `Index[K] != {}`.
@@ -140,16 +143,17 @@ impl MgrV {
     }
 }
 
-/// `{ b < p | refs[b] == 0 }`.
-pub open spec fn free_of(p: nat, refs: Seq<u64>) -> Set<PageId> {
-    Set::<PageId>::range(0, p as usize).filter(|b: PageId| refs[b as int] == 0)
+/// `{ b < p | refs[b] == 0 && own[b] }`.
+pub open spec fn free_of(p: nat, refs: Seq<u64>, own: Seq<bool>) -> Set<PageId> {
+    Set::<PageId>::range(0, p as usize).filter(|b: PageId| refs[b as int] == 0 && own[b as int])
 }
 
-pub proof fn lemma_free_of(p: nat, refs: Seq<u64>)
+pub proof fn lemma_free_of(p: nat, refs: Seq<u64>, own: Seq<bool>)
     requires
         p <= usize::MAX,
     ensures
-        forall|b: PageId| #[trigger] free_of(p, refs).contains(b) <==> ((b as nat) < p && refs[b as int] == 0),
+        forall|b: PageId| #[trigger] free_of(p, refs, own).contains(b) <==> ((b as nat) < p && refs[b as int] == 0
+            && own[b as int]),
 {
     vstd::set_lib::range_set_properties::<usize>(0usize, p as usize);
 }
@@ -192,6 +196,13 @@ pub open spec fn count_active(v: MgrV, toks: Seq<Token>, k: nat) -> nat
             0nat
         }
     }
+}
+
+/// The longest run of indexed complete-block keys from 0, capped at `cap`.
+pub open spec fn is_kcap(v: MgrV, toks: Seq<Token>, cap: nat, k: nat) -> bool {
+    &&& k <= cap
+    &&& forall|i: nat| i < k ==> v.has_hit(#[trigger] v.key_of(toks, i))
+    &&& k < cap ==> !v.has_hit(v.key_of(toks, k))
 }
 
 /// `k*` of C1: the longest run of indexed complete-block keys, capped at `m - 1`.

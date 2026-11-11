@@ -248,6 +248,23 @@ impl IdxSet {
         }
     }
 
+    /// Returns some element without removing it.
+    pub fn peek(&self) -> (b: usize)
+        requires
+            self.wf(),
+            self@.len() > 0,
+        ensures
+            self@.contains(b),
+    {
+        proof {
+            self.lemma_wf();
+        }
+        let n = self.items.len();
+        let b = self.items[n - 1];
+        assert(self.items@.contains(b));
+        b
+    }
+
     /// Removes and returns some element.
     pub fn pop_any(&mut self) -> (b: usize)
         requires

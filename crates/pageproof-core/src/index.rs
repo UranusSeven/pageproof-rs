@@ -414,6 +414,108 @@ impl KeyIndex {
     }
 }
 
+impl KeyIndex {
+    /// Every candidate page of key `k`: exactly `Index[k]`, without duplicates.
+    pub fn candidates(&self, keys: &Vec<Option<Digest>>, k: &Digest) -> (r: Vec<usize>)
+        requires
+            self.wf(keys@),
+        ensures
+            r@.no_duplicates(),
+            forall|b: usize| #[trigger] r@.contains(b) <==> in_index(keys@, *k, b),
+    {
+        let s = short_of(k);
+        let mut out: Vec<usize> = Vec::new();
+        match self.map.get(&s) {
+            None => {
+                proof {
+                    assert forall|b: usize| #[trigger] out@.contains(b) <==> in_index(keys@, *k, b) by {
+                        if in_index(keys@, *k, b) {
+                            assert(keys@[b as int] is Some);
+                        }
+                    }
+                }
+            },
+            Some(v) => {
+                proof {
+                    assert(self.map@.contains_key(s) && self.map@[s] == *v);
+                    assert forall|j: int| 0 <= j < v@.len() implies (#[trigger] v@[j] as int) < keys@.len() by {
+                        assert(entry_ok(keys@, s, self.map@[s]@[j]));
+                    }
+                }
+                let mut i: usize = 0;
+                while i < v.len()
+                    invariant
+                        self.wf(keys@),
+                        self.map@.contains_key(s) && self.map@[s] == *v,
+                        s == short(*k),
+                        v@.no_duplicates(),
+                        forall|j: int| 0 <= j < v@.len() ==> (#[trigger] v@[j] as int) < keys@.len(),
+                        0 <= i <= v@.len(),
+                        out@.no_duplicates(),
+                        forall|b: usize| #[trigger] out@.contains(b) <==> (in_index(keys@, *k, b) && exists|j: int|
+                            0 <= j < i && v@[j] == b),
+                    decreases v@.len() - i,
+                {
+                    let b = v[i];
+                    let hit = match &keys[b] {
+                        Some(kb) => digest_eq(kb, k),
+                        None => false,
+                    };
+                    let ghost o0 = out@;
+                    if hit {
+                        proof {
+                            assert(!o0.contains(b)) by {
+                                if o0.contains(b) {
+                                    let j = choose|j: int| 0 <= j < i && v@[j] == b;
+                                    assert(v@[j] == v@[i as int]);
+                                }
+                            }
+                        }
+                        out.push(b);
+                        proof {
+                            assert(out@.no_duplicates()) by {
+                                assert forall|p: int, q: int| 0 <= p < out@.len() && 0 <= q < out@.len() && p != q implies out@[p]
+                                    != out@[q] by {
+                                    if p == o0.len() as int && q < o0.len() {
+                                        assert(o0.contains(o0[q]));
+                                    } else if q == o0.len() as int && p < o0.len() {
+                                        assert(o0.contains(o0[p]));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    proof {
+                        assert forall|b2: usize| #[trigger] out@.contains(b2) <==> (in_index(keys@, *k, b2) && exists|j: int|
+                            0 <= j < i + 1 && v@[j] == b2) by {
+                            vstd::seq_lib::lemma_seq_contains_after_push(o0, b, b2);
+                            if in_index(keys@, *k, b2) && v@[i as int] == b2 {
+                                assert(out@.contains(b2));
+                            }
+                            if exists|j: int| 0 <= j < i + 1 && v@[j] == b2 {
+                                let j = choose|j: int| 0 <= j < i + 1 && v@[j] == b2;
+                                if j < i {
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                proof {
+                    assert forall|b: usize| #[trigger] out@.contains(b) <==> in_index(keys@, *k, b) by {
+                        if in_index(keys@, *k, b) {
+                            assert(keys@[b as int] is Some);
+                            assert(self.map@[s]@.contains(b));
+                            let j = choose|j: int| 0 <= j < v@.len() && v@[j] == b;
+                        }
+                    }
+                }
+            },
+        }
+        out
+    }
+}
+
 /// Position of `b` in `v` (which must contain it).
 fn find_pos(v: &Vec<usize>, b: usize) -> (i: usize)
     requires

@@ -369,7 +369,7 @@ impl Manager {
         let ghost f_old = self.free@;
         proof {
             reveal(page_ok);
-            lemma_free_of(p as nat, v.refs);
+            lemma_free_of(p as nat, v.refs, v.own);
             assert forall|y: PageId| #[trigger] self.free@.contains(y) implies !l.table@.contains(y) by {
                 if l.table@.contains(y) {
                     assert(page_ok(v, log, y));
@@ -425,11 +425,11 @@ impl Manager {
                     }
                 }
             }
-            lemma_free_of(p as nat, self.refs@);
-            lemma_free_of(p as nat, v.refs);
+            lemma_free_of(p as nat, self.refs@, v.own);
+            lemma_free_of(p as nat, v.refs, v.own);
             assert(fresh.subrange(0, fresh.len() as int) =~= fresh);
             self.free.lemma_bounds();
-            assert(f_old == free_of(p as nat, v.refs));
+            assert(f_old == free_of(p as nat, v.refs, v.own));
             assert forall|y: PageId| #[trigger] self.free@.contains(y) <==> v2.free_set().contains(y) by {
                 assert(self.free@.contains(y) <==> (f_old.contains(y) && !l.table@.contains(y)));
                 if f_old.contains(y) {

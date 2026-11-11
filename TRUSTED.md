@@ -3,8 +3,9 @@
 ## What is proved
 
 `scripts/verify.sh` runs Verus on `crates/pageproof-core` at a fixed `--rlimit 20` and fails on
-any error, timeout or rlimit exhaustion. Every public method of `Manager` (C0–C6) is proved on its
-real body, with machine integers, against the contract v0.2.1. See
+any error, timeout or rlimit exhaustion. Every public method of `Coordinator` (contract v0.3
+C0–C7) and of `Manager` (v0.2.1 C0–C6, the paged-class building block) is proved on its real
+body, with machine integers. See
 [SPEC_NOTES.md](SPEC_NOTES.md) for the exact statement of each result and any deviations.
 
 ## What is trusted
@@ -48,17 +49,19 @@ load/compare_exchange.
 | E2 KV depends only on the prefix | Assumed. Ghost `V` records provenance, not numerics. |
 | E3 single-threaded | Enforced in Rust by `&mut self`. The PyO3 class is `unsendable`. The process-global manager-id counter is atomic. |
 | Manager-id uniqueness | Trusted (see SPEC_NOTES). Relies on `AtomicU64` behaving as a counter. vstd gives no spec for its return values. Runtime-tested only. |
-| E4 writes always succeed | Assumed; there is no abort path (v0.2 scope). |
-| E5 executor uses the planned slots and B | Assumed. The plan's slots are proved equal to `slot(h,j)`. |
-| E6 Namespace completeness | Caller's obligation. The namespace is an opaque byte string (v0.2 dummy). |
+| E4 writes always succeed | Assumed; there is no abort path. |
+| E5 executor uses the planned slots, state slots, B and `u_c` | Assumed. The plan's slots are proved equal to `slot_c(h,j)` in every paged class, and the state slots to `σ_h^c`. |
+| E6 Namespace completeness | Caller's obligation. The namespace is an opaque byte string (dummy). |
 | E7 canonical encoding | **Proved**: `lemma_enc_inj`, `lemma_node_input_inj`, `lemma_seed_input_inj`, `lemma_seed_ne_node`. The exec encoders are proved equal to the spec. A runtime test also checks them byte-for-byte against an independent `sha2` re-implementation. |
 | E8 SHA-256 collision resistance | The single trusted wrapper above. |
+| E9 arena base and addressing | Assumed. The coordinator never allocates device memory. It proves that owned units of all classes occupy disjoint byte ranges `[g·u_c, (g+1)·u_c)` inside `[0, N·S)` (`theorem_arena_disjoint`). That the arena base is aligned and that kernels address `base + g·u_c` is the executor's obligation. |
+| E10 state initialisation | Assumed. A plan with `init = true` requires the executor to initialise each state slot before reading it. Freed and reclaimed state units are not cleared (their ghost `W` is `⊥`). |
 
 ## Not covered
 
 - `crates/pageproof-py` and `python/demo.py` are not verified. The shim only converts types. Its
   one judgement call is that `finish_write(ticket)` constructs `Completion { ticket }`: calling it
-  is the executor's E1 assertion.
+  is the executor's E1 assertion (in every class, for the coordinator).
 - The OS, allocator, CPython, and the dynamic loader.
 - Allocation failure, panics in std, and process termination (contract §5 excludes these).
 - Byte-level memory. The proof bounds element counts (`Manager::lemma_bounded`). That `Vec` and

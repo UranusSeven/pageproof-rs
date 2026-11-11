@@ -10,6 +10,9 @@ use pageproof_core::manager::*;
 use pageproof_core::types::*;
 use pageproof_core::ops_attach::*;
 use pageproof_core::arith::*;
+use pageproof_core::coord::*;
+use pageproof_core::coord_attach::*;
+use pageproof_core::coord_ops::*;
 
 verus! {
 
@@ -38,7 +41,7 @@ pub fn fresh_attach() -> (r: Option<usize>)
                 Err(e) => {
                     proof {
                         // |F| = P = 4 on a fresh manager, and d = m - u <= 1, so this is unreachable.
-                        pageproof_core::types::lemma_free_of(4, v.refs);
+                        pageproof_core::types::lemma_free_of(4, v.refs, v.own);
                         assert forall|b: usize| #[trigger] v.free_set().contains(b) <==> (b as nat) < 4 by {}
                         vstd::set_lib::range_set_properties::<usize>(0usize, 4usize);
                         assert(v.free_set() =~= Set::<usize>::range(0usize, 4usize));
@@ -82,6 +85,78 @@ pub fn churn(m: &mut Manager, reqs: &Vec<Vec<u32>>)
     }
     proof {
         m.lemma_bounded();
+    }
+}
+
+/// v0.3: a scheduler loop over the coordinator. Validity and the metadata bound hold at every
+/// iteration, whatever the inputs and however the calls fail.
+pub fn coord_churn(co: &mut Coordinator, reqs: &Vec<Vec<u32>>)
+    requires
+        old(co).inv(),
+    ensures
+        final(co).inv(),
+        final(co).num_slot_records() == final(co).num_leases(),
+{
+    let mut i: usize = 0;
+    while i < reqs.len()
+        invariant
+            co.inv(),
+        decreases reqs.len() - i,
+    {
+        if let Ok((h, _, _)) = co.attach(reqs[i].as_slice()) {
+            if let Ok((t, _)) = co.begin_write(h, 1) {
+                let _ = co.finish_write(t, pageproof_core::ops_write::Completion { ticket: t });
+            }
+            let _ = co.extend(h, reqs[i].as_slice());
+            let _ = co.release(h);
+        }
+        proof {
+            co.lemma_bounded();
+        }
+        i += 1;
+    }
+    proof {
+        co.lemma_bounded();
+    }
+}
+
+/// v0.3: `release` right after a successful `attach` of the same lease succeeds (the lease is live
+/// and has no pending ticket) and returns the input. The `Err` branch is proved unreachable.
+pub fn attach_release(co: &mut Coordinator, toks: &Vec<u32>) -> (r: Option<Vec<u32>>)
+    requires
+        old(co).inv(),
+    ensures
+        final(co).inv(),
+        r matches Some(t) ==> t@ == toks@,
+{
+    let ghost o = co@;
+    match co.attach(toks.as_slice()) {
+        Ok((h, cached, view)) => {
+            let ghost mid = choose|mid: CoordV| #[trigger] coord_attached(o, mid, co@, toks@, cached as nat / o.b, tables_view(view.tables@), view.slots@);
+            proof {
+                old(co).lemma_public_shape();
+                let k = cached as nat / o.b;
+                assert(coord_attached(o, mid, co@, toks@, k, tables_view(view.tables@), view.slots@));
+                // Paged class 0 attached a fresh lease `h` with input `toks` and no ticket.
+                assert(co@.paged[0] == attached(mid.paged[0], toks@, tables_view(view.tables@)[0], k));
+                assert(h.id == o.next_handle());
+                assert(mid.paged[0].next_handle == o.paged[0].next_handle);
+                assert(co@.leases().contains_key(h.id));
+                assert(co@.leases()[h.id].pending is None);
+                assert(co@.leases()[h.id].toks == toks@);
+                assert(h.mgr == co@.id);
+            }
+            match co.release(h) {
+                Ok(t) => Some(t),
+                Err(_) => {
+                    proof {
+                        assert(false);
+                    }
+                    None
+                },
+            }
+        },
+        Err(_) => None,
     }
 }
 

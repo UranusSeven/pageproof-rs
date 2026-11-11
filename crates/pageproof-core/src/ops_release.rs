@@ -144,13 +144,20 @@ impl Manager {
 
 /// Decrement loop for `release`: decrements each page of `tbl` once and returns freed pages to
 /// the free set. Purely concrete; the abstract proof is in `lemma_release_inv`.
-fn dec_pages(refs: &mut Vec<u64>, free: &mut crate::idxset::IdxSet, tbl: &Vec<PageId>, Ghost(p): Ghost<nat>)
+fn dec_pages(
+    refs: &mut Vec<u64>,
+    free: &mut crate::idxset::IdxSet,
+    tbl: &Vec<PageId>,
+    Ghost(p): Ghost<nat>,
+    Ghost(own): Ghost<Seq<bool>>,
+)
     requires
         p <= max_slots(),
+        forall|i: int| 0 <= i < tbl@.len() ==> own[#[trigger] tbl@[i] as int],
         old(refs)@.len() == p,
         old(free).wf(),
         old(free).universe() == p,
-        old(free)@ == free_of(p, old(refs)@),
+        old(free)@ == free_of(p, old(refs)@, own),
         tbl@.no_duplicates(),
         forall|i: int| 0 <= i < tbl@.len() ==> (#[trigger] tbl@[i] as nat) < p,
         forall|i: int| 0 <= i < tbl@.len() ==> old(refs)@[#[trigger] tbl@[i] as int] >= 1,
@@ -158,7 +165,7 @@ fn dec_pages(refs: &mut Vec<u64>, free: &mut crate::idxset::IdxSet, tbl: &Vec<Pa
         final(refs)@ == dec_seq(old(refs)@, tbl@, tbl@.len() as int),
         final(free).wf(),
         final(free).universe() == p,
-        final(free)@ == free_of(p, final(refs)@),
+        final(free)@ == free_of(p, final(refs)@, own),
 {
     let ghost r0 = refs@;
     let mut i: usize = 0;
@@ -173,10 +180,11 @@ fn dec_pages(refs: &mut Vec<u64>, free: &mut crate::idxset::IdxSet, tbl: &Vec<Pa
             refs@ == dec_seq(r0, tbl@, i as int),
             free.wf(),
             free.universe() == p,
-            free@ == free_of(p, refs@),
+            free@ == free_of(p, refs@, own),
             tbl@.no_duplicates(),
             forall|k: int| 0 <= k < tbl@.len() ==> (#[trigger] tbl@[k] as nat) < p,
             forall|k: int| 0 <= k < tbl@.len() ==> r0[#[trigger] tbl@[k] as int] >= 1,
+            forall|k: int| 0 <= k < tbl@.len() ==> own[#[trigger] tbl@[k] as int],
         decreases tbl@.len() - i,
     {
         let x = tbl[i];
@@ -210,8 +218,8 @@ fn dec_pages(refs: &mut Vec<u64>, free: &mut crate::idxset::IdxSet, tbl: &Vec<Pa
                 }
             }
             assert(refs@ =~= dec_seq(r0, tbl@, i + 1));
-            lemma_free_of(p, before);
-            lemma_free_of(p, refs@);
+            lemma_free_of(p, before, own);
+            lemma_free_of(p, refs@, own);
         }
         if nv == 0 {
             proof {
@@ -221,21 +229,21 @@ fn dec_pages(refs: &mut Vec<u64>, free: &mut crate::idxset::IdxSet, tbl: &Vec<Pa
             }
             free.insert(x);
             proof {
-                assert forall|y: PageId| #[trigger] free@.contains(y) <==> free_of(p, refs@).contains(y) by {
+                assert forall|y: PageId| #[trigger] free@.contains(y) <==> free_of(p, refs@, own).contains(y) by {
                     if y != x {
                         assert(refs@[y as int] == before[y as int]);
                     }
                 }
-                assert(free@ =~= free_of(p, refs@));
+                assert(free@ =~= free_of(p, refs@, own));
             }
         } else {
             proof {
-                assert forall|y: PageId| #[trigger] free@.contains(y) <==> free_of(p, refs@).contains(y) by {
+                assert forall|y: PageId| #[trigger] free@.contains(y) <==> free_of(p, refs@, own).contains(y) by {
                     if y != x {
                         assert(refs@[y as int] == before[y as int]);
                     }
                 }
-                assert(free@ =~= free_of(p, refs@));
+                assert(free@ =~= free_of(p, refs@, own));
             }
         }
         i += 1;
@@ -263,6 +271,8 @@ impl Manager {
                 &&& final(self)@ == released(old(self)@, h.id)
             },
             r is Err ==> final(self)@ == old(self)@,
+            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending is None)
+                ==> r is Ok,
     {
         if !self.handle_ok(h) {
             return Err(Error::InvalidHandle);
@@ -289,9 +299,15 @@ impl Manager {
                 assert(v.holders[x as int].contains(h.id));
                 vstd::set::lemma_set_contains_len(v.holders[x as int], h.id);
             }
+            assert forall|i: int| 0 <= i < lv.table.len() implies v.own[#[trigger] lv.table[i] as int] by {
+                let x = lv.table[i];
+                assert(page_ok(v, log, x));
+                assert(v.holders[x as int].contains(h.id));
+                vstd::set::lemma_set_contains_len(v.holders[x as int], h.id);
+            }
         }
         let l = self.leases.remove(&h.id).unwrap();
-        dec_pages(&mut self.refs, &mut self.free, &l.table, Ghost(self.p as nat));
+        dec_pages(&mut self.refs, &mut self.free, &l.table, Ghost(self.p as nat), Ghost(v.own));
         let ghost v2 = released(v, h.id);
         proof {
             lemma_release_inv(v, log, h.id);

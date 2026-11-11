@@ -3,7 +3,7 @@ name = "pageproof-core"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
-description = "Verus-verified KV block manager (pageproof contract v0.2.1)"
+description = "Verus-verified KV block manager and slab coordinator (pageproof contract v0.3)"
 
 [dependencies]
 # Pinned to the vstd published alongside the locked Verus release (see toolchain.json).
