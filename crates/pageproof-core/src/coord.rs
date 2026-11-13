@@ -183,6 +183,16 @@ impl CoordV {
         self.paged[0].cfg.delta
     }
 
+    pub open spec fn ntarget(self) -> nat {
+        self.paged[0].cfg.ntarget
+    }
+
+    /// The extra write range of paged class `c` in a plan with `propose`: `λ` proposal rows in a
+    /// drafter class (D20), none otherwise.
+    pub open spec fn ext_of(self, c: int, propose: bool) -> nat {
+        if propose && c >= self.ntarget() { self.lam() } else { 0 }
+    }
+
     /// Blocks covering the reach `L + μ` of an input of length `L` (D18).
     pub open spec fn reach_blocks(self, l: nat) -> nat {
         cdiv(l + self.mu(), self.b)

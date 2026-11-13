@@ -1169,7 +1169,7 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
 impl Manager {
     /// D17: commit the first `n` drafts of pending ticket `t`. Not public: the first half of
     /// `finish_write_n`.
-    fn commit_drafts(&mut self, t: u64, n: usize)
+    pub(crate) fn commit_drafts(&mut self, t: u64, n: usize)
         requires
             old(self).valid(),
             old(self)@.pend.contains_key(t),

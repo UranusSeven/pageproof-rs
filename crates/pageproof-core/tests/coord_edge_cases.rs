@@ -2,10 +2,20 @@
 //! several paged classes, state classes, reclaim, Prot, and the all-or-nothing operations.
 use pageproof_core::coord::Coordinator;
 use pageproof_core::coord_attach::LeaseView;
-use pageproof_core::ops_write::Completion;
+use pageproof_core::coord_ops::{CoordCompletion, Drafts};
 use pageproof_core::types::{Error, Handle};
 
 const NS: &[u8] = b"dummy-v0.3";
+
+/// A completion with no accepted drafts.
+fn done(t: pageproof_core::types::Ticket) -> CoordCompletion {
+    done_n(t, 0)
+}
+
+/// A completion accepting the first `n` drafts.
+fn done_n(t: pageproof_core::types::Ticket, n: usize) -> CoordCompletion {
+    CoordCompletion { ticket: t, accepted: n, token: None, drafts: vec![], stop: false }
+}
 
 fn toks(n: usize, seed: u32) -> Vec<u32> {
     (0..n as u32).map(|i| i.wrapping_mul(2654435761).wrapping_add(seed)).collect()
@@ -15,9 +25,9 @@ fn toks(n: usize, seed: u32) -> Vec<u32> {
 fn compute_all(co: &mut Coordinator, h: Handle) {
     let v = co.inspect(h).unwrap();
     if v.computed < v.len {
-        let (t, plan) = co.begin_write(h, v.len - v.computed).unwrap();
+        let (t, plan) = co.begin_write(h, v.len - v.computed, Drafts::Known(vec![]), false).unwrap();
         assert_eq!(plan.ticket, t);
-        co.finish_write(t, Completion { ticket: t }).unwrap();
+        co.finish_write(t, done(t)).unwrap();
     }
 }
 
@@ -128,10 +138,10 @@ fn state_class_disables_hits() {
     let (h2, c2, v2) = co.attach(&t).unwrap();
     assert_eq!(c2, 0, "D13: no state checkpoints, no hits");
     assert_ne!(v1.slots[0], v2.slots[0], "distinct live slots");
-    let (t2, plan) = co.begin_write(h2, 12).unwrap();
+    let (t2, plan) = co.begin_write(h2, 12, Drafts::Known(vec![]), false).unwrap();
     assert!(plan.init, "first plan starts from the initial state (E10)");
     assert_eq!(plan.state_slots, v2.slots);
-    co.finish_write(t2, Completion { ticket: t2 }).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
     check_disjoint(&co, &[16, 32], &[4, 2], &[&v1, &v2], 1);
 }
 
@@ -301,13 +311,13 @@ fn extend_demand_paged_only() {
     assert_eq!(co.extend(h, &toks(1, 3)).err(), Some(Error::InvalidPhase));
     compute_all(&mut co, h);
     assert_eq!(co.extend(h, &[]).err(), Some(Error::InvalidArgument));
-    assert_eq!(co.begin_write(h, 0).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 0, Drafts::Known(vec![]), false).err(), Some(Error::InvalidArgument));
     let v3 = co.extend(h, &toks(1, 4)).unwrap();
     assert_eq!(v3.tables[0].len(), 3);
-    let (t, _) = co.begin_write(h, 1).unwrap();
+    let (t, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
     assert_eq!(co.extend(h, &toks(1, 5)).err(), Some(Error::Busy));
     assert_eq!(co.release(h).err(), Some(Error::Busy));
-    co.finish_write(t, Completion { ticket: t }).unwrap();
+    co.finish_write(t, done(t)).unwrap();
     co.release(h).unwrap();
 }
 
@@ -315,16 +325,16 @@ fn extend_demand_paged_only() {
 fn state_plan_after_first_chunk() {
     let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, v) = co.attach(&toks(10, 1)).unwrap();
-    let (t1, p1) = co.begin_write(h, 6).unwrap();
+    let (t1, p1) = co.begin_write(h, 6, Drafts::Known(vec![]), false).unwrap();
     assert!(p1.init);
     assert_eq!(p1.write_slots.len(), 1);
     assert_eq!(p1.write_slots[0].len(), 6);
-    co.finish_write(t1, Completion { ticket: t1 }).unwrap();
-    let (t2, p2) = co.begin_write(h, 4).unwrap();
+    co.finish_write(t1, done(t1)).unwrap();
+    let (t2, p2) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
     assert!(!p2.init, "later plans read the live slot");
     assert_eq!(p2.state_slots, v.slots);
     assert_eq!(p2.positions, (6..10).collect::<Vec<_>>());
-    co.finish_write(t2, Completion { ticket: t2 }).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
     assert_eq!(co.inspect(h).unwrap().computed, 10);
 }
 
@@ -332,10 +342,10 @@ fn state_plan_after_first_chunk() {
 fn tickets_and_handles_are_single_use() {
     let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, _) = co.attach(&toks(4, 1)).unwrap();
-    let (t, _) = co.begin_write(h, 4).unwrap();
-    assert_eq!(co.begin_write(h, 1).err(), Some(Error::Busy));
-    co.finish_write(t, Completion { ticket: t }).unwrap();
-    assert_eq!(co.finish_write(t, Completion { ticket: t }).err(), Some(Error::InvalidTicket));
+    let (t, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![]), false).err(), Some(Error::Busy));
+    co.finish_write(t, done(t)).unwrap();
+    assert_eq!(co.finish_write(t, done(t)).err(), Some(Error::InvalidTicket));
     co.release(h).unwrap();
     assert_eq!(co.release(h).err(), Some(Error::InvalidHandle));
     assert!(co.inspect(h).is_err());
@@ -491,4 +501,183 @@ fn lambda_zero_has_no_reservation() {
     let iv = co.inspect(h).unwrap();
     assert_eq!((iv.reach, iv.mu), (5, 0));
     assert_eq!(co.slot_of(0, h, 5).err(), Some(Error::InvalidArgument));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Contract v0.4/v0.6 §7: verify tickets with linear drafts (D16, D17, D19). B = 4 throughout.
+// ---------------------------------------------------------------------------------------------
+
+/// A lease with `len` tokens, all computed, on a coordinator with λ = `lam`.
+fn computed_lease(nslab: usize, lam: usize, len: usize, seed: u32) -> (Coordinator, Handle) {
+    let mut co = Coordinator::create(nslab, 64, &[16], &[], &[], 4, lam, 0, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(len, seed)).unwrap();
+    compute_all(&mut co, h);
+    (co, h)
+}
+
+/// A verify ticket over the last input position `L - 1` with `drafts`.
+fn verify(co: &mut Coordinator, h: Handle, drafts: &[u32]) -> pageproof_core::types::Ticket {
+    // The caller has extended the lease by one token, so the frontier is at L - 1.
+    let (t, plan) = co.begin_write(h, 1, Drafts::Known(drafts.to_vec()), false).unwrap();
+    assert_eq!(plan.num_drafts, drafts.len());
+    t
+}
+
+#[test]
+fn verify_accepts_every_draft() {
+    // §7: k = 4, n = 4: T' = T ++ D, c' = L' = L + 4, and ρ - L' = λ - 4 = 0.
+    let (mut co, h) = computed_lease(4, 4, 5, 1);
+    co.extend(h, &[50]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (6, 5, 10));
+    let d = [51, 52, 53, 54];
+    let (t, plan) = co.begin_write(h, 1, Drafts::Known(d.to_vec()), false).unwrap();
+    assert_eq!(plan.input_ids, vec![50, 51, 52, 53, 54]);
+    assert_eq!(plan.positions, vec![5, 6, 7, 8, 9]);
+    assert_eq!(plan.write_slots[0].len(), 5);
+    for (q, s) in plan.write_slots[0].iter().enumerate() {
+        assert_eq!(*s, co.slot_of(0, h, 5 + q).unwrap());
+    }
+    assert_eq!(co.finish_write(t, done_n(t, 4)).unwrap(), 10);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (10, 10, 10));
+    // Blocks 0 and 1 (positions 0..7, two of them accepted drafts) are published and hit.
+    let mut t2 = toks(5, 1);
+    t2.extend_from_slice(&[50, 51, 52, 53]);
+    let (h2, cached, _) = co.attach(&t2).unwrap();
+    assert_eq!(cached, 8);
+    co.release(h2).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn verify_rejects_every_draft() {
+    // §7: k = 4, n = 0: T and c = L as before; nothing credited, freed or published.
+    let (mut co, h) = computed_lease(4, 4, 5, 2);
+    co.extend(h, &[60]).unwrap();
+    let free = co.arena().free_units[0];
+    let t = verify(&mut co, h, &[61, 62, 63, 64]);
+    assert_eq!(co.finish_write(t, done_n(t, 0)).unwrap(), 6);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (6, 6, 10));
+    assert_eq!(co.arena().free_units[0], free);
+    // A second verify needs the bonus token first.
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![1]), false).err(), Some(Error::InvalidArgument));
+    co.extend(h, &[65]).unwrap();
+    assert_eq!(co.inspect(h).unwrap().reach, 11);
+    let t = verify(&mut co, h, &[66, 67]);
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn verify_partial_accept_publishes_completed_block() {
+    // §7: k = 4, n = 2, where the second accepted draft completes block 1 (positions 4..7).
+    let (mut co, h) = computed_lease(4, 4, 5, 3);
+    co.extend(h, &[70]).unwrap();
+    let t = verify(&mut co, h, &[71, 72, 73, 74]);
+    assert_eq!(co.finish_write(t, done_n(t, 2)).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (8, 8));
+    let mut t2 = toks(5, 3);
+    t2.extend_from_slice(&[70, 71, 72, 99]);
+    let (h2, cached, _) = co.attach(&t2).unwrap();
+    assert_eq!(cached, 8);
+    co.release(h2).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn rejected_drafts_never_publish() {
+    // §7: drafts that would complete block 1 are rejected: the block is not published, and the
+    // same tokens find no cached block 1.
+    let (mut co, h) = computed_lease(4, 4, 5, 4);
+    co.extend(h, &[80]).unwrap();
+    let t = verify(&mut co, h, &[81, 82, 83, 84]);
+    co.finish_write(t, done_n(t, 0)).unwrap();
+    let mut t2 = toks(5, 4);
+    t2.extend_from_slice(&[80, 81, 82, 83]);
+    let (h2, cached, _) = co.attach(&t2).unwrap();
+    assert_eq!(cached, 4);
+    co.release(h2).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn finish_write_rejects_bad_acceptance_counts() {
+    // §7: n > k, or n > 0 for k = 0: InvalidArgument, the ticket stays pending; a second delivery
+    // of the same completion is InvalidTicket.
+    let (mut co, h) = computed_lease(4, 4, 5, 5);
+    co.extend(h, &[90]).unwrap();
+    let t = verify(&mut co, h, &[91, 92]);
+    assert_eq!(co.finish_write(t, done_n(t, 3)).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.finish_write(t, done_n(t, 1)).unwrap(), 7);
+    assert_eq!(co.finish_write(t, done_n(t, 0)).err(), Some(Error::InvalidTicket));
+    assert_eq!(co.inspect(h).unwrap().len, 7);
+    co.extend(h, &[93]).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.finish_write(t2, done_n(t2, 1)).err(), Some(Error::InvalidArgument));
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn begin_write_rejects_misplaced_drafts() {
+    // §7: drafts while c + n < L, more than λ drafts, or `propose` without a drafter class.
+    let (mut co, h) = computed_lease(4, 4, 5, 6);
+    co.extend(h, &[1, 2]).unwrap();
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![9]), false).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 2, Drafts::Known(vec![9; 5]), false).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 2, Drafts::Known(vec![]), true).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 2, Drafts::Deferred(1), false).err(), Some(Error::InvalidArgument));
+    let (t, plan) = co.begin_write(h, 2, Drafts::Known(vec![9; 4]), false).unwrap();
+    assert_eq!(plan.input_ids.len(), 6);
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn verify_on_a_hybrid_lease() {
+    // §7: a ticket over the whole prompt (a = 0) with k > 0 drafts on a lease with a state class:
+    // init = true; the single state slot is the plan's, and no second slot is ever allocated.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 3, 0, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(5, 7)).unwrap();
+    let (t, plan) = co.begin_write(h, 5, Drafts::Known(vec![1, 2, 3]), false).unwrap();
+    assert!(plan.init);
+    assert_eq!(plan.num_drafts, 3);
+    assert_eq!(plan.state_slots, v.slots);
+    assert_eq!(co.finish_write(t, done_n(t, 1)).unwrap(), 6);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (6, 6));
+    assert_eq!(iv.lease.slots, v.slots);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_after_every_draft_accepted() {
+    // §7: after n = λ the reservation is used up (ρ = L'), and the bonus-token extend needs
+    // ceil((L' + 1 + μ)/B) - m_h new pages.
+    let (mut co, h) = computed_lease(4, 4, 5, 8);
+    co.extend(h, &[40]).unwrap();
+    let t = verify(&mut co, h, &[41, 42, 43, 44]);
+    co.finish_write(t, done_n(t, 4)).unwrap();
+    let pages = co.inspect(h).unwrap().lease.tables[0].len();
+    assert_eq!(pages, 3);
+    let v = co.extend(h, &[45]).unwrap();
+    assert_eq!(v.tables[0].len(), 4);
+    assert_eq!(co.inspect(h).unwrap().reach, 15);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn stop_is_not_yet_supported() {
+    // D25 lands with continuations; until then a completion with `stop` is rejected.
+    let (mut co, h) = computed_lease(4, 4, 5, 9);
+    co.extend(h, &[30]).unwrap();
+    let t = verify(&mut co, h, &[31]);
+    let mut c = done(t);
+    c.stop = true;
+    assert_eq!(co.finish_write(t, c).err(), Some(Error::InvalidArgument));
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
 }

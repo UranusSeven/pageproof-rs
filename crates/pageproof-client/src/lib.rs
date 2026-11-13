@@ -104,8 +104,8 @@ pub fn coord_churn(co: &mut Coordinator, reqs: &Vec<Vec<u32>>)
         decreases reqs.len() - i,
     {
         if let Ok((h, _, _)) = co.attach(reqs[i].as_slice()) {
-            if let Ok((t, _)) = co.begin_write(h, 1) {
-                let _ = co.finish_write(t, pageproof_core::ops_write::Completion { ticket: t });
+            if let Ok((t, _)) = co.begin_write(h, 1, Drafts::Known(Vec::new()), false) {
+                let _ = co.finish_write(t, CoordCompletion { ticket: t, accepted: 0, token: None, drafts: Vec::new(), stop: false });
             }
             let _ = co.extend(h, reqs[i].as_slice());
             let _ = co.release(h);

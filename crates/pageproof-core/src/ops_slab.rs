@@ -230,6 +230,21 @@ impl Manager {
         }
     }
 
+    /// `|D|` of a pending ticket.
+    pub fn pend_drafts_len(&self, t: u64) -> (r: usize)
+        requires
+            self.valid(),
+            self@.pend.contains_key(t),
+        ensures
+            r as nat == self@.pend[t].drafts.len(),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.pend.get(&t).unwrap().drafts.len()
+    }
+
     /// `ρ_h` of a live lease.
     pub fn lease_rho(&self, h: u64) -> (r: usize)
         requires

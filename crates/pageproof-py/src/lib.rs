@@ -8,6 +8,7 @@
 use pageproof_core::coord::Coordinator;
 use pageproof_core::manager::Manager;
 use pageproof_core::ops_write::Completion;
+use pageproof_core::coord_ops::{CoordCompletion, Drafts};
 use pageproof_core::types::{Error, Handle, Ticket};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -159,6 +160,10 @@ struct CoordPlan {
     input_ids: Vec<u32>,
     positions: Vec<usize>,
     block_size: usize,
+    /// Drafts after the input (contract D16); the sampler checks outputs at `[z-1, z+k)`.
+    num_drafts: usize,
+    /// Drafter classes also write `λ` proposal rows (D20).
+    propose: bool,
     /// Per paged class.
     write_slots: Vec<Vec<usize>>,
     page_tables: Vec<Vec<usize>>,
@@ -226,15 +231,19 @@ impl PyCoordinator {
         lease_dict(py, v.tables, v.slots)
     }
 
-    /// C3.
-    fn begin_write(&mut self, handle: PyHandle, n: usize) -> PyResult<CoordPlan> {
-        let (_, p) = self.inner.begin_write(handle.into(), n).map_err(err)?;
+    /// C3. `drafts` are the host's draft tokens after the input (D16); `propose` asks the drafter
+    /// classes for proposal rows (D20).
+    #[pyo3(signature = (handle, n, drafts = Vec::new(), propose = false))]
+    fn begin_write(&mut self, handle: PyHandle, n: usize, drafts: Vec<u32>, propose: bool) -> PyResult<CoordPlan> {
+        let (_, p) = self.inner.begin_write(handle.into(), n, Drafts::Known(drafts), propose).map_err(err)?;
         Ok(CoordPlan {
             ticket: p.ticket.into(),
             handle: p.handle.into(),
             input_ids: p.input_ids,
             positions: p.positions,
             block_size: p.block_size,
+            num_drafts: p.num_drafts,
+            propose: p.propose,
             write_slots: p.write_slots,
             page_tables: p.page_tables,
             state_slots: p.state_slots,
@@ -242,11 +251,14 @@ impl PyCoordinator {
         })
     }
 
-    /// C4. The caller (executor) asserts that `ticket`'s plan has been executed in every class
-    /// (E1/E2/E5/E10).
-    fn finish_write(&mut self, ticket: PyTicket) -> PyResult<usize> {
+    /// C4. `accepted` is how many of the ticket's drafts the sampler accepted (D17). The caller
+    /// (executor) asserts that the plan has been executed in every class (E1/E2/E5/E10/E11).
+    #[pyo3(signature = (ticket, accepted = 0))]
+    fn finish_write(&mut self, ticket: PyTicket, accepted: usize) -> PyResult<usize> {
         let t: Ticket = ticket.into();
-        self.inner.finish_write(t, Completion { ticket: t }).map_err(err)
+        self.inner
+            .finish_write(t, CoordCompletion { ticket: t, accepted, token: None, drafts: Vec::new(), stop: false })
+            .map_err(err)
     }
 
     /// C5.

@@ -1014,10 +1014,16 @@ impl Coordinator {
 pub struct CoordPlan {
     pub ticket: Ticket,
     pub handle: Handle,
+    /// `T_h[a:z] ++ D` at positions `[a, z + k)`.
     pub input_ids: Vec<Token>,
     pub positions: Vec<usize>,
     pub block_size: usize,
-    /// Per paged class: write slots of `[a, z)` and the page mapping of `[0, z)`.
+    /// `k`: the drafts after the input (D16); the sampler checks the outputs at `[z-1, z+k)`.
+    pub num_drafts: usize,
+    /// The drafter classes also write `λ` proposal rows after the drafts (D20).
+    pub propose: bool,
+    /// Per paged class: write slots of `[a, z + k)` (plus `λ` in a drafter class with
+    /// `propose`) and the page mapping of the same range.
     pub write_slots: Vec<Vec<usize>>,
     pub page_tables: Vec<Vec<PageId>>,
     /// Per state class: `σ_h^c`.
@@ -1026,21 +1032,42 @@ pub struct CoordPlan {
     pub init: bool,
 }
 
+/// The drafts of a ticket (C3): tokens the host holds, or the number a continuation takes from
+/// its producer's proposal on the device (D24, not yet supported).
+pub enum Drafts {
+    Known(Vec<Token>),
+    Deferred(usize),
+}
+
+pub open spec fn drafts_known(d: Drafts) -> bool {
+    d is Known
+}
+
+pub open spec fn drafts_seq(d: Drafts) -> Seq<Token> {
+    match d {
+        Drafts::Known(v) => v@,
+        Drafts::Deferred(_) => Seq::empty(),
+    }
+}
+
 /// C3 plan correctness across classes.
-pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan) -> bool {
+pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: bool, plan: CoordPlan) -> bool {
     let l = o.leases()[h];
     let a = l.c;
     let z = l.c + n;
+    let k = d.len();
     &&& plan.ticket == Ticket { mgr: o.id, id: o.next_ticket() }
     &&& plan.handle == Handle { mgr: o.id, id: h }
     &&& plan.block_size as nat == o.b
-    &&& plan.input_ids@ == l.toks.subrange(a as int, z as int)
-    &&& plan.positions@.len() == n
-    &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == a + q
+    &&& plan.input_ids@ == l.toks.subrange(a as int, z as int) + d
+    &&& plan.positions@.len() == n + k
+    &&& forall|q: int| 0 <= q < n + k ==> #[trigger] plan.positions@[q] as int == a + q
+    &&& plan.num_drafts as nat == k
+    &&& plan.propose == propose
     &&& plan.write_slots@.len() == o.np
     &&& plan.page_tables@.len() == o.np
     // Per paged class (`cplan_class`): write slots, page mapping, and §9.0 (b).
-    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, plan, c)
+    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, d, propose, plan, c)
     &&& plan.state_slots@ == o.slots[h]
     &&& plan.init == (a == 0)
     &&& forall|j: int|
@@ -1065,102 +1092,114 @@ pub open spec fn paged_step(o: CoordV, n: CoordV) -> bool {
     &&& n.slots == o.slots
 }
 
-pub open spec fn coord_begin_result(o: CoordV, n: CoordV, h: Handle, k: usize, r: Result<(Ticket, CoordPlan), Error>) -> bool {
+/// Arguments C3 accepts on a live lease with no ticket in flight (δ = 0): known drafts,
+/// `0 < n <= L - c`, `k <= λ`, drafts only after the whole input, and `propose` only with drafter
+/// classes and after the whole input.
+pub open spec fn coord_begin_ok(o: CoordV, h: u64, n: nat, d: Drafts, propose: bool) -> bool {
+    let l = o.leases()[h];
+    let k = drafts_seq(d).len();
+    &&& drafts_known(d)
+    &&& 0 < n
+    &&& l.c + n <= l.toks.len()
+    &&& k <= o.lam()
+    &&& k > 0 ==> l.c + n == l.toks.len()
+    &&& propose ==> o.ntarget() < o.np && l.c + n == l.toks.len()
+}
+
+/// Success relation of C3: the plan, and every paged class's ticket record.
+pub open spec fn coord_begun(o: CoordV, n: CoordV, h: u64, k: nat, d: Seq<Token>, propose: bool, plan: CoordPlan) -> bool {
+    &&& cplan_ok(o, h, k, d, propose, plan)
+    &&& paged_step(o, n)
+    &&& n.state == o.state
+    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] n.paged[c] == began_d(o.paged[c], h, k, d)
+}
+
+pub open spec fn coord_begin_result(
+    o: CoordV,
+    n: CoordV,
+    h: Handle,
+    k: usize,
+    d: Drafts,
+    propose: bool,
+    r: Result<(Ticket, CoordPlan), Error>,
+) -> bool {
     let live = h.mgr == o.id && o.leases().contains_key(h.id);
     let l = o.leases()[h.id];
+    let ok = coord_begin_ok(o, h.id, k as nat, d, propose);
     &&& !live ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidHandle)
     &&& (live && l.pending.len() > 0) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
-    &&& (live && l.pending.len() == 0 && !(0 < k && l.c + k <= l.toks.len())) ==> r == Err::<(Ticket, CoordPlan), Error>(
-        Error::InvalidArgument,
+    &&& (live && l.pending.len() == 0 && !ok) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidArgument)
+    &&& (live && l.pending.len() == 0 && ok) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
+    &&& (live && l.pending.len() == 0 && ok && o.next_ticket() == u64::MAX) ==> r == Err::<(Ticket, CoordPlan), Error>(
+        Error::IdentifierExhausted,
     )
-    &&& (live && l.pending.len() == 0 && 0 < k && l.c + k <= l.toks.len()) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
-    &&& (live && l.pending.len() == 0 && 0 < k && l.c + k <= l.toks.len() && o.next_ticket() == u64::MAX) ==> r == Err::<
-        (Ticket, CoordPlan),
-        Error,
-    >(Error::IdentifierExhausted)
     &&& r is Err ==> n == o
     &&& r matches Ok((t, plan)) ==> {
         &&& live
         &&& t == plan.ticket
-        &&& cplan_ok(o, h.id, k as nat, plan)
-        &&& paged_step(o, n)
-        &&& n.state == o.state
-        &&& forall|c: int| 0 <= c < o.np ==> #[trigger] n.paged[c] == began(o.paged[c], h.id, k as nat)
+        &&& coord_begun(o, n, h.id, k as nat, drafts_seq(d), propose, plan)
     }
 }
 
-pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: Completion, r: Result<usize, Error>) -> bool {
+/// The executor's completion notice for a coordinator ticket (C4): its acceptance count, the token
+/// it sampled after its input and accepted drafts, the drafts it accepted, and `stop` (D25, not
+/// yet supported). Its truth is the external assumption E1/E5/E13.
+pub struct CoordCompletion {
+    pub ticket: Ticket,
+    pub accepted: usize,
+    pub token: Option<Token>,
+    pub drafts: Vec<Token>,
+    pub stop: bool,
+}
+
+/// The state after committing the first `n` drafts of `t` in every paged class (D17).
+pub open spec fn coord_committed(o: CoordV, t: u64, n: nat) -> CoordV {
+    CoordV { paged: Seq::new(o.paged.len(), |c: int| committed(o.paged[c], t, n)), ..o }
+}
+
+/// Success relation of the completion step: `finish_rel` in every paged class and the state after
+/// `T_h[0:z]` in every live state slot.
+pub open spec fn coord_finished(o: CoordV, n: CoordV, t: u64, z: usize) -> bool {
+    let pr = o.pend()[t];
+    let h = pr.lease;
+    let l = o.leases()[h];
+    &&& z as nat == pr.z
+    &&& paged_step(o, n)
+    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] finish_rel(o.paged[c], n.paged[c], t)
+    // §9.0 (c) for state classes: every live slot now holds the state after `T_h[0:z]`.
+    &&& forall|j: int|
+        0 <= j < o.nst() ==> #[trigger] n.state[j] == (StateV {
+            w: o.state[j].w.update(o.slots[h][j] as int, Some(l.toks.subrange(0, pr.z as int))),
+            ..o.state[j]
+        })
+}
+
+/// C4: with acceptance count n, `T'_h = T_h ++ D[0:n]` and `c'_h = z + n` (D17); every state slot
+/// then holds the state after `T'_h[0:z+n]` (D19, E11).
+pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: CoordCompletion, r: Result<usize, Error>) -> bool {
     let live = t.mgr == o.id && o.pend().contains_key(t.id) && comp.ticket == t;
+    let ok = comp.accepted as nat <= o.pend()[t.id].drafts.len() && !comp.stop;
     &&& !live ==> r == Err::<usize, Error>(Error::InvalidTicket)
-    &&& live ==> r is Ok
+    &&& (live && !ok) ==> r == Err::<usize, Error>(Error::InvalidArgument)
+    &&& (live && ok) ==> r is Ok
     &&& r is Err ==> n == o
-    &&& r matches Ok(z) ==> {
-        let pr = o.pend()[t.id];
-        let h = pr.lease;
-        let l = o.leases()[h];
-        &&& live
-        &&& z as nat == pr.z
-        &&& paged_step(o, n)
-        &&& forall|c: int| 0 <= c < o.np ==> #[trigger] finish_rel(o.paged[c], n.paged[c], t.id)
-        // §9.0 (c) for state classes: every live slot now holds the state after `T_h[0:z]`.
-        &&& forall|j: int|
-            0 <= j < o.nst() ==> #[trigger] n.state[j] == (StateV {
-                w: o.state[j].w.update(o.slots[h][j] as int, Some(l.toks.subrange(0, pr.z as int))),
-                ..o.state[j]
-            })
-    }
+    &&& r matches Ok(z) ==> live && ok && coord_finished(coord_committed(o, t.id, comp.accepted as nat), n, t.id, z)
 }
 
-/// Plan facts of paged class `c` (one conjunct of `cplan_ok`).
-pub open spec fn cplan_class(o: CoordV, h: u64, n: nat, plan: CoordPlan, c: int) -> bool {
+/// Plan facts of paged class `c` (one conjunct of `cplan_ok`), stated over class `c`'s own lease.
+pub open spec fn cplan_class(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: bool, plan: CoordPlan, c: int) -> bool {
     let l = o.leases()[h];
     let lc = o.paged[c].leases[h];
-    let a = l.c;
-    let z = l.c + n;
-    &&& plan.write_slots@[c]@.len() == n
-    &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
-    &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
+    let a = lc.c;
+    let w = lc.c + n + d.len() + o.ext_of(c, propose);
+    &&& plan.write_slots@[c]@.len() == w - a
+    &&& forall|q: int| 0 <= q < w - a ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
+    &&& forall|q: int| 0 <= q < w - a ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
     &&& forall|q1: int, q2: int|
-        0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
-    &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
-    &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
+        0 <= q1 < w - a && 0 <= q2 < w - a && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
+    &&& forall|q: int| 0 <= q < w - a ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
+    &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(w, o.b) as int)
     &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
-}
-
-/// Unfolds `cplan_ok` from its parts (kept separate for proof stability).
-pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
-    requires
-        plan.ticket == (Ticket { mgr: o.id, id: o.next_ticket() }),
-        plan.handle == (Handle { mgr: o.id, id: h }),
-        plan.block_size as nat == o.b,
-        plan.input_ids@ == o.leases()[h].toks.subrange(o.leases()[h].c as int, (o.leases()[h].c + n) as int),
-        plan.positions@.len() == n,
-        forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == o.leases()[h].c + q,
-        plan.write_slots@.len() == o.np,
-        plan.page_tables@.len() == o.np,
-        forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, plan, c),
-        plan.state_slots@ == o.slots[h],
-        plan.init == (o.leases()[h].c == 0),
-        forall|j: int|
-            0 <= j < o.nst() ==> {
-                &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
-                &&& o.leases()[h].c > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(
-                    o.leases()[h].toks.subrange(0, o.leases()[h].c as int),
-                )
-            },
-    ensures
-        cplan_ok(o, h, n, plan),
-{
-    let l = o.leases()[h];
-    let a = l.c;
-    let z = l.c + n;
-    assert forall|j: int| 0 <= j < o.nst() implies {
-        &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
-        &&& a > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, a as int))
-    } by {}
-    assert(plan.input_ids@ == l.toks.subrange(a as int, z as int));
-    assert(forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == a + q);
-    assert(plan.init == (a == 0));
 }
 
 impl Coordinator {
@@ -1194,7 +1233,7 @@ impl Coordinator {
                     &&& self.pv(c).leases.dom() == o.pv(c).leases.dom()
                     &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> self.pv(c).leases[h2]
                         == o.pv(c).leases[h2]
-                    &&& self.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+                    &&& self.pv(c).leases[h].toks == self.pv(0).leases[h].toks
                     &&& self.pv(c).leases[h].rho == o.pv(c).leases[h].rho
                     &&& self.pv(c).leases[h].c == self.pv(0).leases[h].c
                     &&& self.pv(c).leases[h].pending == self.pv(0).leases[h].pending
@@ -1268,9 +1307,6 @@ impl Coordinator {
                 if h2 != h {
                     assert(o.pv(0).leases.contains_key(h2));
                     assert(self.pv(0).leases[h2] == o.pv(0).leases[h2]);
-                } else {
-                    assert(o.pv(i).leases[h].toks == o.pv(0).leases[h].toks);
-                    assert(self.pv(0).leases[h].toks == o.pv(0).leases[h].toks);
                 }
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
@@ -1322,31 +1358,44 @@ impl Coordinator {
 
 
 impl Coordinator {
-    /// C3. `begin_write(h, n)`: one ticket whose plan covers every class.
-    pub fn begin_write(&mut self, h: Handle, k: usize) -> (r: Result<(Ticket, CoordPlan), Error>)
+    /// C3. `begin_write(h, n, drafts, propose)`: one ticket whose plan feeds `T_h[c : c+n] ++ D` and
+    /// covers every class; with `propose`, the drafter classes also get `λ` proposal rows (D20).
+    pub fn begin_write(&mut self, h: Handle, n: usize, drafts: Drafts, propose: bool) -> (r: Result<(Ticket, CoordPlan), Error>)
         requires
             old(self).inv(),
         ensures
             final(self).inv(),
-            coord_begin_result(old(self)@, final(self)@, h, k, r),
+            coord_begin_result(old(self)@, final(self)@, h, n, drafts, propose, r),
     {
         let ghost o = *self;
         let ghost ov = o@;
+        let ghost dseq = drafts_seq(drafts);
+        let ghost dknown = drafts_known(drafts);
         match self.lease_live(h) {
             None => return Err(Error::InvalidHandle),
             Some(true) => return Err(Error::Busy),
             Some(false) => {},
         }
+        // Behind no pending ticket, drafts are the host's (D21); a continuation is not yet supported.
+        let dv: Vec<Token> = match drafts {
+            Drafts::Known(v) => v,
+            Drafts::Deferred(_) => return Err(Error::InvalidArgument),
+        };
         proof {
+            assert(dknown && dv@ == dseq);
             o.lemma_view();
             assert(self.paged@[0].valid());
         }
         let (len, a, _) = self.paged[0].lease_info(h.id);
+        let cfg = self.cfg_exec();
+        let k = dv.len();
         proof {
             reveal(lease_ok);
             assert(lease_ok(self.pv(0), self.paged@[0].den_log(), h.id));
+            assert(ov.paged[0] == o.pv(0));
         }
-        if k == 0 || k > len - a {
+        if n == 0 || n > len - a || k > cfg.lam || (k > 0 && a + n != len) || (propose && (cfg.ntarget >= self.npaged
+            || a + n != len)) {
             return Err(Error::InvalidArgument);
         }
         let tid = self.paged[0].next_ticket_exec();
@@ -1362,11 +1411,17 @@ impl Coordinator {
             invariant
                 o.valid(),
                 ov == o@,
+                ov.paged[0] == o.pv(0),
                 o.pv(0).leases.contains_key(h.id),
                 o.pv(0).leases[h.id].pending.len() == 0,
                 o.pv(0).leases[h.id].c == a,
                 o.pv(0).leases[h.id].toks.len() == len,
-                0 < k <= len - a,
+                0 < n <= len - a,
+                k == dv@.len(),
+                k as nat <= ov.lam(),
+                k > 0 ==> a + n == len,
+                propose ==> ov.ntarget() < ov.np && a + n == len,
+                cfg@ == ov.paged[0].cfg,
                 tid == o.pv(0).next_ticket,
                 tid < u64::MAX,
                 h.mgr == o.id,
@@ -1385,8 +1440,8 @@ impl Coordinator {
                 c <= self.npaged,
                 wslots@.len() == c,
                 ptabs@.len() == c,
-                c > 0 ==> input_ids@ == o.pv(0).leases[h.id].toks.subrange(a as int, (a + k) as int) && positions@.len() == k
-                    && forall|q: int| 0 <= q < k ==> #[trigger] positions@[q] as int == a + q,
+                c > 0 ==> input_ids@ == o.pv(0).leases[h.id].toks.subrange(a as int, (a + n) as int) + dv@
+                    && positions@.len() == n + k && forall|q: int| 0 <= q < n + k ==> #[trigger] positions@[q] as int == a + q,
                 forall|c2: int| c <= c2 < o.np() ==> #[trigger] self.paged@[c2] == o.paged@[c2],
                 forall|c2: int|
                     0 <= c2 < c ==> {
@@ -1400,8 +1455,8 @@ impl Coordinator {
                             block_size: o.b,
                         };
                         &&& (#[trigger] self.paged@[c2]).valid()
-                        &&& self.pv(c2) == began(o.pv(c2), h.id, k as nat)
-                        &&& plan_ok(o.pv(c2), h.id, k as nat, plan)
+                        &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@)
+                        &&& plan_ok_d(o.pv(c2), h.id, n as nat, dv@, ov.ext_of(c2, propose), plan)
                         &&& forall|j: int|
                             0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
                                 o.pv(c2).b,
@@ -1411,18 +1466,31 @@ impl Coordinator {
                     },
             decreases self.npaged - c,
         {
+            let ext: usize = if propose && c >= cfg.ntarget { cfg.lam } else { 0 };
             proof {
                 assert(self.paged@[c as int] == o.paged@[c as int]);
                 assert(o.paged@[c as int].valid());
+                assert(o.paged@[0].valid());
                 assert(o.pv(c as int).leases.contains_key(h.id));
                 assert(o.pv(c as int).leases[h.id].toks == o.pv(0).leases[h.id].toks);
                 assert(o.pv(c as int).leases[h.id].c == o.pv(0).leases[h.id].c);
                 assert(o.pv(c as int).leases[h.id].pending == o.pv(0).leases[h.id].pending);
+                assert(o.pv(c as int).leases[h.id].rho == o.pv(0).leases[h.id].rho);
                 assert(o.pv(c as int).next_ticket == tid);
+                assert(o.pv(c as int).cfg == o.pv(0).cfg);
+                assert(cfg_rel(o.pv(0).cfg, o.np()));
+                assert(ext as nat == ov.ext_of(c as int, propose));
+                reveal(lease_ok);
+                assert(lease_ok(o.pv(0), o.paged@[0].den_log(), h.id));
+                // The reservation covers the drafts and the proposal rows (D18, I16).
+                assert(a < len);
+                assert(o.pv(0).leases[h.id].rho == len + o.pv(0).cfg.mu);
+                assert(k + ext <= o.pv(0).cfg.mu);
+                assert(begin_args_ok(o.pv(c as int).leases[h.id], n as nat, k as nat, ext as nat));
             }
             let mid_c = self.paged[c].mgr_id();
             let ghost p0 = self.paged@;
-            let r = self.paged[c].begin_write(Handle { mgr: mid_c, id: h.id }, k);
+            let r = self.paged[c].begin_write_v(Handle { mgr: mid_c, id: h.id }, n, dv.as_slice(), ext);
             proof {
                 assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
             }
@@ -1435,7 +1503,7 @@ impl Coordinator {
                         positions = vstd::slice::slice_to_vec(plan.positions.as_slice());
                     }
                     proof {
-                        assert(plan.input_ids@ == o.pv(c as int).leases[h.id].toks.subrange(a as int, (a + k) as int));
+                        assert(plan.input_ids@ == o.pv(c as int).leases[h.id].toks.subrange(a as int, (a + n) as int) + dv@);
                         assert(input_ids@ == plan.input_ids@);
                         assert(positions@ == plan.positions@);
                     }
@@ -1453,8 +1521,8 @@ impl Coordinator {
                                 block_size: o.b,
                             };
                             &&& (#[trigger] self.paged@[c2]).valid()
-                            &&& self.pv(c2) == began(o.pv(c2), h.id, k as nat)
-                            &&& plan_ok(o.pv(c2), h.id, k as nat, pl)
+                            &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@)
+                            &&& plan_ok_d(o.pv(c2), h.id, n as nat, dv@, ov.ext_of(c2, propose), pl)
                             &&& forall|j: int|
                                 0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
                                     o.pv(c2).b,
@@ -1488,27 +1556,28 @@ impl Coordinator {
             input_ids,
             positions,
             block_size: self.b,
+            num_drafts: k,
+            propose,
             write_slots: wslots,
             page_tables: ptabs,
             state_slots: sl,
             init: a == 0,
         };
         proof {
-            Self::lemma_begin_post(&o, self, h.id, k as nat, tid, &plan);
+            Self::lemma_begin_post(&o, self, h.id, n as nat, dv@, propose, tid, &plan);
         }
         Ok((Ticket { mgr: self.id, id: tid }, plan))
     }
 
-    proof fn lemma_begin_post(o: &Coordinator, fin: &Coordinator, h: u64, k: nat, tid: u64, plan: &CoordPlan)
+    proof fn lemma_begin_post(o: &Coordinator, fin: &Coordinator, h: u64, n: nat, d: Seq<Token>, propose: bool, tid: u64, plan: &CoordPlan)
         requires
             o.valid(),
             o.pv(0).leases.contains_key(h),
             o.pv(0).leases[h].pending.len() == 0,
             tid == o.pv(0).next_ticket,
             tid < u64::MAX,
-            0 < k,
-            k <= usize::MAX,
-            o.pv(0).leases[h].c + k <= o.pv(0).leases[h].toks.len(),
+            0 < n,
+            o.pv(0).leases[h].c + n <= o.pv(0).leases[h].toks.len(),
             fin.npaged == o.npaged,
             fin.paged@.len() == o.paged@.len(),
             fin.state@ == o.state@,
@@ -1525,13 +1594,15 @@ impl Coordinator {
             plan.handle.id == h,
             plan.handle.mgr == o.id,
             plan.block_size == o.b,
+            plan.num_drafts as nat == d.len(),
+            plan.propose == propose,
             plan.state_slots@ == o.slots@[h]@,
             plan.init == (o.pv(0).leases[h].c == 0),
             plan.write_slots@.len() == o.np(),
             plan.page_tables@.len() == o.np(),
-            plan.input_ids@ == o.pv(0).leases[h].toks.subrange(o.pv(0).leases[h].c as int, (o.pv(0).leases[h].c + k) as int),
-            plan.positions@.len() == k,
-            forall|q: int| 0 <= q < k ==> #[trigger] plan.positions@[q] as int == o.pv(0).leases[h].c + q,
+            plan.input_ids@ == o.pv(0).leases[h].toks.subrange(o.pv(0).leases[h].c as int, (o.pv(0).leases[h].c + n) as int) + d,
+            plan.positions@.len() == n + d.len(),
+            forall|q: int| 0 <= q < n + d.len() ==> #[trigger] plan.positions@[q] as int == o.pv(0).leases[h].c + q,
             forall|c2: int|
                 0 <= c2 < o.np() ==> {
                     let pl = ExecutionPlan {
@@ -1544,8 +1615,8 @@ impl Coordinator {
                         block_size: o.b,
                     };
                     &&& (#[trigger] fin.paged@[c2]).valid()
-                    &&& fin.pv(c2) == began(o.pv(c2), h, k)
-                    &&& plan_ok(o.pv(c2), h, k, pl)
+                    &&& fin.pv(c2) == began_d(o.pv(c2), h, n, d)
+                    &&& plan_ok_d(o.pv(c2), h, n, d, o@.ext_of(c2, propose), pl)
                     &&& forall|j: int|
                         0 <= j < o.pv(c2).leases[h].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
                             o.pv(c2).b,
@@ -1555,7 +1626,7 @@ impl Coordinator {
                 },
         ensures
             fin.valid(),
-            coord_begin_result(o@, fin@, plan.handle, k as usize, Ok((plan.ticket, *plan))),
+            coord_begun(o@, fin@, h, n, d, propose, *plan),
     {
         assert forall|c: int| 0 <= c < o.np() implies {
             &&& (#[trigger] fin.paged@[c]).valid()
@@ -1567,7 +1638,8 @@ impl Coordinator {
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
-            &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+            &&& fin.pv(c).leases[h].toks == fin.pv(0).leases[h].toks
+            &&& fin.pv(c).leases[h].rho == o.pv(c).leases[h].rho
             &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
             &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
             &&& fin.pv(c).leases[h].rho == fin.pv(0).leases[h].rho
@@ -1576,7 +1648,9 @@ impl Coordinator {
         } by {
             assert(o.paged@[c].valid());
             assert(o.pv(c).leases.contains_key(h));
+            assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
             assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
+            assert(o.pv(c).leases[h].rho == o.pv(0).leases[h].rho);
             assert(o.pv(c).pend == o.pv(0).pend);
             assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
             assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
@@ -1603,26 +1677,26 @@ impl Coordinator {
         let ov = o@;
         let l = ov.leases()[h];
         assert(ov.paged[0] == o.pv(0));
-        assert forall|c: int| 0 <= c < ov.np implies #[trigger] cplan_class(ov, h, k, *plan, c) by {
-            assert(ov.paged[c] == o.pv(c));
-            assert(o.paged@[c].valid());
-            assert(o.pv(c).b == o.b as nat);
-            assert(o.pv(c).leases.contains_key(h));
-            assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
-            assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
+        assert forall|c2: int| 0 <= c2 < ov.np implies #[trigger] cplan_class(ov, h, n, d, propose, *plan, c2) by {
+            assert(ov.paged[c2] == o.pv(c2));
+            assert(o.paged@[c2].valid());
+            assert(o.pv(c2).b == o.b as nat);
+            assert(o.pv(c2).leases.contains_key(h));
+            assert(o.pv(c2).leases[h].toks == o.pv(0).leases[h].toks);
+            assert(o.pv(c2).leases[h].c == o.pv(0).leases[h].c);
             let pl = ExecutionPlan {
-                ticket: Ticket { mgr: o.pv(c).id, id: tid },
-                handle: Handle { mgr: o.pv(c).id, id: h },
+                ticket: Ticket { mgr: o.pv(c2).id, id: tid },
+                handle: Handle { mgr: o.pv(c2).id, id: h },
                 input_ids: plan.input_ids,
                 positions: plan.positions,
-                write_slots: plan.write_slots@[c],
-                page_table: plan.page_tables@[c],
+                write_slots: plan.write_slots@[c2],
+                page_table: plan.page_tables@[c2],
                 block_size: o.b,
             };
-            assert(fin.paged@[c].valid());
-            assert(plan_ok(o.pv(c), h, k, pl));
-            assert(pl.write_slots@ == plan.write_slots@[c]@);
-            assert(pl.page_table@ == plan.page_tables@[c]@);
+            assert(fin.paged@[c2].valid());
+            assert(plan_ok_d(o.pv(c2), h, n, d, ov.ext_of(c2, propose), pl));
+            assert(pl.write_slots@ == plan.write_slots@[c2]@);
+            assert(pl.page_table@ == plan.page_tables@[c2]@);
         }
         assert forall|j: int| 0 <= j < ov.nst() implies {
             &&& ov.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
@@ -1636,9 +1710,8 @@ impl Coordinator {
         assert(ov.id == o.id);
         assert(ov.b == o.b as nat);
         assert(ov.leases()[h] == o.pv(0).leases[h]);
-        lemma_cplan_ok(ov, h, k, *plan);
-        assert(cplan_ok(ov, h, k, *plan));
-        assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began(ov.paged[c], h, k) by {}
+        assert(cplan_ok(ov, h, n, d, propose, *plan));
+        assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began_d(ov.paged[c], h, n, d) by {}
         assert(fin@.state =~= ov.state);
         assert(fin@.slots =~= ov.slots);
     }
@@ -1646,9 +1719,10 @@ impl Coordinator {
 
 
 impl Coordinator {
-    /// C4. `finish_write(ticket, completion)`: consumes the ticket in every paged class, publishes
-    /// new blocks, and records the state after `T_h[0:z]` in every live state slot.
-    pub fn finish_write(&mut self, t: Ticket, completion: Completion) -> (r: Result<usize, Error>)
+    /// C4. `finish_write(ticket, completion)`: commits the first `accepted` drafts in every paged
+    /// class (D17), then consumes the ticket, publishes new blocks over `T_h ++ D[0:n]`, and records
+    /// the state after `T'_h[0:z+n]` in every live state slot (D19).
+    pub fn finish_write(&mut self, t: Ticket, completion: CoordCompletion) -> (r: Result<usize, Error>)
         requires
             old(self).inv(),
         ensures
@@ -1664,8 +1738,187 @@ impl Coordinator {
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id {
             return Err(Error::InvalidTicket);
         }
+        if self.paged[0].pend_info(t.id).is_none() {
+            return Err(Error::InvalidTicket);
+        }
+        let k = self.paged[0].pend_drafts_len(t.id);
+        // `stop` (D25) is not yet supported.
+        if completion.accepted > k || completion.stop {
+            return Err(Error::InvalidArgument);
+        }
+        self.commit_all(t.id, completion.accepted);
+        let z = self.finish_core(t);
+        proof {
+            assert(completion.ticket == t);
+        }
+        Ok(z)
+    }
+
+    /// D17 in every paged class: commit the first `n` drafts of `t`.
+    fn commit_all(&mut self, t: u64, n: usize)
+        requires
+            old(self).valid(),
+            old(self).pv(0).pend.contains_key(t),
+            n <= old(self).pv(0).pend[t].drafts.len(),
+        ensures
+            final(self).valid(),
+            final(self)@ == coord_committed(old(self)@, t, n as nat),
+            final(self).pv(0).pend.contains_key(t),
+            final(self).id == old(self).id,
+    {
+        let ghost o = *self;
+        let mut c: usize = 0;
+        while c < self.npaged
+            invariant
+                o.valid(),
+                o.pv(0).pend.contains_key(t),
+                n <= o.pv(0).pend[t].drafts.len(),
+                self.npaged == o.npaged,
+                self.paged@.len() == o.paged@.len(),
+                self.state@ == o.state@,
+                self.slots@ == o.slots@,
+                self.id == o.id,
+                self.nslab == o.nslab,
+                self.sbytes == o.sbytes,
+                self.b == o.b,
+                self.unit@ == o.unit@,
+                self.per@ == o.per@,
+                self.owner@ == o.owner@,
+                self.fs == o.fs,
+                c <= self.npaged,
+                forall|c2: int| c <= c2 < o.np() ==> #[trigger] self.paged@[c2] == o.paged@[c2],
+                forall|c2: int| 0 <= c2 < c ==> (#[trigger] self.paged@[c2]).valid() && self.pv(c2) == committed(o.pv(c2), t, n as nat),
+            decreases self.npaged - c,
+        {
+            proof {
+                assert(self.paged@[c as int] == o.paged@[c as int]);
+                assert(o.paged@[c as int].valid());
+                assert(o.pv(c as int).pend == o.pv(0).pend);
+            }
+            let ghost p0 = self.paged@;
+            self.paged[c].commit_drafts(t, n);
+            proof {
+                assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
+                assert forall|c2: int| 0 <= c2 < c + 1 implies (#[trigger] self.paged@[c2]).valid() && self.pv(c2) == committed(
+                    o.pv(c2),
+                    t,
+                    n as nat,
+                ) by {
+                    if c2 < c {
+                        assert(self.paged@[c2] == p0[c2]);
+                    }
+                }
+            }
+            c += 1;
+        }
+        proof {
+            Self::lemma_commit_post(&o, self, t, n as nat);
+        }
+    }
+
+    proof fn lemma_commit_post(o: &Coordinator, fin: &Coordinator, t: u64, n: nat)
+        requires
+            o.valid(),
+            o.pv(0).pend.contains_key(t),
+            n <= o.pv(0).pend[t].drafts.len(),
+            fin.npaged == o.npaged,
+            fin.paged@.len() == o.paged@.len(),
+            fin.state@ == o.state@,
+            fin.slots@ == o.slots@,
+            fin.id == o.id,
+            fin.nslab == o.nslab,
+            fin.sbytes == o.sbytes,
+            fin.b == o.b,
+            fin.unit@ == o.unit@,
+            fin.per@ == o.per@,
+            fin.owner@ == o.owner@,
+            fin.fs == o.fs,
+            forall|c2: int| 0 <= c2 < o.np() ==> (#[trigger] fin.paged@[c2]).valid() && fin.pv(c2) == committed(o.pv(c2), t, n),
+        ensures
+            fin.valid(),
+            fin@ == coord_committed(o@, t, n),
+            fin.pv(0).pend.contains_key(t),
+    {
+        assert(o.paged@[0].valid());
+        lemma_finish_facts(o.pv(0), o.paged@[0].den_log(), t);
+        let h = o.pv(0).pend[t].lease;
+        assert forall|c: int| 0 <= c < o.np() implies {
+            &&& (#[trigger] fin.paged@[c]).valid()
+            &&& fin.pv(c).own == o.pv(c).own
+            &&& fin.pv(c).p == o.pv(c).p
+            &&& fin.pv(c).b == o.pv(c).b
+            &&& fin.pv(c).ns == o.pv(c).ns
+            &&& fin.pv(c).cfg == o.pv(c).cfg
+            &&& fin.pv(c).next_handle == o.pv(c).next_handle
+            &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
+            &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
+            &&& fin.pv(c).leases[h].toks == fin.pv(0).leases[h].toks
+            &&& fin.pv(c).leases[h].rho == o.pv(c).leases[h].rho
+            &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
+            &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
+            &&& fin.pv(c).leases[h].rho == fin.pv(0).leases[h].rho
+            &&& fin.pv(c).pend == fin.pv(0).pend
+            &&& fin.pv(c).next_ticket == fin.pv(0).next_ticket
+        } by {
+            assert(o.paged@[c].valid());
+            assert(o.pv(c).pend == o.pv(0).pend);
+            assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
+            assert(o.pv(c).leases.contains_key(h));
+            assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
+            assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
+            assert(o.pv(c).leases[h].rho == o.pv(0).leases[h].rho);
+            assert(fin.paged@[0].valid());
+            assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
+            assert(fin.pv(0).leases.dom() =~= o.pv(0).leases.dom());
+        }
+        let l0 = o.pv(0).leases[h];
+        assert(fin.pv(0).leases[h].toks.subrange(0, l0.c as int) =~= l0.toks.subrange(0, l0.c as int));
+        assert forall|j: int| 0 <= j < o.nst() implies {
+            &&& (#[trigger] fin.state@[j]).valid()
+            &&& fin.sv(j).own == o.sv(j).own
+            &&& fin.sv(j).holder == o.sv(j).holder
+            &&& fin.sv(j).p == o.sv(j).p
+            &&& forall|x: int| 0 <= x < o.sv(j).p && x != o.slots@[h]@[j] ==> #[trigger] fin.sv(j).w[x] == o.sv(j).w[x]
+            &&& (fin.pv(0).leases[h].c > 0 ==> fin.sv(j).w[o.slots@[h]@[j] as int] == Some(
+                fin.pv(0).leases[h].toks.subrange(0, fin.pv(0).leases[h].c as int),
+            ))
+        } by {
+            assert(o.state@[j].valid());
+            assert(fin.paged@[0].valid());
+            assert(o.slots@.contains_key(h));
+        }
+        fin.lemma_step_valid(o, h);
+        o.lemma_view();
+        fin.lemma_view();
+        assert(fin@.paged =~= coord_committed(o@, t, n).paged);
+        assert(fin@.state =~= o@.state);
+        assert(fin@.slots =~= o@.slots);
+        assert(fin@ == coord_committed(o@, t, n));
+    }
+
+    /// The completion step of C4 (the unchanged v0.3 operation, on the committed state).
+    fn finish_core(&mut self, t: Ticket) -> (z: usize)
+        requires
+            old(self).valid(),
+            t.mgr == old(self).id,
+            old(self).pv(0).pend.contains_key(t.id),
+        ensures
+            final(self).valid(),
+            coord_finished(old(self)@, final(self)@, t.id, z),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        proof {
+            o.lemma_view();
+            assert(self.paged@[0].valid());
+        }
         let (hid, _a, z) = match self.paged[0].pend_info(t.id) {
-            None => return Err(Error::InvalidTicket),
+            None => {
+                proof {
+                    assert(false);
+                }
+                return 0;
+            },
             Some(x) => x,
         };
         proof {
@@ -1717,7 +1970,7 @@ impl Coordinator {
                     proof {
                         assert(false);
                     }
-                    return Err(Error::InvalidTicket);
+                    return 0;
                 },
             }
             proof {
@@ -1783,11 +2036,8 @@ impl Coordinator {
         }
         proof {
             Self::lemma_finish_post(&o, self, t.id, hid, z as nat, tau);
-            o.lemma_view();
-            assert(t == Ticket { mgr: o.id, id: t.id });
-            assert(completion == Completion { ticket: Ticket { mgr: o.id, id: t.id } });
         }
-        Ok(z)
+        z
     }
 
     proof fn lemma_finish_post(o: &Coordinator, fin: &Coordinator, t: u64, h: u64, z: nat, tau: Seq<Token>)
@@ -1818,7 +2068,7 @@ impl Coordinator {
                 }),
         ensures
             fin.valid(),
-            coord_finish_result(o@, fin@, Ticket { mgr: o.id, id: t }, Completion { ticket: Ticket { mgr: o.id, id: t } }, Ok(z as usize)),
+            coord_finished(o@, fin@, t, z as usize),
     {
         assert(o.paged@[0].valid());
         lemma_finish_facts(o.pv(0), o.paged@[0].den_log(), t);
@@ -1832,7 +2082,8 @@ impl Coordinator {
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
-            &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+            &&& fin.pv(c).leases[h].toks == fin.pv(0).leases[h].toks
+            &&& fin.pv(c).leases[h].rho == o.pv(c).leases[h].rho
             &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
             &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
             &&& fin.pv(c).leases[h].rho == fin.pv(0).leases[h].rho
@@ -1842,6 +2093,8 @@ impl Coordinator {
             assert(o.paged@[c].valid());
             assert(o.pv(c).pend == o.pv(0).pend);
             assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
+            assert(o.pv(c).leases.contains_key(h));
+            assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
             assert(fin.paged@[0].valid());
             assert(finish_rel(o.pv(0), fin.pv(0), t));
             assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
