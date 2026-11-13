@@ -80,6 +80,9 @@ pub ghost struct LeaseV {
     /// `X_h` is non-empty (D22). With `δ <= 1` the deferred tail holds at most one ticket, and
     /// then it is `Q_h[0]`, so `X_h = if dfr { [Q_h[0]] } else { [] }`.
     pub dfr: bool,
+    /// `stopped_h` (D25): a completion with `stop` ended the lease; every ticket left in its
+    /// queue is an orphan (I18).
+    pub stopped: bool,
 }
 
 /// `Pending[t]`: lease, original frontier `a`, interval end `z`.

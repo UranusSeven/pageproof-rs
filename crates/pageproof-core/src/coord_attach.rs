@@ -328,7 +328,7 @@ impl Coordinator {
         mid.lemma_view();
         assert(mid.paged@[0].valid());
         mid.paged@[0].lemma_handles_lt();
-        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty(), rho: toks.len() + mid.pv(0).cfg.mu, dfr: false };
+        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty(), rho: toks.len() + mid.pv(0).cfg.mu, dfr: false, stopped: false };
         assert forall|c: int| 0 <= c < mid.np() implies (#[trigger] self.pv(c)).leases.dom() == mid.pv(0).leases.dom().insert(h)
             && self.pv(c).pend == mid.pv(0).pend && self.pv(c).next_handle == (h + 1) as u64 && self.pv(c).next_ticket
             == mid.pv(0).next_ticket && self.pv(c).p == mid.pv(c).p && self.pv(c).b == mid.pv(c).b && self.pv(c).ns == mid.pv(c).ns
@@ -387,6 +387,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
                 &&& self.pv(i).leases[h2].rho == self.pv(0).leases[h2].rho
                 &&& self.pv(i).leases[h2].dfr == self.pv(0).leases[h2].dfr
+                &&& self.pv(i).leases[h2].stopped == self.pv(0).leases[h2].stopped
             } by {
                 assert(self.pv(i) == attached(mid.pv(i), toks, tabs[i], k));
                 assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
@@ -419,7 +420,7 @@ impl Coordinator {
                 let l2 = self.pv(0).leases[h2];
                 &&& (x as nat) < self.sv(j).p
                 &&& self.sv(j).holder[x as int] == Some(h2)
-                &&& l2.c > 0 ==> self.sv(j).w[x as int] == Some(l2.toks.subrange(0, l2.c as int))
+                &&& w_ok(l2, self.sv(j).w[x as int])
             } by {
                 assert(self.state@[j].valid());
                 assert(mid.sv(j).free_set().contains(sl[j]));
@@ -980,10 +981,18 @@ impl Coordinator {
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
             &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
             &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
+            &&& self.pv(i).leases[h].stopped == self.pv(0).leases[h].stopped
         } by {
             assert(self.pv(i) == o.pv(i));
             assert(o.pv(i).leases.contains_key(h));
         }
+        assert forall|j: int| 0 <= j < self.nst() implies {
+            &&& #[trigger] self.state@[j].valid()
+            &&& self.sv(j).p == self.cunits(self.np() + j)
+        } by {
+            assert(self.state@[j].valid());
+        }
+        self.lemma_pools_intro();
         assert(self.cfg_ok());
         assert(self.pools_ok());
         assert(self.own_ok());
@@ -1005,7 +1014,7 @@ impl Coordinator {
                 let l = self.pv(0).leases[h];
                 &&& (x as nat) < self.sv(j).p
                 &&& self.sv(j).holder[x as int] == Some(h)
-                &&& l.c > 0 ==> self.sv(j).w[x as int] == Some(l.toks.subrange(0, l.c as int))
+                &&& w_ok(l, self.sv(j).w[x as int])
             } by {
                 assert(o.slots@[h]@[j] == self.slots@[h]@[j]);
                 assert(self.sv(j) == o.sv(j));

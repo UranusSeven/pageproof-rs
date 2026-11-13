@@ -48,6 +48,8 @@ pub struct LeaseC {
     pub rho: usize,
     /// `X_h` is non-empty (D22).
     pub dfr: bool,
+    /// `stopped_h` (D25).
+    pub stopped: bool,
     /// Chain head: key of the last published complete block, or `Seed(ns)`.
     pub head: Digest,
 }
@@ -84,7 +86,7 @@ pub struct Manager {
 }
 
 pub open spec fn lease_view(l: LeaseC) -> LeaseV {
-    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@, rho: l.rho as nat, dfr: l.dfr }
+    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@, rho: l.rho as nat, dfr: l.dfr, stopped: l.stopped }
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {

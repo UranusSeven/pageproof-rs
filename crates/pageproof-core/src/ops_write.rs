@@ -96,9 +96,12 @@ pub open spec fn plan_ok_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>, ext: nat
 }
 
 pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<(Ticket, ExecutionPlan), Error>) -> bool {
-    let live = h.mgr == v.id && v.leases.contains_key(h.id);
+    let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
-    &&& !live ==> r is Err && r->Err_0 == Error::InvalidHandle
+    // A stopped lease accepts no new work (D25), checked first.
+    let live = live0 && !l.stopped;
+    &&& !live0 ==> r is Err && r->Err_0 == Error::InvalidHandle
+    &&& (live0 && l.stopped) ==> r is Err && r->Err_0 == Error::InvalidPhase
     &&& (live && l.pending.len() > 0) ==> r is Err && r->Err_0 == Error::Busy
     &&& (live && l.pending.len() == 0 && !(0 < n && l.c + n <= l.toks.len())) ==> r is Err && r->Err_0
         == Error::InvalidArgument
@@ -138,12 +141,15 @@ pub open spec fn begin_result_v(
     ddr: bool,
     r: Result<(Ticket, ExecutionPlan), Error>,
 ) -> bool {
-    let live = h.mgr == v.id && v.leases.contains_key(h.id);
+    let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
+    // A stopped lease accepts no new work (D25), checked first.
+    let live = live0 && !l.stopped;
     // D21: the queue holds at most δ + 1 tickets.
     let busy = l.pending.len() > v.cfg.delta;
     let ok = begin_args_ok(v, l, n as nat, drafts.len(), ext as nat, propose);
-    &&& !live ==> r is Err && r->Err_0 == Error::InvalidHandle
+    &&& !live0 ==> r is Err && r->Err_0 == Error::InvalidHandle
+    &&& (live0 && l.stopped) ==> r is Err && r->Err_0 == Error::InvalidPhase
     &&& (live && busy) ==> r is Err && r->Err_0 == Error::Busy
     &&& (live && !busy && !ok) ==> r is Err && r->Err_0 == Error::InvalidArgument
     &&& (live && !busy && ok) ==> (r is Ok <==> v.next_ticket < u64::MAX)
@@ -163,6 +169,7 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat, drafts: Seq<Toke
     requires
         inv(v, log),
         v.leases.contains_key(h),
+        !v.leases[h].stopped,
         v.leases[h].pending.len() <= v.cfg.delta,
         begin_args_ok(v, v.leases[h], n, drafts.len(), 0, propose),
         v.next_ticket < u64::MAX,
@@ -411,6 +418,9 @@ impl Manager {
             proof {
                 self.lemma_rep_dom();
             }
+            if self.leases.get(&h.id).unwrap().stopped {
+                return Err(Error::InvalidPhase);
+            }
             if self.leases.get(&h.id).unwrap().pending.len() > 0 {
                 return Err(Error::Busy);
             }
@@ -447,6 +457,7 @@ impl Manager {
         requires
             self.valid(),
             self@.leases.contains_key(h),
+            !self@.leases[h].stopped,
             self@.leases[h].pending.len() <= self@.cfg.delta,
         ensures
             r.0 as nat == pfront(self@, self@.leases[h]),
@@ -523,6 +534,9 @@ impl Manager {
             reveal(lease_ok);
             assert(lease_ok(v, log, h.id));
             assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
+        }
+        if self.leases.get(&h.id).unwrap().stopped {
+            return Err(Error::InvalidPhase);
         }
         let q = self.leases.get(&h.id).unwrap().pending.len();
         if q > self.cfg.delta {
@@ -668,7 +682,7 @@ impl Manager {
         ensures
             r.0 as nat == self@.leases[h].pending.len(),
             r.1 as nat == pfront(self@, self@.leases[h]),
-            r.1 as nat <= lhat(self@.leases[h]),
+            !self@.leases[h].stopped ==> r.1 as nat <= lhat(self@.leases[h]),
     {
         proof {
             self.lemma_valid();
@@ -735,14 +749,19 @@ pub open spec fn vmap_after(v: MgrV, l: LeaseV, a: nat, z: nat) -> spec_fn(int) 
 }
 
 /// Functional postcondition of C4 (§9.0 (c)), stated relationally.
-pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64) -> bool {
+/// C4's completion step. With `stop` (D25) the lease becomes stopped and its deferred tail empty;
+/// every ticket left in its queue is an orphan (I18).
+pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64, stop: bool) -> bool {
     let r = v.pend[t];
     let h = r.lease;
     let l = v.leases[h];
     let lo = r.a / v.b;
     let hi = r.z / v.b;
     &&& v2.same_config(v)
-    &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: l.pending.drop_first(), ..l })
+    &&& v2.leases == v.leases.insert(
+        h,
+        LeaseV { c: r.z, pending: l.pending.drop_first(), stopped: l.stopped || stop, dfr: l.dfr && !stop, ..l },
+    )
     &&& v2.pend == v.pend.remove(t)
     &&& v2.refs == v.refs
     &&& v2.own == v.own
@@ -783,19 +802,27 @@ pub open spec fn fin_untouched(v: MgrV, v2: MgrV, t: u64) -> bool {
 }
 
 pub open spec fn finish_result(v: MgrV, v2: MgrV, log2: Log, t: Ticket, c: Completion, r: Result<usize, Error>) -> bool {
+    finish_result_s(v, v2, log2, t, c, false, r)
+}
+
+/// C4 in one class, with or without `stop` (D25). An orphan is never completed here (`dropped`).
+pub open spec fn finish_result_s(v: MgrV, v2: MgrV, log2: Log, t: Ticket, c: Completion, stop: bool, r: Result<usize, Error>) -> bool {
     let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
-    // A ticket heading X_h needs its token bound first (D22, `bind_deferred`).
+    let st = v.leases[v.pend[t.id].lease].stopped;
+    // A ticket heading X_h needs its token bound first (D22, `bind_deferred`), unless it stops.
     let dfr = v.leases[v.pend[t.id].lease].dfr;
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
-    &&& (live && dfr) ==> r is Err && r->Err_0 == Error::InvalidArgument
-    &&& (live && !dfr) ==> r is Ok
+    &&& (live && st) ==> r is Err && r->Err_0 == Error::InvalidPhase
+    &&& (live && !st && dfr && !stop) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && !st && (!dfr || stop)) ==> r is Ok
     &&& r matches Ok(z) ==> {
         let pr = v.pend[t.id];
         let l = v.leases[pr.lease];
         &&& live
-        &&& !dfr
+        &&& !st
+        &&& (!dfr || stop)
         &&& z as nat == pr.z
-        &&& finish_rel(v, v2, t.id)
+        &&& finish_rel(v, v2, t.id, stop)
         // §9.0 (c): every slot of [a, z) now carries its causal prefix ...
         &&& forall|j: int| pr.a <= j < pr.z ==> (v2.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
         &&& forall|s: int|
@@ -849,6 +876,7 @@ pub proof fn lemma_finish_facts(v: MgrV, log: Log, t: u64)
         inv(v, log),
         v.pend.contains_key(t),
         v.leases[v.pend[t].lease].pending[0] == t,
+        !v.leases[v.pend[t].lease].stopped,
     ensures
         v.leases.contains_key(v.pend[t].lease),
         v.pend[t].a == v.leases[v.pend[t].lease].c,
@@ -890,14 +918,15 @@ pub proof fn lemma_finish_facts(v: MgrV, log: Log, t: u64)
     }
 }
 
-pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
+pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV, stop: bool)
     requires
         inv(v, log),
         log.submap_of(log2),
         v.pend.contains_key(t),
         v.leases[v.pend[t].lease].pending[0] == t,
-        !v.leases[v.pend[t].lease].dfr,
-        finish_rel(v, v2, t),
+        !v.leases[v.pend[t].lease].stopped,
+        !v.leases[v.pend[t].lease].dfr || stop,
+        finish_rel(v, v2, t, stop),
         v.pend[t].z / v.b > 0 ==> chain_logged(
             log2,
             v.ns,
@@ -1100,8 +1129,36 @@ impl Manager {
             || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
         }
+        if self.ticket_stopped(t.id) {
+            return Err(Error::InvalidPhase);
+        }
         if self.ticket_dfr(t.id) {
             return Err(Error::InvalidArgument);
+        }
+        Ok(self.finish_s(t, completion, false))
+    }
+
+    /// C4's completion step for head ticket `t` of a lease that is not stopped, with or without
+    /// `stop` (D25). Not public with `stop`: the coordinator's `finish_write` calls it.
+    // `completion` names the ticket in the contract only.
+    #[allow(unused_variables)]
+    pub(crate) fn finish_s(&mut self, t: Ticket, completion: Completion, stop: bool) -> (z: usize)
+        requires
+            old(self).valid(),
+            t.mgr == old(self).id,
+            completion.ticket == t,
+            old(self)@.pend.contains_key(t.id),
+            old(self)@.leases[old(self)@.pend[t.id].lease].pending[0] == t.id,
+            !old(self)@.leases[old(self)@.pend[t.id].lease].stopped,
+            !old(self)@.leases[old(self)@.pend[t.id].lease].dfr || stop,
+        ensures
+            final(self).valid(),
+            old(self).den_log().submap_of(final(self).den_log()),
+            finish_result_s(old(self)@, final(self)@, final(self).den_log(), t, completion, stop, Ok(z)),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
         }
         let ghost v = self@;
         let ghost log0 = self.den_log();
@@ -1263,9 +1320,17 @@ impl Manager {
         l.pending.remove(0);
         assert(l.pending@ =~= q0.drop_first());
         l.head = head;
+        // With `stop`, the lease is stopped and its deferred tail empties (D25).
+        if stop {
+            l.stopped = true;
+            l.dfr = false;
+        }
         self.leases.insert(hid, l);
         let ghost v2 = MgrV {
-            leases: v.leases.insert(hid, LeaseV { c: z as nat, pending: lv.pending.drop_first(), ..lv }),
+            leases: v.leases.insert(
+                hid,
+                LeaseV { c: z as nat, pending: lv.pending.drop_first(), stopped: lv.stopped || stop, dfr: lv.dfr && !stop, ..lv },
+            ),
             pend: v.pend.remove(t.id),
             vmap: vmap_after(v, lv, a as nat, z as nat),
             keys: self.keys@,
@@ -1275,8 +1340,8 @@ impl Manager {
         };
         let ghost log2 = self.log@@;
         proof {
-            assert(finish_rel(v, v2, t.id));
-            lemma_finish_inv(v, log0, log2, t.id, v2);
+            assert(finish_rel(v, v2, t.id, stop));
+            lemma_finish_inv(v, log0, log2, t.id, v2, stop);
         }
         self.g = Ghost(v2);
         proof {
@@ -1291,6 +1356,7 @@ impl Manager {
             assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
             }
             lemma_free_of(v.p, v.refs, v.own);
+            assert(v.leases[hid].pending[0] == t.id);
             // §9.0 (c)
             reveal(lease_ok);
             assert forall|j: int| a <= j < z implies #[trigger] (j / (v.b as int)) < lv.table.len() by {
@@ -1307,7 +1373,7 @@ impl Manager {
                 lemma_chain_denotes(log2, v.ns, lv.toks, v.b, i2 as nat);
             }
         }
-        Ok(z)
+        z
     }
 }
 
@@ -1353,6 +1419,7 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, xs: Seq<Token>)
         inv(v, log),
         v.pend.contains_key(t),
         v.leases[v.pend[t].lease].pending[0] == t,
+        !v.leases[v.pend[t].lease].stopped,
         xs.len() <= v.pend[t].drafts.len(),
     ensures
         inv(committed_t(v, t, xs), log),
@@ -1480,6 +1547,7 @@ impl Manager {
             old(self).valid(),
             old(self)@.pend.contains_key(t),
             old(self)@.leases[old(self)@.pend[t].lease].pending[0] == t,
+            !old(self)@.leases[old(self)@.pend[t].lease].stopped,
             xs@.len() <= old(self)@.pend[t].drafts.len(),
         ensures
             final(self).valid(),
@@ -1563,6 +1631,7 @@ impl Manager {
             old(self).valid(),
             old(self)@.pend.contains_key(t),
             old(self)@.leases[old(self)@.pend[t].lease].pending[0] == t,
+            !old(self)@.leases[old(self)@.pend[t].lease].stopped,
             n <= old(self)@.pend[t].drafts.len(),
         ensures
             final(self).valid(),
@@ -1589,9 +1658,12 @@ pub open spec fn finish_n_result(
     n: usize,
     r: Result<usize, Error>,
 ) -> bool {
-    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
+    let live0 = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
+    let st = v.leases[v.pend[t.id].lease].stopped;
+    let live = live0 && !st;
     let dfr = v.leases[v.pend[t.id].lease].dfr;
-    &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
+    &&& !live0 ==> r is Err && r->Err_0 == Error::InvalidTicket
+    &&& (live0 && st) ==> r is Err && r->Err_0 == Error::InvalidPhase
     &&& (live && (dfr || n > v.pend[t.id].drafts.len())) ==> r is Err && r->Err_0 == Error::InvalidArgument
     &&& (live && !dfr && n <= v.pend[t.id].drafts.len()) ==> r is Ok
     &&& r is Ok ==> live && !dfr && n <= v.pend[t.id].drafts.len() && finish_result(committed(v, t.id, n as nat), v2, log2, t, c, r)
@@ -1616,6 +1688,9 @@ impl Manager {
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id
             || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
+        }
+        if self.ticket_stopped(t.id) {
+            return Err(Error::InvalidPhase);
         }
         if self.ticket_dfr(t.id) || n > self.pend.get(&t.id).unwrap().drafts.len() {
             return Err(Error::InvalidArgument);
@@ -1954,6 +2029,157 @@ impl Manager {
                         lemma_chain_key_prefix(v.seed(), lv.toks, lc.toks@, v.b, (q - 1) as nat);
                     }
                 }
+            }
+        }
+    }
+}
+
+
+/// D25: an orphan completes. It leaves the front of its stopped lease's queue and credits,
+/// publishes and binds nothing.
+pub open spec fn dropped(v: MgrV, t: u64) -> MgrV {
+    let h = v.pend[t].lease;
+    let l = v.leases[h];
+    MgrV { leases: v.leases.insert(h, LeaseV { pending: l.pending.drop_first(), ..l }), pend: v.pend.remove(t), ..v }
+}
+
+/// `Valid` is preserved by completing an orphan.
+pub proof fn lemma_drop_inv(v: MgrV, log: Log, t: u64)
+    requires
+        inv(v, log),
+        v.pend.contains_key(t),
+        v.leases[v.pend[t].lease].pending[0] == t,
+        v.leases[v.pend[t].lease].stopped,
+    ensures
+        inv(dropped(v, t), log),
+{
+    reveal(lease_ok);
+    reveal(page_ok);
+    reveal(pend_ok);
+    let v2 = dropped(v, t);
+    let h = v.pend[t].lease;
+    let l = v.leases[h];
+    let l2 = v2.leases[h];
+    assert(pend_ok(v, t));
+    assert(lease_ok(v, log, h));
+    // A stopped lease has at most one orphan (I18): its queue empties.
+    assert(l.pending.len() == 1);
+    assert(l2.pending =~= Seq::<u64>::empty());
+    assert forall|i: nat| i < l2.table.len() implies #[trigger] blk_ok(v2, log, l2, i) by {
+        assert(blk_ok(v, log, l, i));
+    }
+    assert(lease_ok(v2, log, h));
+    assert forall|h2: u64| #[trigger] v2.leases.contains_key(h2) implies lease_ok(v2, log, h2) by {
+        if h2 != h {
+            assert(lease_ok(v, log, h2));
+            let lo = v.leases[h2];
+            assert forall|i: int| 0 <= i < lo.pending.len() implies v2.pend.contains_key(#[trigger] lo.pending[i])
+                && v2.pend[lo.pending[i]] == v.pend[lo.pending[i]] by {
+                assert(v.pend.contains_key(lo.pending[i]));
+                assert(lo.pending[i] != t);
+            }
+            lemma_lease_frame(v, v2, log, log, h2);
+        }
+    }
+    assert forall|x: PageId| (x as nat) < v2.p implies #[trigger] page_ok(v2, log, x) by {
+        assert(page_ok(v, log, x));
+        assert(hold_ok(v, x));
+        assert forall|h2: u64| #[trigger] v2.holders[x as int].contains(h2) <==> (v2.leases.contains_key(h2)
+            && v2.leases[h2].table.contains(x)) by {
+        }
+        if v.keys[x as int] is Some {
+            lemma_pub_frame(v, v2, log, log, x);
+        }
+    }
+    assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
+        assert(pend_ok(v, t2));
+        if v.pend[t2].lease == h {
+            let i = choose|i: int| 0 <= i < l.pending.len() && l.pending[i] == t2;
+            assert(false);
+        } else {
+            lemma_pend_frame(v, v2, t2);
+        }
+    }
+    assert(v2.leases.dom() =~= v.leases.dom());
+    lemma_last_frame(v, v2);
+}
+
+impl Manager {
+    /// `stopped_h` of a live lease.
+    pub fn lease_stopped(&self, h: u64) -> (r: bool)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r == self@.leases[h].stopped,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.leases.get(&h).unwrap().stopped
+    }
+
+    /// `stopped` of the lease of pending ticket `t`: `t` is an orphan (I18).
+    pub fn ticket_stopped(&self, t: u64) -> (r: bool)
+        requires
+            self.valid(),
+            self@.pend.contains_key(t),
+        ensures
+            r == self@.leases[self@.pend[t].lease].stopped,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(pend_ok);
+            assert(pend_ok(self@, t));
+        }
+        let hid = self.pend.get(&t).unwrap().lease;
+        self.leases.get(&hid).unwrap().stopped
+    }
+
+    /// D25: complete orphan `t`, the oldest ticket of its stopped lease. Not public: the
+    /// coordinator's `finish_write` of an orphan.
+    pub(crate) fn drop_orphan(&mut self, t: u64)
+        requires
+            old(self).valid(),
+            old(self)@.pend.contains_key(t),
+            old(self)@.leases[old(self)@.pend[t].lease].pending[0] == t,
+            old(self)@.leases[old(self)@.pend[t].lease].stopped,
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            final(self)@ == dropped(old(self)@, t),
+            final(self).id == old(self).id,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log = self.den_log();
+        proof {
+            reveal(pend_ok);
+            assert(pend_ok(v, t));
+            lemma_drop_inv(v, log, t);
+        }
+        let pr = self.pend.remove(&t).unwrap();
+        let hid = pr.lease;
+        let mut l = self.leases.remove(&hid).unwrap();
+        let ghost q0 = l.pending@;
+        l.pending.remove(0);
+        assert(l.pending@ =~= q0.drop_first());
+        self.leases.insert(hid, l);
+        let ghost v2 = dropped(v, t);
+        self.g = Ghost(v2);
+        proof {
+            assert(self.leases@.dom() =~= v2.leases.dom());
+            assert(self.pend@.dom() =~= v2.pend.dom());
+            assert forall|h2: u64| #[trigger] self.leases@.contains_key(h2) implies lease_view(self.leases@[h2])
+                == v2.leases[h2] && Self::head_ok(v2, self.leases@[h2]) by {
+                assert(Self::head_ok(v, old(self).leases@[h2]));
+            }
+            assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
             }
         }
     }

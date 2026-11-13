@@ -670,15 +670,17 @@ fn extend_after_every_draft_accepted() {
 }
 
 #[test]
-fn stop_is_not_yet_supported() {
-    // D25 lands with continuations; until then a completion with `stop` is rejected.
+fn stop_after_a_verify_without_zos() {
+    // D25 with δ = 0: stop commits the accepted prefix and stops the lease.
     let (mut co, h) = computed_lease(4, 4, 5, 9);
     co.extend(h, &[30]).unwrap();
     let t = verify(&mut co, h, &[31]);
-    let mut c = done(t);
+    let mut c = done_n(t, 1);
     c.stop = true;
-    assert_eq!(co.finish_write(t, c).err(), Some(Error::InvalidArgument));
-    co.finish_write(t, done(t)).unwrap();
+    co.finish_write(t, c).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert!(iv.stopped && iv.pending.is_none());
+    assert_eq!(co.extend(h, &[32]).err(), Some(Error::InvalidPhase));
     co.release(h).unwrap();
 }
 
@@ -1177,4 +1179,118 @@ fn continuation_without_extend_deferred_finishes_with_a_known_token() {
     let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![103, 104]), true).unwrap();
     co.finish_write(t2, done_n(t2, 1)).unwrap();
     co.release(h).unwrap();
+}
+
+// ---- v0.6 stop and orphans (D25, I18) ----
+
+fn stop_comp(t: pageproof_core::types::Ticket, n: usize, x: Option<u32>, drafts: Vec<u32>) -> CoordCompletion {
+    CoordCompletion { ticket: t, accepted: n, token: x, drafts, stop: true }
+}
+
+/// The §7 setup: verify t1 with `propose`, extend_deferred, continuation t2 with `Deferred(2)`.
+fn verify_and_continuation(co: &mut Coordinator) -> (Handle, pageproof_core::types::Ticket, pageproof_core::types::Ticket) {
+    let h = lease_l7(co);
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+    (h, t1, t2)
+}
+
+#[test]
+fn stop_at_a_draft_orphans_the_continuation() {
+    // EOS at d1 while the device accepted both drafts: finish_write(t1, n=1, stop).
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    assert_eq!(co.finish_write(t1, stop_comp(t1, 1, None, vec![])).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.deferred, iv.stopped), (8, 8, false, true));
+    assert_eq!(iv.pending, Some(t2));
+    // A stopped lease accepts no new work, before and after its queue empties.
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![]), false).err(), Some(Error::InvalidPhase));
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::InvalidPhase));
+    assert_eq!(co.release(h).err(), Some(Error::Busy));
+    // The orphan accepts any completion and changes nothing but the queue.
+    let free = co.arena().free_units.clone();
+    assert_eq!(co.finish_write(t2, comp(t2, 7, Some(9), vec![1, 2, 3])).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.pending), (8, 8, None));
+    assert_eq!(co.arena().free_units, free);
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![]), false).err(), Some(Error::InvalidPhase));
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    // Release returns T_h, which ends at the committed prefix.
+    let snap = co.release(h).unwrap();
+    assert_eq!(&snap[7..], &[101]);
+}
+
+#[test]
+fn stop_at_the_bonus_token_appends_it() {
+    // EOS as t1's bonus: finish_write(t1, n=1, x=EOS, stop) appends d1, EOS; t2 is an orphan.
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    assert_eq!(co.finish_write(t1, stop_comp(t1, 1, Some(999), vec![])).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.stopped), (9, 8, true));
+    co.finish_write(t2, done(t2)).unwrap();
+    let snap = co.release(h).unwrap();
+    assert_eq!(&snap[7..], &[101, 999]);
+}
+
+#[test]
+fn stop_with_an_empty_queue_behind() {
+    // §7: stop with no ticket behind it (any δ): stopped with no orphans; release succeeds at once.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 2, 0, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(5, 41)).unwrap();
+    let (t, _) = co.begin_write(h, 5, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.finish_write(t, stop_comp(t, 0, Some(7), vec![])).unwrap(), 5);
+    let iv = co.inspect(h).unwrap();
+    // Without X_h the token is the caller's; the lease is stopped.
+    assert_eq!((iv.len, iv.computed, iv.pending, iv.stopped), (5, 5, None, true));
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn stop_still_checks_its_completion() {
+    // A completion with stop that is not an orphan's still needs n <= k (C4).
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    assert_eq!(co.finish_write(t1, stop_comp(t1, 3, None, vec![])).err(), Some(Error::InvalidArgument));
+    // Out of order stays InvalidTicket, orphan or not.
+    assert_eq!(co.finish_write(t2, stop_comp(t2, 0, None, vec![])).err(), Some(Error::InvalidTicket));
+    co.finish_write(t1, stop_comp(t1, 2, None, vec![])).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn stopped_lease_keeps_what_it_committed() {
+    // What was committed up to c'_h is kept and published: block 1 (4-7) is a cache hit.
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    co.finish_write(t1, stop_comp(t1, 1, None, vec![])).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    let mut snap = co.release(h).unwrap();
+    assert_eq!(snap.len(), 8);
+    // A longer request over the same prefix hits both committed blocks.
+    snap.push(1);
+    let (h2, cached, _) = co.attach(&snap).unwrap();
+    assert_eq!(cached, 8);
+    co.release(h2).unwrap();
+}
+
+#[test]
+fn stop_on_a_hybrid_lease() {
+    // A hybrid lease (one state class): after stop, release still frees its slot.
+    let mut co = Coordinator::create(8, 64, &[16], &[16], &[8], 4, 2, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(4, 42)).unwrap();
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), true).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(1), false).unwrap();
+    assert!(!p2.init);
+    co.finish_write(t1, stop_comp(t1, 0, Some(5), vec![])).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    let free = co.arena().free_units.clone();
+    co.release(h).unwrap();
+    assert!(co.arena().free_units[2] > free[2]);
 }

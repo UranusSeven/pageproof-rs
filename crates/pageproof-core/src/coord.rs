@@ -450,6 +450,13 @@ pub struct Coordinator {
     pub(crate) slots: HashMap<u64, Vec<usize>>,
 }
 
+/// I15: the live slot of a lease holds the state after `T_h[0:c_h]` once `c_h > 0`, and `⊥` once
+/// the lease is stopped (D25).
+pub open spec fn w_ok(l: LeaseV, w: Option<Seq<Token>>) -> bool {
+    &&& (!l.stopped && l.c > 0) ==> w == Some(l.toks.subrange(0, l.c as int))
+    &&& l.stopped ==> w is None
+}
+
 impl Coordinator {
     /// Public view.
     pub open(crate) spec fn view(&self) -> CoordV {
@@ -656,6 +663,70 @@ impl Coordinator {
             }
     }
 
+    /// `pools_ok` of a fresh coordinator: every paged class shares `cfg` and `ns`.
+    pub(crate) proof fn lemma_create_pools(&self, cfg: PCfg, ns: Seq<u8>)
+        requires
+            cfg_rel(cfg, self.np()),
+            self.paged@.len() == self.np(),
+            forall|k: int|
+                0 <= k < self.np() ==> {
+                    &&& (#[trigger] self.paged@[k]).valid()
+                    &&& self.paged@[k]@.p == self.cunits(k)
+                    &&& self.paged@[k]@.b == self.b as nat
+                    &&& self.paged@[k]@.ns == ns
+                    &&& self.paged@[k]@.cfg == cfg
+                },
+            forall|j: int|
+                0 <= j < self.nst() ==> {
+                    &&& #[trigger] self.state@[j].valid()
+                    &&& self.state@[j]@.p == (self.nslab as nat) * (self.per@[self.np() + j] as nat)
+                },
+            self.np() >= 1,
+        ensures
+            self.pools_ok(),
+    {
+        assert forall|j: int| 0 <= j < self.nst() implies {
+            &&& #[trigger] self.state@[j].valid()
+            &&& self.sv(j).p == self.cunits(self.np() + j)
+        } by {
+            assert(self.state@[j].valid());
+        }
+        assert(self.paged@[0].valid());
+        assert forall|i: int| 0 <= i < self.np() implies {
+            &&& #[trigger] self.paged@[i].valid()
+            &&& self.pv(i).p == self.cunits(i)
+            &&& self.pv(i).b == self.b as nat
+            &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
+        } by {
+            assert(self.paged@[i].valid());
+        }
+        self.lemma_pools_intro();
+    }
+
+    /// `pools_ok` from its two parts; kept apart so the restatement is checked in a small context.
+    pub(crate) proof fn lemma_pools_intro(&self)
+        requires
+            forall|i: int|
+                0 <= i < self.np() ==> {
+                    &&& #[trigger] self.paged@[i].valid()
+                    &&& self.pv(i).p == self.cunits(i)
+                    &&& self.pv(i).b == self.b as nat
+                    &&& self.pv(i).ns == self.pv(0).ns
+                    &&& self.pv(i).cfg == self.pv(0).cfg
+                    &&& cfg_rel(self.pv(i).cfg, self.np())
+                },
+            forall|j: int|
+                0 <= j < self.nst() ==> {
+                    &&& #[trigger] self.state@[j].valid()
+                    &&& self.sv(j).p == self.cunits(self.np() + j)
+                },
+        ensures
+            self.pools_ok(),
+    {
+    }
+
     /// I12/I13: slab ownership, `FS`, and per-unit ownership derived from the slab owner.
     pub open(crate) spec fn own_ok(&self) -> bool {
         &&& self.owner@.len() == self.nslab
@@ -685,6 +756,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
                 &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
                 &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
+                &&& self.pv(i).leases[h].stopped == self.pv(0).leases[h].stopped
             }
         &&& forall|h: u64|
             #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].rho, self.b as nat))
@@ -703,7 +775,7 @@ impl Coordinator {
                 let l = self.pv(0).leases[h];
                 &&& (x as nat) < self.sv(j).p
                 &&& self.sv(j).holder[x as int] == Some(h)
-                &&& l.c > 0 ==> self.sv(j).w[x as int] == Some(l.toks.subrange(0, l.c as int))
+                &&& w_ok(l, self.sv(j).w[x as int])
             }
         &&& forall|j: int, x: int|
             #![trigger self.sv(j).holder[x]]
@@ -1225,6 +1297,7 @@ impl Coordinator {
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
             &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
             &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
+            &&& self.pv(i).leases[h].stopped == self.pv(0).leases[h].stopped
         } by {
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
             assert(self.pv(0) == (MgrV { own: self.pv(0).own, keys: self.pv(0).keys, ..o.pv(0) }));
@@ -1253,7 +1326,7 @@ impl Coordinator {
             let l = self.pv(0).leases[h];
             &&& (x as nat) < self.sv(j).p
             &&& self.sv(j).holder[x as int] == Some(h)
-            &&& l.c > 0 ==> self.sv(j).w[x as int] == Some(l.toks.subrange(0, l.c as int))
+            &&& w_ok(l, self.sv(j).w[x as int])
         } by {
             let x = o.slots@[h]@[j];
             assert(o.sv(j).holder[x as int] == Some(h));
@@ -1625,32 +1698,24 @@ impl Coordinator {
                     assert(all[k] == co.unit@[k]);
                 }
             }
-            assert(co.pools_ok()) by {
-                assert forall|k: int| 0 <= k < co.np() implies {
-                    &&& #[trigger] co.paged@[k].valid()
-                    &&& co.pv(k).p == co.cunits(k)
-                    &&& co.pv(k).b == co.b as nat
-                    &&& co.pv(k).ns == co.pv(0).ns
-                    &&& co.pv(k).cfg == co.pv(0).cfg
-                    &&& cfg_rel(co.pv(k).cfg, co.np())
-                } by {
-                    assert(co.paged@ == pg0);
-                    assert(pg0[k].valid());
-                    assert(pg0[0].valid());
-                    assert(pg0[k]@.ns == ns@);
-                    assert(pg0[0]@.ns == ns@);
-                    assert(pg0[k]@.cfg == cfg0@);
-                    assert(pg0[0]@.cfg == cfg0@);
-                    assert(co.np() == pall@.len());
-                    assert(cfg_rel(cfg0@, co.np()));
-                }
-                assert forall|k: int| 0 <= k < co.nst() implies {
-                    &&& #[trigger] co.state@[k].valid()
-                    &&& co.sv(k).p == co.cunits(co.np() + k)
-                } by {
-                    assert(co.state@[k].valid());
-                }
+            assert(co.paged@ == pg0);
+            assert(co.np() == pall@.len());
+            assert(cfg_rel(cfg0@, co.np()));
+            assert forall|k: int| 0 <= k < co.np() implies {
+                &&& (#[trigger] co.paged@[k]).valid()
+                &&& co.paged@[k]@.p == co.cunits(k)
+                &&& co.paged@[k]@.b == co.b as nat
+                &&& co.paged@[k]@.ns == ns@
+                &&& co.paged@[k]@.cfg == cfg0@
+            } by {
+                assert(pg0[k].valid());
+                assert(pg0[k]@.ns == ns@);
+                assert(pg0[k]@.cfg == cfg0@);
+                assert(co.pv(k) == co.paged@[k]@);
             }
+            assert(co.state@ == st);
+            assert(co.per@ == per@);
+            co.lemma_create_pools(cfg0@, ns@);
             assert(co.own_ok()) by {
                 assert forall|s2: usize| #[trigger] co.fs@.contains(s2) <==> ((s2 as nat) < co.nslab && co.owner@[s2 as int]
                     == 0) by {}

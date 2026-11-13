@@ -67,8 +67,10 @@ pub open spec fn pfront_x(v: MgrV, l: LeaseV) -> nat {
 
 /// The complete C2 (`dfr` false) and C2b (`dfr`, empty suffix) contracts.
 pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, dfr: bool, r: Result<PageTableView, Error>) -> bool {
-    let live = h.mgr == v.id && v.leases.contains_key(h.id);
+    let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
+    // A stopped lease accepts no new work (D25), checked first.
+    let live = live0 && !l.stopped;
     let l2 = glen(l, suffix, dfr);
     let d = cdiv(l2 + v.cfg.mu, v.b) - l.table.len();
     // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); every
@@ -77,7 +79,8 @@ pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, d
     let busy = grow_busy(v, l, dfr);
     let ph = !l.dfr && pfront_x(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
     let arg = dfr || suffix.len() > 0;
-    &&& !live ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
+    &&& !live0 ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
+    &&& (live0 && l.stopped) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
     &&& (live && busy) ==> r == Err::<PageTableView, Error>(Error::Busy)
     &&& (live && !busy && !ph) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
     &&& (live && !busy && ph && !arg) ==> r == Err::<PageTableView, Error>(Error::InvalidArgument)
@@ -111,6 +114,7 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
         v.leases.contains_key(h),
         !grow_busy(v, v.leases[h], dfr),
         !v.leases[h].dfr,
+        !v.leases[h].stopped,
         pfront_x(v, v.leases[h]) == v.leases[h].toks.len(),
         dfr ==> suffix.len() == 0 && v.leases[h].pending.len() > 0,
         !dfr ==> suffix.len() > 0,
@@ -456,6 +460,9 @@ impl Manager {
         }
         let ghost v = self@;
         let ghost log = self.den_log();
+        if self.leases.get(&h.id).unwrap().stopped {
+            return Err(Error::InvalidPhase);
+        }
         let (l_len, l_c, q, m, l_dfr) = {
             let l = self.leases.get(&h.id).unwrap();
             (l.toks.len(), l.c, l.pending.len(), l.table.len(), l.dfr)

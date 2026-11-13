@@ -80,7 +80,8 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& h < v.next_handle
     &&& 1 <= l.toks.len()
     &&& lhat(l) <= l.rho
-    &&& l.rho <= lhat(l) + v.cfg.mu
+    // A stopped lease keeps its reach (I16).
+    &&& !l.stopped ==> l.rho <= lhat(l) + v.cfg.mu
     &&& l.rho <= v.p * v.b
     &&& l.toks.len() <= v.p * v.b
     &&& blocks_for(l.rho, v.b, l.table.len())
@@ -89,7 +90,9 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& l.c <= l.toks.len()
     // I16 (room to issue): with input left, the reach covers the slack and a new ticket's drafts
     // and proposal rows, μ − δλ = λ + λ·[Cx ≠ ∅].
-    &&& pfront(v, l) < lhat(l) ==> lhat(l) + sdr(v, l) + v.cfg.mu <= l.rho + dlam(v.cfg)
+    &&& (!l.stopped && pfront(v, l) < lhat(l)) ==> lhat(l) + sdr(v, l) + v.cfg.mu <= l.rho + dlam(v.cfg)
+    // I18: a stopped lease has an empty deferred tail and at most one orphan (δ <= 1).
+    &&& l.stopped ==> !l.dfr && l.pending.len() <= 1
     &&& forall|j: int|
         0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
     &&& forall|i: nat| i < l.table.len() ==> #[trigger] blk_ok(v, log, l, i)
@@ -156,10 +159,14 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     &&& v.leases[r.lease].pending[0] == t ==> r.a == v.leases[r.lease].c
     &&& v.leases[r.lease].c <= r.a
     // A continuation's input is the deferred position (D24), so z <= L̂_h.
-    &&& r.a < r.z <= lhat(v.leases[r.lease])
+    // An orphan's window may lie past L̂_h (D25).
+    &&& r.a < r.z
+    &&& !v.leases[r.lease].stopped ==> r.z <= lhat(v.leases[r.lease])
     // D16: drafts follow the whole known input, or, for a continuation, the deferred position,
     // and fit the reservation (D18, I16).
-    &&& r.drafts.len() > 0 ==> r.z == v.leases[r.lease].toks.len() || r.z == lhat(v.leases[r.lease])
+    &&& (!v.leases[r.lease].stopped && r.drafts.len() > 0) ==> r.z == v.leases[r.lease].toks.len() || r.z == lhat(
+        v.leases[r.lease],
+    )
     &&& r.drafts.len() <= v.cfg.lam
     &&& r.z + r.drafts.len() <= v.leases[r.lease].rho
 }
