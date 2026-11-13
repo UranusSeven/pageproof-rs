@@ -101,6 +101,13 @@ and verified; it is the paged-class building block of the `Coordinator`.
   never succeeds with `δ = 0`. `create_empty` also requires `λ + δλ ≤ μ`, which every coordinator
   configuration satisfies.
 - **Reclaim choice is greedy** (D9 leaves it open); `plan_rel` proves the counts.
+- **Two §7 slab rows can't be exercised through the coordinator.** Without a state class no slab
+  is ever reclaimed: the paged classes grow in lockstep, so when one class is short (`F < d`), every
+  other class has fewer than `d + n` free units and can't give up a slab. With a state class there
+  are no hits (D13). So "a reclaimable slab holds the only free candidate for a hit" (Prot under
+  pressure) can't happen, and "reclaim revokes keys" can't show as a lost hit. The `Prot` and
+  revocation rules are still proved (`slabplan.rs`, `reclaim_range`). Revocation is also tested
+  on one paged class (`edge_cases.rs::reclaim_revokes_the_keys_of_its_range`).
 - **State units are not cleared.** Freed, reclaimed and stopped slots get `W = ⊥`; E10 makes the
   executor initialise a slot when `init` is set.
 - **`Coordinator::create` caps the class count at 2¹⁶** and each class at `N·n_c·B ≤ 2⁴⁰` token

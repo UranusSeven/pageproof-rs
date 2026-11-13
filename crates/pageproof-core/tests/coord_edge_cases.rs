@@ -222,9 +222,11 @@ fn reclaim_idle_keyed_slab_for_state() {
 #[test]
 fn release_leaves_idle_keyed_slabs_reclaimable() {
     // Paged-only: after release, idle keyed slabs count as reclaimable while their blocks remain
-    // hits. (Without a state class no paged slab is ever reclaimed: every paged class grows in
-    // lockstep, so none is ever short while another has an idle slab to spare.) Class 0: 1
-    // page/slab; class 1: 4 pages/slab.
+    // hits. Without a state class no paged slab is ever reclaimed: every paged class grows in
+    // lockstep, so none is ever short while another has an idle slab to spare. With a state class
+    // there are no hits (D13), so a coordinator can't show that reclaim revokes keys;
+    // `edge_cases.rs::reclaim_revokes_the_keys_of_its_range` checks it on one paged class.
+    // Class 0: 1 page/slab; class 1: 4 pages/slab.
     let mut co = Coordinator::create(3, 64, &[64, 16], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 5);
     // Lease A (2 blocks): class 0 takes 2 slabs, class 1 takes 1 slab. FS = 0.
@@ -283,14 +285,18 @@ fn reclaim_when_free_slabs_run_out() {
 }
 
 #[test]
-fn prot_keeps_hit_slab() {
-    // Class 0: unit 16 (4/slab). Class 1: unit 32 (2/slab). 3 slabs.
+fn reattach_hits_the_cached_pages_of_idle_slabs() {
+    // Re-attach takes its hits from idle keyed slabs. The §7 row "a reclaimable slab holds the only
+    // free candidate for a hit position" (Prot under pressure) has no test because it can't
+    // happen: Prot is non-empty only when k* > 0, which needs no state class, and without a state
+    // class no slab is ever reclaimed. Class 0: unit 16 (4/slab). Class 1: unit 32 (2/slab).
+    // 3 slabs.
     let mut co = Coordinator::create(3, 64, &[16, 32], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 7);
     let (ha, _, va) = co.attach(&t).unwrap();
     compute_all(&mut co, ha);
     co.release(ha).unwrap();
-    // The hit candidates for block 0 lie in idle slabs; re-attaching must not reclaim them.
+    // The hit candidates for block 0 lie in idle slabs; re-attaching reuses them.
     let (hb, cb, vb) = co.attach(&t).unwrap();
     assert_eq!(cb, 4);
     assert_eq!(vb.tables[0][0], va.tables[0][0]);
