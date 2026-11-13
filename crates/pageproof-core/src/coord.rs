@@ -38,13 +38,43 @@ pub open spec fn cfg_rel(c: PCfg, np: nat) -> bool {
     &&& c.lam <= max_slots()
     &&& c.delta <= 1
     &&& c.mu == (if c.delta == 1 { c.lam + c.lam } else { c.lam }) + (if c.ntarget < np { c.lam } else { 0 })
-    // Stage B2a: no reservation yet.
-    &&& c.lam == 0
+}
+
+/// `n_c = S / u_c` for every class.
+pub open spec fn per_of(sbytes: nat, units: Seq<usize>) -> Seq<usize> {
+    Seq::new(units.len(), |c: int| (sbytes / (units[c] as nat)) as usize)
 }
 
 /// `Fits(m)` of §3.1: a lease of `m` blocks fits in an otherwise empty arena.
 pub open spec fn fits(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m: nat) -> bool {
     psum(per, np as int, m) + nstate <= nslab
+}
+
+/// `psum` is monotone in the block count.
+pub proof fn lemma_psum_mono(per: Seq<usize>, k: int, m1: nat, m2: nat)
+    requires
+        m1 <= m2,
+        forall|i: int| 0 <= i < k ==> #[trigger] per[i] >= 1,
+    ensures
+        psum(per, k, m1) <= psum(per, k, m2),
+    decreases k,
+{
+    if k > 0 {
+        lemma_psum_mono(per, k - 1, m1, m2);
+        lemma_cdiv_mono(m1, m2, per[k - 1] as nat);
+    }
+}
+
+/// `Fits` is monotone: a smaller lease fits whenever a larger one does.
+pub proof fn lemma_fits_mono(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m1: nat, m2: nat)
+    requires
+        m1 <= m2,
+        fits(per, np, nstate, nslab, m2),
+        forall|i: int| 0 <= i < np ==> #[trigger] per[i] >= 1,
+    ensures
+        fits(per, np, nstate, nslab, m1),
+{
+    lemma_psum_mono(per, np as int, m1, m2);
 }
 
 pub proof fn lemma_psum_ge(per: Seq<usize>, k: int, m: nat, i: int)
@@ -138,6 +168,24 @@ impl CoordV {
 
     pub open spec fn fits_m(self, m: nat) -> bool {
         fits(self.per, self.np, self.nst(), self.nslab, m)
+    }
+
+    /// The shared configuration (I10): `μ`, `λ`, `δ` and the number of target classes.
+    pub open spec fn mu(self) -> nat {
+        self.paged[0].cfg.mu
+    }
+
+    pub open spec fn lam(self) -> nat {
+        self.paged[0].cfg.lam
+    }
+
+    pub open spec fn delta(self) -> nat {
+        self.paged[0].cfg.delta
+    }
+
+    /// Blocks covering the reach `L + μ` of an input of length `L` (D18).
+    pub open spec fn reach_blocks(self, l: nat) -> nat {
+        cdiv(l + self.mu(), self.b)
     }
 
     /// `FS`.
@@ -614,7 +662,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
             }
         &&& forall|h: u64|
-            #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].toks.len(), self.b as nat))
+            #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].rho, self.b as nat))
     }
 
     /// I14/I15: one exclusive live slot per lease and state class, holding the state after
@@ -1225,15 +1273,29 @@ pub open spec fn cfg_accepts(nslab: nat, sbytes: nat, b: nat, pu: Seq<usize>, su
 }
 
 impl Coordinator {
-    /// C0. `create(N, S, classes, B, Namespace)`. Paged classes are `pu` (in order), then state
-    /// classes `su`. Every slab starts free.
-    pub fn create(nslab: usize, sbytes: usize, pu: &[usize], su: &[usize], b: usize, ns: &[u8]) -> (r: Result<
-        Coordinator,
-        Error,
-    >)
+    /// C0. `create(N, S, classes, B, λ, δ, Namespace)`. Target paged classes are `pu` (in order),
+    /// drafter paged classes `du`, then state classes `su`. The reservation margin is
+    /// `μ = (δ + 1)·λ`, plus `λ` with drafter classes (D18). Every slab starts free.
+    ///
+    /// This stage supports `du = []` and `δ = 0` only; other values return ConfigError.
+    pub fn create(
+        nslab: usize,
+        sbytes: usize,
+        pu: &[usize],
+        du: &[usize],
+        su: &[usize],
+        b: usize,
+        lambda: usize,
+        delta: usize,
+        ns: &[u8],
+    ) -> (r: Result<Coordinator, Error>)
         ensures
             r matches Ok(co) ==> {
                 &&& co.inv()
+                &&& co@.lam() == lambda
+                &&& co@.mu() == lambda
+                &&& co@.delta() == delta
+                &&& co@.fits_m(cdiv(1 + co@.mu(), b as nat))
                 &&& co@.nslab == nslab
                 &&& co@.sbytes == sbytes
                 &&& co@.b == b
@@ -1250,7 +1312,15 @@ impl Coordinator {
             !cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@) ==> r == Err::<Coordinator, Error>(
                 Error::ConfigError,
             ),
+            (du.len() > 0 || delta > 0 || lambda as nat > max_slots()) ==> r == Err::<Coordinator, Error>(Error::ConfigError),
+            // C0: not even a one-token lease (with its reservation) could attach.
+            (cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@) && du.len() == 0 && delta == 0
+                && lambda as nat <= max_slots() && !fits(per_of(sbytes as nat, pu@ + su@), pu@.len(), su@.len(), nslab as nat,
+                cdiv(1 + lambda as nat, b as nat))) ==> r is Err,
     {
+        if du.len() > 0 || delta > 0 || lambda > MAX_SLOTS as usize {
+            return Err(Error::ConfigError);
+        }
         if nslab == 0 || sbytes == 0 || b == 0 || pu.len() == 0 || pu.len() >= 0x1_0000 || su.len() >= 0x1_0000
             - pu.len() || ns.len() > u32::MAX as usize {
             return Err(Error::ConfigError);
@@ -1348,8 +1418,8 @@ impl Coordinator {
             Some(id) => id,
             None => return Err(Error::IdentifierExhausted),
         };
-        // Every paged class shares one configuration (I10).
-        let ghost cfg0 = PCfg { mu: 0, lam: 0, delta: 0, ntarget: pu@.len() };
+        // Every paged class shares one configuration (I10): μ = λ with no drafters and δ = 0.
+        let cfg0 = PCfgC { mu: lambda, lam: lambda, delta: 0, ntarget: pu.len() };
         // Paged classes.
         let mut paged: Vec<Manager> = Vec::new();
         let mut i: usize = 0;
@@ -1362,7 +1432,10 @@ impl Coordinator {
         while i < pu.len()
             invariant
                 cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@),
-                cfg0 == (PCfg { mu: 0, lam: 0, delta: 0, ntarget: pu@.len() }),
+                cfg0@ == (PCfg { mu: lambda as nat, lam: lambda as nat, delta: 0, ntarget: pu@.len() }),
+                lambda as nat <= max_slots(),
+                du@.len() == 0,
+                delta == 0,
                 0 <= i <= pu@.len(),
                 per@.len() == ncls,
                 ncls == pu@.len() + su@.len(),
@@ -1377,7 +1450,7 @@ impl Coordinator {
                 forall|k: int|
                     0 <= k < i ==> {
                         &&& #[trigger] paged@[k].valid()
-                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0)
+                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0@)
                         &&& paged@[k]@.ns == ns@
                     },
             decreases pu@.len() - i,
@@ -1392,14 +1465,14 @@ impl Coordinator {
                 assert((nslab as nat) * (per@[i as int] as nat) >= 1) by (nonlinear_arith)
                     requires nslab >= 1, per@[i as int] >= 1;
             }
-            match Manager::create_empty(units, b, ns, 0, Ghost(cfg0)) {
+            match Manager::create_empty(units, b, ns, cfg0) {
                 Ok(m) => {
                     let ghost p0 = paged@;
                     paged.push(m);
                     proof {
                         assert forall|k: int| 0 <= k < i + 1 implies {
                             &&& #[trigger] paged@[k].valid()
-                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0)
+                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0@)
                             &&& paged@[k]@.ns == ns@
                         } by {
                             if k < i {
@@ -1412,6 +1485,7 @@ impl Coordinator {
                     proof {
                         // ConfigError is impossible: the configuration was checked above.
                         assert((units as nat) * (b as nat) <= max_slots());
+                        assert(cfg0.mu as nat <= max_slots());
                     }
                     return Err(Error::IdentifierExhausted);
                 },
@@ -1428,6 +1502,9 @@ impl Coordinator {
         }
         while j < su.len()
             invariant
+                du@.len() == 0,
+                delta == 0,
+                lambda as nat <= max_slots(),
                 paged@ == pg0,
                 0 <= j <= su@.len(),
                 per@.len() == ncls,
@@ -1582,6 +1659,27 @@ impl Coordinator {
             co.lemma_view();
             assert(co@.paged[0] == co.pv(0));
             assert(co@.paged[0].ns == ns@);
+            assert(per@ =~= per_of(sbytes as nat, pu@ + su@)) by {
+                assert forall|k: int| 0 <= k < per@.len() implies #[trigger] per@[k] == per_of(sbytes as nat, pu@ + su@)[k] by {
+                    assert(per@[k] == sbytes / all[k]);
+                }
+            }
+            assert(co@.per == per@);
+            assert(co@.mu() == lambda as nat && co@.lam() == lambda as nat && co@.delta() == delta as nat) by {
+                assert(co.paged@[0].valid());
+                assert(co@.paged[0] == co.pv(0));
+            }
+        }
+        // C0: a one-token lease must fit with its reservation, `Fits(ceil((1 + μ)/B))`.
+        let n1 = 1 + lambda;
+        let m1 = (n1 - 1) / b + 1;
+        proof {
+            vstd::arithmetic::div_mod::lemma_div_plus_one((n1 - 1) as int, b as int);
+            assert(((n1 - 1 + b) as int) / (b as int) == ((n1 - 1) as int) / (b as int) + 1);
+            assert(m1 as nat == cdiv(n1 as nat, b as nat));
+        }
+        if !co.fits_exec(m1) {
+            return Err(Error::ConfigError);
         }
         Ok(co)
     }

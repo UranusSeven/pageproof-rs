@@ -102,9 +102,10 @@ impl Manager {
             !(h.mgr == self@.id && self@.leases.contains_key(h.id)) ==> r == Err::<usize, Error>(Error::InvalidHandle),
             (h.mgr == self@.id && self@.leases.contains_key(h.id)) ==> {
                 let l = self@.leases[h.id];
-                &&& (j as nat) < l.toks.len() ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
+                // Any position of the reach has an allocated slot (C6); only `j < c_h` holds valid KV.
+                &&& (j as nat) < l.rho ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
                     && slot_of(self@.b, l.table, j as int) < self@.p * self@.b
-                &&& (j as nat) >= l.toks.len() ==> r == Err::<usize, Error>(Error::InvalidArgument)
+                &&& (j as nat) >= l.rho ==> r == Err::<usize, Error>(Error::InvalidArgument)
             },
     {
         if !self.handle_ok(h) {
@@ -115,7 +116,7 @@ impl Manager {
             self.lemma_rep_dom();
         }
         let l = self.leases.get(&h.id).unwrap();
-        if j >= l.toks.len() {
+        if j >= l.rho {
             return Err(Error::InvalidArgument);
         }
         let ghost v = self@;
@@ -123,9 +124,8 @@ impl Manager {
         proof {
             reveal(lease_ok);
             assert(lease_ok(v, self.den_log(), h.id));
-            lemma_cdiv_props(lv.toks.len(), v.b);
             lemma_div_bounds(j as nat, v.b);
-            // j / b < m because j < L <= m*b.
+            // j / b < m because j < ρ <= m*b.
             let m = lv.table.len();
             if (j as nat) / v.b >= m {
                 lemma_mul_mono(m, (j as nat) / v.b, v.b);

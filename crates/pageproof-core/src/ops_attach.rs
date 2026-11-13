@@ -1020,8 +1020,9 @@ impl Manager {
             assert(m as nat == cdiv(n as nat, b as nat));
             assert(blocks_for(n as nat, b as nat, m as nat));
         }
+        let _ = m;
         // The table covers the reach `L + μ` (D18).
-        let nr = n + self.mu;
+        let nr = n + self.cfg.mu;
         let mr = (nr + b - 1) / b;
         proof {
             lemma_cdiv_props(nr as nat, b as nat);
@@ -1173,7 +1174,7 @@ impl Manager {
         }
         let b = self.b;
         let p = self.p;
-        if n > p * b || self.mu > p * b - n {
+        if n > p * b || self.cfg.mu > p * b - n {
             return Err(Error::RequestTooLarge);
         }
         if self.next_handle == u64::MAX {
@@ -1188,11 +1189,11 @@ impl Manager {
             lemma_cdiv_props(n as nat, b as nat);
             assert(m as nat == cdiv(n as nat, b as nat));
         }
-        let mr = (n + self.mu + b - 1) / b;
+        let mr = (n + self.cfg.mu + b - 1) / b;
         proof {
-            lemma_cdiv_props((n + self.mu) as nat, b as nat);
-            lemma_cdiv_mono(n as nat, (n + self.mu) as nat, b as nat);
-            assert(mr as nat == cdiv((n + self.mu) as nat, b as nat));
+            lemma_cdiv_props((n + self.cfg.mu) as nat, b as nat);
+            lemma_cdiv_mono(n as nat, (n + self.cfg.mu) as nat, b as nat);
+            assert(mr as nat == cdiv((n + self.cfg.mu) as nat, b as nat));
         }
         let pr = self.probe_prefix(toks, m - 1);
         let ghost kstar = pr.hits@.len();

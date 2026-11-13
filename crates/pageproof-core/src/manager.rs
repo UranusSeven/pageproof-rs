@@ -61,8 +61,8 @@ pub struct Manager {
     pub(crate) p: usize,
     pub(crate) b: usize,
     pub(crate) ns: Vec<u8>,
-    /// `μ` (0 for a v0.2.1 manager).
-    pub(crate) mu: usize,
+    /// The shared configuration (v0.2.1: `v021_cfg`).
+    pub(crate) cfg: PCfgC,
     pub(crate) seed: Digest,
     pub(crate) leases: HashMap<u64, LeaseC>,
     pub(crate) pend: HashMap<u64, PendC>,
@@ -111,7 +111,7 @@ impl Manager {
         &&& v.p == self.p as nat
         &&& v.b == self.b as nat
         &&& v.ns == self.ns@
-        &&& v.cfg.mu == self.mu as nat
+        &&& v.cfg == self.cfg@
         &&& self.seed == v.seed()
         &&& v.refs == self.refs@
         &&& v.keys == self.keys@
@@ -213,6 +213,16 @@ impl Manager {
         self.index.bucket_count()
     }
 
+    /// The shared configuration.
+    pub fn cfg_exec(&self) -> (r: PCfgC)
+        requires
+            self.valid(),
+        ensures
+            r@ == self@.cfg,
+    {
+        self.cfg
+    }
+
     pub fn free_count(&self) -> (r: usize)
         requires
             self.valid(),
@@ -266,37 +276,33 @@ impl Manager {
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
     {
-        Self::create_own(p, b, ns, true, 0, Ghost(v021_cfg()))
+        Self::create_own(p, b, ns, true, PCfgC { mu: 0, lam: 0, delta: 0, ntarget: 1 })
     }
 
     /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs), with
     /// reservation margin `mu` (D18).
-    pub fn create_empty(p: usize, b: usize, ns: &[u8], mu: usize, cfg: Ghost<PCfg>) -> (r: Result<Manager, Error>)
-        requires
-            cfg@.mu == mu as nat,
+    pub fn create_empty(p: usize, b: usize, ns: &[u8], cfg: PCfgC) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
                 &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()) ==> r is Err,
     {
-        Self::create_own(p, b, ns, false, mu, cfg)
+        Self::create_own(p, b, ns, false, cfg)
     }
 
-    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, mu: usize, cfg: Ghost<PCfg>) -> (r: Result<Manager, Error>)
-        requires
-            cfg@.mu == mu as nat,
+    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, cfg: PCfgC) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
                 &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()) ==> r is Err,
     {
-        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || mu > MAX_SLOTS as usize {
+        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || cfg.mu > MAX_SLOTS as usize {
             return Err(Error::ConfigError);
         }
         proof {
@@ -339,7 +345,7 @@ impl Manager {
             p,
             b,
             ns: nsv,
-            mu,
+            cfg,
             seed,
             leases: HashMap::new(),
             pend: HashMap::new(),

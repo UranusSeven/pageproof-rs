@@ -43,7 +43,7 @@ pub open spec fn coord_attached(
     slots: Seq<usize>,
 ) -> bool {
     let h = o.next_handle();
-    let m = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
     &&& mid.plan_rel(o, o.attach_demand(toks, m, k), o.attach_prot(toks, k))
     &&& tables.len() == o.np
     &&& slots.len() == o.nst()
@@ -82,7 +82,9 @@ pub open spec fn coord_attached(
 
 /// The complete C1 contract of the coordinator.
 pub open spec fn coord_attach_result(o: CoordV, n: CoordV, toks: Seq<Token>, r: Result<(Handle, usize, LeaseView), Error>) -> bool {
-    let m = cdiv(toks.len(), o.b);
+    // k* is capped by the input's blocks; the tables, demand and Fits cover the reach (D18).
+    let m0 = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
     let ok_in = toks.len() >= 1 && o.fits_m(m);
     &&& toks.len() == 0 ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::InvalidArgument)
     &&& (toks.len() > 0 && !o.fits_m(m)) ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::RequestTooLarge)
@@ -94,13 +96,13 @@ pub open spec fn coord_attach_result(o: CoordV, n: CoordV, toks: Seq<Token>, r: 
     ))
     &&& r is Err ==> n == o
     &&& r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity) ==> exists|k: nat|
-        o.joint_k(toks, m, k) && !o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+        o.joint_k(toks, m0, k) && !o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
     &&& r matches Ok((h, cached, view)) ==> {
         let k = cached as nat / o.b;
         &&& ok_in
         &&& h == Handle { mgr: o.id, id: o.next_handle() }
         &&& cached as nat == k * o.b
-        &&& o.joint_k(toks, m, k)
+        &&& o.joint_k(toks, m0, k)
         &&& o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
         &&& exists|mid: CoordV| #[trigger] coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@)
     }
@@ -111,12 +113,12 @@ pub proof fn lemma_attach_ok(o: CoordV, mid: CoordV, n: CoordV, toks: Seq<Token>
     requires
         toks.len() >= 1,
         o.b >= 1,
-        o.fits_m(cdiv(toks.len(), o.b)),
+        o.fits_m(o.reach_blocks(toks.len())),
         o.next_handle() < u64::MAX,
         h == (Handle { mgr: o.id, id: o.next_handle() }),
         cached as nat == k * o.b,
         o.joint_k(toks, cdiv(toks.len(), o.b), k),
-        o.cap(o.attach_demand(toks, cdiv(toks.len(), o.b), k), o.attach_prot(toks, k)),
+        o.cap(o.attach_demand(toks, o.reach_blocks(toks.len()), k), o.attach_prot(toks, k)),
         coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@),
     ensures
         coord_attach_result(o, n, toks, Ok((h, cached, view))),
@@ -164,21 +166,22 @@ pub proof fn lemma_coord_attach_capacity_iff(
     requires
         coord_attach_result(o, n, toks, r),
         toks.len() >= 1,
-        o.fits_m(cdiv(toks.len(), o.b)),
+        o.fits_m(o.reach_blocks(toks.len())),
         o.next_handle() < u64::MAX,
         o.joint_k(toks, cdiv(toks.len(), o.b), k),
     ensures
-        r is Ok <==> o.cap(o.attach_demand(toks, cdiv(toks.len(), o.b), k), o.attach_prot(toks, k)),
+        r is Ok <==> o.cap(o.attach_demand(toks, o.reach_blocks(toks.len()), k), o.attach_prot(toks, k)),
         r is Err ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity),
         r matches Ok((h, cached, view)) ==> cached as nat == k * o.b,
 {
-    let m = cdiv(toks.len(), o.b);
+    let m0 = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
     if r is Ok {
         let (h, cached, view) = r->Ok_0;
-        lemma_joint_k_unique(o, toks, m, cached as nat / o.b, k);
+        lemma_joint_k_unique(o, toks, m0, cached as nat / o.b, k);
     } else {
-        let k2 = choose|k2: nat| o.joint_k(toks, m, k2) && !o.cap(o.attach_demand(toks, m, k2), o.attach_prot(toks, k2));
-        lemma_joint_k_unique(o, toks, m, k2, k);
+        let k2 = choose|k2: nat| o.joint_k(toks, m0, k2) && !o.cap(o.attach_demand(toks, m, k2), o.attach_prot(toks, k2));
+        lemma_joint_k_unique(o, toks, m0, k2, k);
     }
 }
 
@@ -299,7 +302,7 @@ impl Coordinator {
             tabs.len() == mid.np(),
             sl.len() == mid.nst(),
             mid.nst() > 0 ==> k == 0,
-            mid@.fits_m(cdiv(toks.len(), mid.b as nat)),
+            mid@.fits_m(mid@.reach_blocks(toks.len())),
             forall|c: int|
                 0 <= c < mid.np() ==> {
                     &&& (#[trigger] self.paged@[c]).valid()
@@ -392,7 +395,7 @@ impl Coordinator {
                 }
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
-                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+                cdiv(self.pv(0).leases[h2].rho, self.b as nat),
             ) by {
                 assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
                 if h2 != h {
@@ -450,6 +453,24 @@ impl Coordinator {
     }
 
     /// `Fits(m)`, executable.
+    /// The shared configuration (I10).
+    pub(crate) fn cfg_exec(&self) -> (r: PCfgC)
+        requires
+            self.valid(),
+        ensures
+            r@ == self@.paged[0].cfg,
+            r.mu as nat <= max_slots(),
+            r.lam as nat <= max_slots(),
+    {
+        proof {
+            self.lemma_view();
+            assert(self.paged@[0].valid());
+            assert(self@.paged[0] == self.pv(0));
+            assert(cfg_rel(self.pv(0).cfg, self.np()));
+        }
+        self.paged[0].cfg_exec()
+    }
+
     pub(crate) fn fits_exec(&self, m: usize) -> (r: bool)
         requires
             self.valid(),
@@ -966,7 +987,7 @@ impl Coordinator {
         assert(self.own_ok());
         assert(self.lock_ok()) by {
             assert forall|h: u64| #[trigger] self.pv(0).leases.contains_key(h) implies self.fits_m(
-                cdiv(self.pv(0).leases[h].toks.len(), self.b as nat),
+                cdiv(self.pv(0).leases[h].rho, self.b as nat),
             ) by {
                 assert(o.pv(0).leases.contains_key(h));
             }
@@ -1015,7 +1036,8 @@ impl Coordinator {
         requires
             old(self).valid(),
             1 <= toks@.len(),
-            m == cdiv(toks@.len(), old(self).b as nat),
+            m == old(self)@.reach_blocks(toks@.len()),
+            k + 1 <= cdiv(toks@.len(), old(self).b as nat),
             k + 1 <= m,
             m <= usize::MAX,
             old(self).nst() > 0 ==> k == 0,
@@ -1081,7 +1103,8 @@ impl Coordinator {
                 h == mid.next_handle(),
                 h < u64::MAX,
                 1 <= toks@.len(),
-                m == cdiv(toks@.len(), mid.b as nat),
+                m == mid@.reach_blocks(toks@.len()),
+                k + 1 <= cdiv(toks@.len(), mid.b as nat),
                 k + 1 <= m,
                 mid@.fits_m(m),
                 self.npaged == mid.npaged,
@@ -1123,8 +1146,11 @@ impl Coordinator {
                 lemma_probe_ok_views(mid.pv(c as int), mid.paged@[c as int].den_log(), toks@, tp@[c as int], pr);
                 assert(mid.unit@[c as int] >= 1);
                 lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m, c as int);
-                lemma_cdiv_props(toks@.len(), mid.b as nat);
+                lemma_cdiv_props(toks@.len() + mid@.mu(), mid.b as nat);
                 lemma_mul_mono(m, mid.cunits(c as int), mid.b as nat);
+                mid.lemma_view();
+                assert(mid.pv(c as int).cfg == mid.pv(0).cfg);
+                assert(mid@.paged[0] == mid.pv(0));
                 assert(mid.pv(c as int).next_handle == h);
             }
             let ghost p0 = self.paged@;
@@ -1348,7 +1374,7 @@ impl Coordinator {
             mid.valid(),
             o@ == pre@,
             forall|c: int| 0 <= c < o.np() ==> #[trigger] pre.pv(c) == o.pv(c),
-            m == cdiv(toks.len(), o.b as nat),
+            m == o@.reach_blocks(toks.len()),
             d == o@.attach_demand(toks, m, k),
             prot == o@.attach_prot(toks, k),
             mid@.plan_rel(pre@, d, prot),
@@ -1478,11 +1504,41 @@ impl Coordinator {
             self.lemma_view();
             self.lemma_shape();
         }
-        let m = (n - 1) / b + 1;
+        let cfg = self.cfg_exec();
+        let mu = cfg.mu;
+        proof {
+            assert(mu as nat == ov.mu());
+            assert forall|i: int| 0 <= i < self.np() implies #[trigger] self.per@[i] >= 1 by {
+                assert(self.unit@[i] >= 1);
+            }
+        }
+        // An input past the slot space cannot fit with its reservation.
+        if n > MAX_SLOTS as usize {
+            proof {
+                assert(!ov.fits_m(ov.reach_blocks(n as nat))) by {
+                    if ov.fits_m(ov.reach_blocks(n as nat)) {
+                        lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, ov.reach_blocks(n as nat), 0);
+                        lemma_cdiv_props(n as nat + mu as nat, b as nat);
+                        lemma_mul_mono(ov.reach_blocks(n as nat), self.cunits(0), b as nat);
+                        assert(self.unit@[0] >= 1);
+                    }
+                }
+            }
+            return Err(Error::RequestTooLarge);
+        }
+        // `m0` blocks hold the input (k* is capped by them); `m` blocks cover the reach L + μ (D18).
+        let m0 = (n - 1) / b + 1;
+        let nr = n + mu;
+        let m = (nr - 1) / b + 1;
         proof {
             vstd::arithmetic::div_mod::lemma_div_plus_one((n - 1) as int, b as int);
             assert(((n - 1 + b) as int) / (b as int) == ((n - 1) as int) / (b as int) + 1);
-            assert(m as nat == cdiv(n as nat, b as nat));
+            assert(m0 as nat == cdiv(n as nat, b as nat));
+            vstd::arithmetic::div_mod::lemma_div_plus_one((nr - 1) as int, b as int);
+            assert(((nr - 1 + b) as int) / (b as int) == ((nr - 1) as int) / (b as int) + 1);
+            assert(m as nat == cdiv(nr as nat, b as nat));
+            assert(m as nat == ov.reach_blocks(n as nat));
+            lemma_cdiv_mono(n as nat, nr as nat, b as nat);
         }
         if !self.fits_exec(m) {
             return Err(Error::RequestTooLarge);
@@ -1490,6 +1546,7 @@ impl Coordinator {
         proof {
             self.paged@[0].lemma_valid();
             assert(self.paged@[0].valid());
+            lemma_fits_mono(self.per@, self.np(), self.nst(), self.nslab as nat, m0 as nat, m as nat);
         }
         let hid = self.paged[0].next_handle_exec();
         if hid == u64::MAX {
@@ -1497,17 +1554,19 @@ impl Coordinator {
         }
         proof {
             lemma_cdiv_props(n as nat, b as nat);
+            lemma_cdiv_props(nr as nat, b as nat);
+            assert(m0 >= 1);
             assert(m >= 1);
             lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, m as nat, 0);
             self.lemma_nslab_bound();
             assert(self.unit@[0] >= 1);
             assert((m as nat) <= self.cunits(0));
         }
-        let cap = if self.state.len() > 0 { 0 } else { m - 1 };
+        let cap = if self.state.len() > 0 { 0 } else { m0 - 1 };
         let (probes, kmin) = self.joint_probe(toks, cap);
         let ghost s1 = *self;
         proof {
-            self.lemma_joint_k(toks@, m as nat, cap as nat, probes@, kmin as nat);
+            self.lemma_joint_k(toks@, m0 as nat, cap as nat, probes@, kmin as nat);
         }
         let tp = self.truncate_all(probes, kmin, Ghost(toks@));
         let prot = self.compute_prot(toks, &tp, kmin);
@@ -1520,7 +1579,7 @@ impl Coordinator {
         let d = self.attach_demand_exec(toks, &tp, kmin, m);
         if !self.check_cap(&d, &prot) {
             proof {
-                assert(ov.joint_k(toks@, m as nat, kmin as nat));
+                assert(ov.joint_k(toks@, m0 as nat, kmin as nat));
                 assert(!ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
             }
             return Err(Error::NoCapacity);
@@ -1547,6 +1606,9 @@ impl Coordinator {
             assert(mid.paged@[0] == mid.paged@[0]);
             assert(mid.next_handle() == o.next_handle());
             assert(mid@.fits_m(m as nat));
+            assert(pre@.paged[0] == o@.paged[0]);
+            assert(mid@.paged[0].cfg == pre@.paged[0].cfg);
+            assert(m as nat == mid@.reach_blocks(toks@.len()));
         }
         let (cached, view) = self.attach_commit_all(toks, tp, Ghost(kmin as nat), Ghost(m as nat));
         proof {
@@ -1569,13 +1631,16 @@ impl Coordinator {
             assert(self.id == ov.id) by {
                 o.lemma_view();
             }
-            assert(ov.joint_k(toks@, m as nat, kmin as nat));
+            assert(ov.joint_k(toks@, m0 as nat, kmin as nat));
             assert(ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
             assert(ov.fits_m(m as nat));
             assert(cached as nat == kmin * ov.b) by {
                 o.lemma_view();
             }
-            assert(m as nat == cdiv(toks@.len(), ov.b)) by {
+            assert(m as nat == ov.reach_blocks(toks@.len())) by {
+                o.lemma_view();
+            }
+            assert(m0 as nat == cdiv(toks@.len(), ov.b)) by {
                 o.lemma_view();
             }
             let midv = mid@;

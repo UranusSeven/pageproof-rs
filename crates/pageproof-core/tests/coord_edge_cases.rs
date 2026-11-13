@@ -61,11 +61,11 @@ fn check_disjoint(co: &Coordinator, units: &[usize], per: &[usize], views: &[&Le
 #[test]
 fn a1_rejects_non_dividing_unit() {
     // S = 1000 is not a multiple of 96.
-    assert_eq!(Coordinator::create(4, 1000, &[96], &[], 4, NS).err(), Some(Error::ConfigError));
-    assert_eq!(Coordinator::create(0, 960, &[96], &[], 4, NS).err(), Some(Error::ConfigError));
-    assert_eq!(Coordinator::create(4, 960, &[], &[96], 4, NS).err(), Some(Error::ConfigError));
-    assert_eq!(Coordinator::create(4, 960, &[0], &[], 4, NS).err(), Some(Error::ConfigError));
-    assert!(Coordinator::create(4, 960, &[96], &[320], 4, NS).is_ok());
+    assert_eq!(Coordinator::create(4, 1000, &[96], &[], &[], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    assert_eq!(Coordinator::create(0, 960, &[96], &[], &[], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    assert_eq!(Coordinator::create(4, 960, &[], &[], &[96], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    assert_eq!(Coordinator::create(4, 960, &[0], &[], &[], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    assert!(Coordinator::create(4, 960, &[96], &[], &[320], 4, 0, 0, NS).is_ok());
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn lcm_slab_layout() {
     // S = lcm(96 KiB, 640 KiB) = 1.875 MiB: 20 pages and 3 state slots per slab.
     let (u_p, u_s) = (96 * 1024, 640 * 1024);
     let s = 1966080;
-    let mut co = Coordinator::create(2, s, &[u_p], &[u_s], 4, NS).unwrap();
+    let mut co = Coordinator::create(2, s, &[u_p], &[], &[u_s], 4, 0, 0, NS).unwrap();
     let (h, cached, v) = co.attach(&toks(5, 1)).unwrap();
     assert_eq!(cached, 0);
     assert_eq!(v.tables[0].len(), 2);
@@ -88,7 +88,7 @@ fn lcm_slab_layout() {
 
 #[test]
 fn empty_and_too_large() {
-    let mut co = Coordinator::create(2, 64, &[16], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
     assert_eq!(co.attach(&[]).err(), Some(Error::InvalidArgument));
     // 2 slabs x 4 pages x B=4 = 32 tokens fit; 33 do not.
     assert_eq!(co.attach(&toks(33, 0)).err(), Some(Error::RequestTooLarge));
@@ -98,14 +98,14 @@ fn empty_and_too_large() {
 #[test]
 fn fits_counts_state_slabs() {
     // With a state class, one slab is reserved for its slot: 1 paged slab left => 16 tokens.
-    let mut co = Coordinator::create(2, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     assert_eq!(co.attach(&toks(17, 0)).err(), Some(Error::RequestTooLarge));
     assert!(co.attach(&toks(16, 0)).is_ok());
 }
 
 #[test]
 fn prefix_hit_without_state_class() {
-    let mut co = Coordinator::create(4, 64, &[16], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(12, 3);
     let (h1, c1, v1) = co.attach(&t).unwrap();
     assert_eq!(c1, 0);
@@ -121,7 +121,7 @@ fn prefix_hit_without_state_class() {
 
 #[test]
 fn state_class_disables_hits() {
-    let mut co = Coordinator::create(4, 64, &[16], &[32], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[32], 4, 0, 0, NS).unwrap();
     let t = toks(12, 3);
     let (h1, _, v1) = co.attach(&t).unwrap();
     compute_all(&mut co, h1);
@@ -138,7 +138,7 @@ fn state_class_disables_hits() {
 #[test]
 fn two_paged_classes_kstar_is_joint() {
     // Class 0 and class 1 share B and keys; a hit needs both classes.
-    let mut co = Coordinator::create(6, 64, &[16, 32], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(6, 64, &[16, 32], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(12, 9);
     let (h1, _, _) = co.attach(&t).unwrap();
     compute_all(&mut co, h1);
@@ -154,7 +154,7 @@ fn two_paged_classes_kstar_is_joint() {
 #[test]
 fn no_capacity_is_atomic() {
     // Paged class needs 2 more pages, has 1 free, no free slab, nothing reclaimable.
-    let mut co = Coordinator::create(1, 48, &[16], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(1, 48, &[16], &[], &[], 4, 0, 0, NS).unwrap();
     let (h, _, _) = co.attach(&toks(8, 1)).unwrap();
     let before = co.arena();
     assert_eq!(co.attach(&toks(8, 2)).err(), Some(Error::NoCapacity));
@@ -167,7 +167,7 @@ fn no_capacity_is_atomic() {
 #[test]
 fn free_slab_before_reclaim() {
     // A free slab exists and a reclaimable slab exists: the free slab is used.
-    let mut co = Coordinator::create(3, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(3, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, _) = co.attach(&toks(4, 1)).unwrap();
     compute_all(&mut co, h);
     co.release(h).unwrap();
@@ -182,7 +182,7 @@ fn free_slab_before_reclaim() {
 #[test]
 fn reclaim_idle_keyed_slab_for_state() {
     // 4 slabs of 64 B. Paged unit 64 B (1 page per slab), state unit 64 B (1 slot per slab).
-    let mut co = Coordinator::create(4, 64, &[64], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[64], &[], &[64], 4, 0, 0, NS).unwrap();
     // Lease A: 3 blocks -> 3 paged slabs, 1 state slab; FS = 0. Its blocks get published.
     let (ha, _, _) = co.attach(&toks(12, 1)).unwrap();
     compute_all(&mut co, ha);
@@ -213,7 +213,7 @@ fn reclaim_idle_keyed_slab_for_state() {
 fn reclaim_revokes_keys() {
     // Paged-only: reclaim moves an idle keyed slab from one paged class to another; afterwards the
     // revoked blocks can no longer be hit. Class 0: 1 page/slab; class 1: 4 pages/slab.
-    let mut co = Coordinator::create(3, 64, &[64, 16], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(3, 64, &[64, 16], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 5);
     // Lease A (2 blocks): class 0 takes 2 slabs, class 1 takes 1 slab. FS = 0.
     let (ha, _, _) = co.attach(&t).unwrap();
@@ -231,7 +231,7 @@ fn reclaim_revokes_keys() {
 #[test]
 fn reclaim_paged_slab_for_other_paged_class() {
     // Two paged classes over 3 slabs: class 0 unit 16 (4/slab), class 1 unit 64 (1/slab).
-    let mut co = Coordinator::create(3, 64, &[16, 64], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(3, 64, &[16, 64], &[], &[], 4, 0, 0, NS).unwrap();
     // A 1-block lease takes one slab per class; then release: both slabs idle, one free slab.
     let (h1, _, _) = co.attach(&toks(4, 1)).unwrap();
     compute_all(&mut co, h1);
@@ -250,7 +250,7 @@ fn reclaim_paged_slab_for_other_paged_class() {
 #[test]
 fn reclaim_when_free_slabs_run_out() {
     // 3 slabs. Class 0: unit 16 (4/slab). Class 1: unit 64 (1/slab).
-    let mut co = Coordinator::create(3, 64, &[16, 64], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(3, 64, &[16, 64], &[], &[], 4, 0, 0, NS).unwrap();
     // Lease A: 5 blocks needs 2 slabs of class 0 and 5 of class 1: too large (Fits).
     assert_eq!(co.attach(&toks(20, 1)).err(), Some(Error::RequestTooLarge));
     // Lease A: 1 block => class 0 gets slab, class 1 gets slab.
@@ -273,7 +273,7 @@ fn reclaim_when_free_slabs_run_out() {
 #[test]
 fn prot_keeps_hit_slab() {
     // Class 0: unit 16 (4/slab). Class 1: unit 32 (2/slab). 3 slabs.
-    let mut co = Coordinator::create(3, 64, &[16, 32], &[], 4, NS).unwrap();
+    let mut co = Coordinator::create(3, 64, &[16, 32], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 7);
     let (ha, _, va) = co.attach(&t).unwrap();
     compute_all(&mut co, ha);
@@ -288,7 +288,7 @@ fn prot_keeps_hit_slab() {
 
 #[test]
 fn extend_demand_paged_only() {
-    let mut co = Coordinator::create(4, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, v) = co.attach(&toks(4, 1)).unwrap();
     compute_all(&mut co, h);
     let state_owned = count_owner(&co, 1);
@@ -313,7 +313,7 @@ fn extend_demand_paged_only() {
 
 #[test]
 fn state_plan_after_first_chunk() {
-    let mut co = Coordinator::create(4, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, v) = co.attach(&toks(10, 1)).unwrap();
     let (t1, p1) = co.begin_write(h, 6).unwrap();
     assert!(p1.init);
@@ -330,7 +330,7 @@ fn state_plan_after_first_chunk() {
 
 #[test]
 fn tickets_and_handles_are_single_use() {
-    let mut co = Coordinator::create(4, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, _) = co.attach(&toks(4, 1)).unwrap();
     let (t, _) = co.begin_write(h, 4).unwrap();
     assert_eq!(co.begin_write(h, 1).err(), Some(Error::Busy));
@@ -340,14 +340,14 @@ fn tickets_and_handles_are_single_use() {
     assert_eq!(co.release(h).err(), Some(Error::InvalidHandle));
     assert!(co.inspect(h).is_err());
     // Handles of another coordinator are rejected.
-    let mut other = Coordinator::create(4, 64, &[16], &[64], 4, NS).unwrap();
+    let mut other = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h2, _, _) = other.attach(&toks(4, 1)).unwrap();
     assert_eq!(co.release(h2).err(), Some(Error::InvalidHandle));
 }
 
 #[test]
 fn release_keeps_slabs_and_makes_them_reclaimable() {
-    let mut co = Coordinator::create(4, 64, &[16], &[64], 4, NS).unwrap();
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
     let (h, _, _) = co.attach(&toks(8, 1)).unwrap();
     compute_all(&mut co, h);
     let owned = owners(&co);
@@ -362,7 +362,7 @@ fn release_keeps_slabs_and_makes_them_reclaimable() {
 fn churn_stays_disjoint_and_bounded() {
     let units = [16usize, 32, 64];
     let per = [4usize, 2, 1];
-    let mut co = Coordinator::create(12, 64, &units[..2], &units[2..], 4, NS).unwrap();
+    let mut co = Coordinator::create(12, 64, &units[..2], &[], &units[2..], 4, 0, 0, NS).unwrap();
     let mut live: Vec<(Handle, LeaseView)> = Vec::new();
     let mut seed = 1u32;
     for step in 0..400 {
@@ -385,4 +385,110 @@ fn churn_stays_disjoint_and_bounded() {
         let views: Vec<&LeaseView> = live.iter().map(|(_, v)| v).collect();
         check_disjoint(&co, &units, &per, &views, 2);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Contract v0.4/v0.6 §7: the draft reservation (D18, I16). No drafter class and δ = 0 here, so
+// μ = λ.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn reservation_sizes_page_tables() {
+    // §7: attach of L = 2B - 1 with λ = 3, B = 64 covers ceil(130/64) = 3 blocks, not 2.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 64, 3, 0, NS).unwrap();
+    let (h, cached, v) = co.attach(&toks(127, 1)).unwrap();
+    assert_eq!(cached, 0);
+    assert_eq!(v.tables[0].len(), 3);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.reach, iv.lam, iv.mu, iv.delta), (127, 130, 3, 3, 0));
+    // Every position of the reach has a slot; past it there is none (C6).
+    assert!(co.slot_of(0, h, 129).is_ok());
+    assert_eq!(co.slot_of(0, h, 130).err(), Some(Error::InvalidArgument));
+    compute_all(&mut co, h);
+    assert_eq!(co.inspect(h).unwrap().computed, 127);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn reservation_counts_for_fits() {
+    // §7: Fits(ceil(L/B)) holds but Fits(ceil((L+μ)/B)) does not => RequestTooLarge.
+    // 2 slabs x 4 pages x B=4 = 32 slots; with λ = 3, L = 32 needs ceil(35/4) = 9 pages.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 3, 0, NS).unwrap();
+    assert_eq!(co.attach(&toks(32, 0)).err(), Some(Error::RequestTooLarge));
+    assert_eq!(co.attach(&toks(30, 0)).err(), Some(Error::RequestTooLarge));
+    assert!(co.attach(&toks(29, 0)).is_ok());
+}
+
+#[test]
+fn reservation_counts_for_capacity() {
+    // The reserved blocks are part of the demand: with λ = 4 a 12-token lease takes 4 pages.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 4, 0, NS).unwrap();
+    let (h1, _, v1) = co.attach(&toks(12, 1)).unwrap();
+    let (h2, _, v2) = co.attach(&toks(12, 2)).unwrap();
+    assert_eq!((v1.tables[0].len(), v2.tables[0].len()), (4, 4));
+    assert_eq!(free_slabs(&co), 0);
+    // A one-token lease still needs ceil(5/4) = 2 pages, and none are left.
+    assert_eq!(co.attach(&toks(1, 3)).err(), Some(Error::NoCapacity));
+    co.release(h1).unwrap();
+    co.release(h2).unwrap();
+}
+
+#[test]
+fn extend_reuses_reserved_pages() {
+    // C2: pages already reserved at [L, ρ_h) serve the suffix. λ = 3, B = 4: L = 4 gives ρ = 7
+    // (2 pages); extending by 1 gives ρ' = 8, still 2 pages, so the demand is 0.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 3, 0, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(4, 5)).unwrap();
+    assert_eq!(v.tables[0].len(), 2);
+    compute_all(&mut co, h);
+    let slot4 = co.slot_of(0, h, 4).unwrap();
+    let free_before = co.arena().free_units[0];
+    let v2 = co.extend(h, &[7]).unwrap();
+    assert_eq!(v2.tables[0], v.tables[0]);
+    assert_eq!(co.arena().free_units[0], free_before);
+    assert_eq!(co.slot_of(0, h, 4).unwrap(), slot4);
+    assert_eq!(co.inspect(h).unwrap().reach, 8);
+    // Extending past the reserved pages takes a new one: L' = 6 gives ρ' = 9, 3 pages.
+    compute_all(&mut co, h);
+    let v3 = co.extend(h, &[8]).unwrap();
+    assert_eq!(v3.tables[0].len(), 3);
+    assert_eq!(&v3.tables[0][..2], &v.tables[0][..]);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn release_returns_reserved_pages() {
+    // §7: reserved pages past L_h return to F_c unkeyed.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 3, 0, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(4, 9)).unwrap();
+    assert_eq!(v.tables[0].len(), 2);
+    assert_eq!(co.arena().free_units[0], 2);
+    compute_all(&mut co, h);
+    co.release(h).unwrap();
+    assert_eq!(co.arena().free_units[0], 4);
+    // The published block is still a hit; the reserved page was never published.
+    let (h2, cached, _) = co.attach(&toks(5, 9)).unwrap();
+    assert_eq!(cached, 4);
+    co.release(h2).unwrap();
+}
+
+#[test]
+fn create_rejects_unfittable_reservation() {
+    // C0: ¬Fits(ceil((1 + μ)/B)) is a ConfigError. One slab of 4 pages, B = 4: 16 slots.
+    assert_eq!(Coordinator::create(1, 64, &[16], &[], &[], 4, 16, 0, NS).err(), Some(Error::ConfigError));
+    assert!(Coordinator::create(1, 64, &[16], &[], &[], 4, 15, 0, NS).is_ok());
+    // A state class takes a slab of its own.
+    assert_eq!(Coordinator::create(2, 64, &[16], &[], &[64], 4, 16, 0, NS).err(), Some(Error::ConfigError));
+    assert!(Coordinator::create(2, 64, &[16], &[], &[64], 4, 15, 0, NS).is_ok());
+}
+
+#[test]
+fn lambda_zero_has_no_reservation() {
+    // Obligation 18: with λ = 0 the reach is the input.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(5, 1)).unwrap();
+    assert_eq!(v.tables[0].len(), 2);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.reach, iv.mu), (5, 0));
+    assert_eq!(co.slot_of(0, h, 5).err(), Some(Error::InvalidArgument));
 }

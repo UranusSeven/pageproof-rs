@@ -341,7 +341,7 @@ impl Manager {
             assert(b as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires p >= 1;
             assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
         }
-        let mu = self.mu;
+        let mu = self.cfg.mu;
         if suffix.len() > p * b - l_len || mu > p * b - l_len - suffix.len() {
             return Err(Error::RequestTooLarge);
         }

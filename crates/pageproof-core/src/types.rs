@@ -98,6 +98,23 @@ pub ghost struct PCfg {
     pub ntarget: nat,
 }
 
+/// Concrete `PCfg`.
+#[derive(Clone, Copy)]
+pub struct PCfgC {
+    pub mu: usize,
+    pub lam: usize,
+    pub delta: usize,
+    pub ntarget: usize,
+}
+
+impl View for PCfgC {
+    type V = PCfg;
+
+    open spec fn view(&self) -> PCfg {
+        PCfg { mu: self.mu as nat, lam: self.lam as nat, delta: self.delta as nat, ntarget: self.ntarget as nat }
+    }
+}
+
 /// The configuration of a v0.2.1 manager: no reservation, no drafts, no ZOS.
 pub open spec fn v021_cfg() -> PCfg {
     PCfg { mu: 0, lam: 0, delta: 0, ntarget: 1 }

@@ -230,6 +230,21 @@ impl Manager {
         }
     }
 
+    /// `ρ_h` of a live lease.
+    pub fn lease_rho(&self, h: u64) -> (r: usize)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r as nat == self@.leases[h].rho,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.leases.get(&h).unwrap().rho
+    }
+
     /// `(|T_h|, c_h, pending)` of a live lease.
     pub fn lease_info(&self, h: u64) -> (r: (usize, usize, bool))
         requires

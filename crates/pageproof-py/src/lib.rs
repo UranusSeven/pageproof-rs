@@ -183,8 +183,11 @@ fn lease_dict<'py>(py: Python<'py>, tables: Vec<Vec<usize>>, slots: Vec<usize>) 
 
 #[pymethods]
 impl PyCoordinator {
-    /// C0. `paged_units` and `state_units` are unit sizes in bytes; each must divide `slab_bytes`.
+    /// C0. `paged_units`, `drafter_units` and `state_units` are unit sizes in bytes; each must divide
+    /// `slab_bytes`. `max_drafts` is λ and `zos_depth` is δ (contract v0.6 §3.1).
     #[new]
+    #[pyo3(signature = (num_slabs, slab_bytes, paged_units, state_units, block_size, namespace, *, drafter_units = Vec::new(), max_drafts = 0, zos_depth = 0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         num_slabs: usize,
         slab_bytes: usize,
@@ -192,8 +195,21 @@ impl PyCoordinator {
         state_units: Vec<usize>,
         block_size: usize,
         namespace: &[u8],
+        drafter_units: Vec<usize>,
+        max_drafts: usize,
+        zos_depth: usize,
     ) -> PyResult<Self> {
-        Coordinator::create(num_slabs, slab_bytes, &paged_units, &state_units, block_size, namespace)
+        Coordinator::create(
+            num_slabs,
+            slab_bytes,
+            &paged_units,
+            &drafter_units,
+            &state_units,
+            block_size,
+            max_drafts,
+            zos_depth,
+            namespace,
+        )
             .map(|inner| PyCoordinator { inner })
             .map_err(err)
     }

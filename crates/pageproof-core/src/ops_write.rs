@@ -298,9 +298,8 @@ impl Manager {
         let page_table = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.table.as_slice(), 0, nb));
         let t = self.next_ticket;
         self.next_ticket = t + 1;
-        let mut q: Vec<u64> = Vec::new();
-        q.push(t);
-        l.pending = q;
+        // The queue was empty (no pending ticket); it is now `[t]`.
+        l.pending.push(t);
         assert(l.pending@ =~= seq![t]);
         self.leases.insert(h.id, l);
         self.pend.insert(t, PendC { lease: h.id, a, z });
@@ -397,11 +396,29 @@ pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64) -> bool {
     &&& v2.pdep.len() == v.pdep.len()
     &&& v2.ptoks.len() == v.ptoks.len()
     // New complete blocks are published with K(h, i); nothing else changes.
-    &&& forall|i: int|
+    &&& fin_published(v, v2, t)
+    &&& fin_untouched(v, v2, t)
+}
+
+/// `finish_rel`, publication part: blocks `[a/B, z/B)` of the lease are published with `K(h, i)`.
+pub open spec fn fin_published(v: MgrV, v2: MgrV, t: u64) -> bool {
+    let r = v.pend[t];
+    let l = v.leases[r.lease];
+    let lo = r.a / v.b;
+    let hi = r.z / v.b;
+    forall|i: int|
         #![trigger l.table[i]]
         lo <= i < hi ==> v2.keys[l.table[i] as int] == Some(v.key_of(l.toks, i as nat)) && v2.pdep[l.table[i] as int]
             == i && v2.ptoks[l.table[i] as int] == l.toks.subrange(0, (i + 1) * v.b)
-    &&& forall|x: int|
+}
+
+/// `finish_rel`, frame part: no other page's key or publication record changes.
+pub open spec fn fin_untouched(v: MgrV, v2: MgrV, t: u64) -> bool {
+    let r = v.pend[t];
+    let l = v.leases[r.lease];
+    let lo = r.a / v.b;
+    let hi = r.z / v.b;
+    forall|x: int|
         #![trigger v2.keys[x]]
         0 <= x < v.p && (forall|i: int| lo <= i < hi ==> l.table[i] as int != x) ==> v2.keys[x] == v.keys[x]
             && v2.pdep[x] == v.pdep[x] && v2.ptoks[x] == v.ptoks[x]

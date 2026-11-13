@@ -71,7 +71,7 @@ pub open spec fn coord_extended(o: CoordV, mid: CoordV, n: CoordV, h: u64, suffi
     &&& forall|c: int|
         0 <= c < o.np ==> {
             let fresh = (#[trigger] tables[c]).subrange(o.paged[c].leases[h].table.len() as int, tables[c].len() as int);
-            &&& tables[c].len() == cdiv(l.toks.len() + suffix.len(), o.b)
+            &&& tables[c].len() == o.reach_blocks(l.toks.len() + suffix.len())
             &&& tables[c].subrange(0, o.paged[c].leases[h].table.len() as int) == o.paged[c].leases[h].table
             &&& fresh.len() == d
             &&& fresh.no_duplicates()
@@ -85,15 +85,17 @@ pub open spec fn coord_extend_result(o: CoordV, n: CoordV, h: Handle, suffix: Se
     let live = h.mgr == o.id && o.leases().contains_key(h.id);
     let l = o.leases()[h.id];
     let l2 = l.toks.len() + suffix.len();
-    let d = (cdiv(l2, o.b) - cdiv(l.toks.len(), o.b)) as nat;
-    let ok = live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(cdiv(l2, o.b));
+    // The tables grow from the old reach ρ_h to the new reach L' + μ (D18).
+    let m2 = o.reach_blocks(l2);
+    let d = (m2 - cdiv(l.rho, o.b)) as nat;
+    let ok = live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(m2);
     &&& !live ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
     &&& (live && l.pending.len() > 0) ==> r == Err::<LeaseView, Error>(Error::Busy)
     &&& (live && l.pending.len() == 0 && l.c != l.toks.len()) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
     &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
         Error::InvalidArgument,
     )
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(cdiv(l2, o.b))) ==> r == Err::<
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(m2)) ==> r == Err::<
         LeaseView,
         Error,
     >(Error::RequestTooLarge)
@@ -110,9 +112,9 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
         o.leases()[h.id].pending.len() == 0,
         o.leases()[h.id].c == o.leases()[h.id].toks.len(),
         suffix.len() > 0,
-        o.fits_m(cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b)),
+        o.fits_m(o.reach_blocks(o.leases()[h.id].toks.len() + suffix.len())),
         o.cap(
-            extend_demand(o, (cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b) - cdiv(o.leases()[h.id].toks.len(), o.b)) as nat),
+            extend_demand(o, (o.reach_blocks(o.leases()[h.id].toks.len() + suffix.len()) - cdiv(o.leases()[h.id].rho, o.b)) as nat),
             no_prot(o),
         ),
         coord_extended(
@@ -121,7 +123,7 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
             n,
             h.id,
             suffix,
-            (cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b) - cdiv(o.leases()[h.id].toks.len(), o.b)) as nat,
+            (o.reach_blocks(o.leases()[h.id].toks.len() + suffix.len()) - cdiv(o.leases()[h.id].rho, o.b)) as nat,
             tables_view(view.tables@),
         ),
     ensures
@@ -129,7 +131,7 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
 {
     let l = o.leases()[h.id];
     let l2 = l.toks.len() + suffix.len();
-    let d = (cdiv(l2, o.b) - cdiv(l.toks.len(), o.b)) as nat;
+    let d = (o.reach_blocks(l2) - cdiv(l.rho, o.b)) as nat;
     assert(coord_extended(o, mid, n, h.id, suffix, d, tables_view(view.tables@)));
     let r = Ok::<LeaseView, Error>(view);
     assert(r->Ok_0 == view);
@@ -394,7 +396,7 @@ impl Coordinator {
                 assert(o.pv(i).leases.contains_key(h2));
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
-                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+                cdiv(self.pv(0).leases[h2].rho, self.b as nat),
             ) by {
                 assert(o.pv(0).leases.contains_key(h2));
             }
@@ -455,15 +457,15 @@ impl Coordinator {
             0 <= c < self.np(),
             self.pv(c).leases.contains_key(h),
         ensures
-            self.pv(c).leases[h].table.len() == cdiv(self.pv(c).leases[h].toks.len(), self.b as nat),
+            self.pv(c).leases[h].table.len() == cdiv(self.pv(c).leases[h].rho, self.b as nat),
     {
         assert(self.paged@[c].valid());
         reveal(lease_ok);
         assert(lease_ok(self.pv(c), self.paged@[c].den_log(), h));
         let l = self.pv(c).leases[h];
         let m = l.table.len();
-        let q = cdiv(l.toks.len(), self.b as nat);
-        lemma_cdiv_props(l.toks.len(), self.b as nat);
+        let q = cdiv(l.rho, self.b as nat);
+        lemma_cdiv_props(l.rho, self.b as nat);
         if m < q {
             lemma_mul_mono(m, (q - 1) as nat, self.b as nat);
         }
@@ -477,7 +479,7 @@ impl Coordinator {
         requires
             mid.valid(),
             mid.pv(0).leases.contains_key(h),
-            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat)),
+            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len() + mid.pv(0).cfg.mu, mid.b as nat)),
             self.id == mid.id,
             self.nslab == mid.nslab,
             self.sbytes == mid.sbytes,
@@ -526,6 +528,8 @@ impl Coordinator {
             } by {
                 assert(mid.paged@[i].valid());
                 assert(self.paged@[0].valid());
+                assert(mid.pv(i).cfg == mid.pv(0).cfg);
+                assert(self.pv(0).cfg == mid.pv(0).cfg);
             }
             assert forall|j: int| 0 <= j < self.nst() implies {
                 &&& #[trigger] self.state@[j].valid()
@@ -570,7 +574,7 @@ impl Coordinator {
                 assert(mid.pv(i).leases[h].toks == mid.pv(0).leases[h].toks);
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
-                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+                cdiv(self.pv(0).leases[h2].rho, self.b as nat),
             ) by {
                 assert(mid.pv(0).leases.contains_key(h2));
             }
@@ -640,41 +644,52 @@ impl Coordinator {
             return Err(Error::InvalidArgument);
         }
         let b = self.b;
+        let rho = self.paged[0].lease_rho(h.id);
+        let cfg = self.cfg_exec();
+        let mu = cfg.mu;
         proof {
             self.lemma_table_len(0, h.id);
             reveal(lease_ok);
             assert(lease_ok(self.pv(0), self.paged@[0].den_log(), h.id));
             self.lemma_nslab_bound();
-            assert(self.fits_m(cdiv(len as nat, b as nat)));
-            lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, cdiv(len as nat, b as nat), 0);
+            assert(self.fits_m(cdiv(rho as nat, b as nat)));
+            lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, cdiv(rho as nat, b as nat), 0);
             assert(self.unit@[0] >= 1);
-            lemma_cdiv_props(len as nat, b as nat);
-            lemma_mul_mono(cdiv(len as nat, b as nat), self.cunits(0), b as nat);
+            lemma_cdiv_props(rho as nat, b as nat);
+            lemma_mul_mono(cdiv(rho as nat, b as nat), self.cunits(0), b as nat);
+            assert(len <= rho);
+            assert(mu as nat == ov.mu());
+            assert(ov.leases()[h.id].rho == rho as nat);
         }
-        if suffix.len() > MAX_SLOTS as usize - len {
+        // The new reach L' + μ past the slot space cannot fit (D18).
+        if suffix.len() > MAX_SLOTS as usize - len || mu > MAX_SLOTS as usize - len - suffix.len() {
             proof {
-                assert(!ov.fits_m(cdiv((len + suffix@.len()) as nat, b as nat))) by {
-                    if ov.fits_m(cdiv((len + suffix@.len()) as nat, b as nat)) {
-                        lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, cdiv((len + suffix@.len()) as nat, b as nat), 0);
-                        lemma_cdiv_props((len + suffix@.len()) as nat, b as nat);
-                        lemma_mul_mono(cdiv((len + suffix@.len()) as nat, b as nat), self.cunits(0), b as nat);
+                assert(!ov.fits_m(ov.reach_blocks((len + suffix@.len()) as nat))) by {
+                    if ov.fits_m(ov.reach_blocks((len + suffix@.len()) as nat)) {
+                        lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, ov.reach_blocks((len + suffix@.len()) as nat), 0);
+                        lemma_cdiv_props((len + suffix@.len()) as nat + mu as nat, b as nat);
+                        lemma_mul_mono(ov.reach_blocks((len + suffix@.len()) as nat), self.cunits(0), b as nat);
                     }
                 }
             }
             return Err(Error::RequestTooLarge);
         }
         let l2 = len + suffix.len();
-        let m = (len - 1) / b + 1;
-        let m2 = (l2 - 1) / b + 1;
+        let nr2 = l2 + mu;
+        let m = (rho - 1) / b + 1;
+        let m2 = (nr2 - 1) / b + 1;
         proof {
-            assert(len >= 1);
-            vstd::arithmetic::div_mod::lemma_div_plus_one((len - 1) as int, b as int);
-            vstd::arithmetic::div_mod::lemma_div_plus_one((l2 - 1) as int, b as int);
-            assert(((len - 1 + b) as int) / (b as int) == ((len - 1) as int) / (b as int) + 1);
-            assert(((l2 - 1 + b) as int) / (b as int) == ((l2 - 1) as int) / (b as int) + 1);
-            assert(m as nat == cdiv(len as nat, b as nat));
-            assert(m2 as nat == cdiv(l2 as nat, b as nat));
-            lemma_cdiv_mono(len as nat, l2 as nat, b as nat);
+            assert(rho >= 1);
+            vstd::arithmetic::div_mod::lemma_div_plus_one((rho - 1) as int, b as int);
+            vstd::arithmetic::div_mod::lemma_div_plus_one((nr2 - 1) as int, b as int);
+            assert(((rho - 1 + b) as int) / (b as int) == ((rho - 1) as int) / (b as int) + 1);
+            assert(((nr2 - 1 + b) as int) / (b as int) == ((nr2 - 1) as int) / (b as int) + 1);
+            assert(m as nat == cdiv(rho as nat, b as nat));
+            assert(m2 as nat == cdiv(nr2 as nat, b as nat));
+            assert(m2 as nat == ov.reach_blocks(l2 as nat));
+            // ρ <= L + μ < L' + μ (I16).
+            assert(rho <= len + mu);
+            lemma_cdiv_mono(rho as nat, nr2 as nat, b as nat);
         }
         if !self.fits_exec(m2) {
             return Err(Error::RequestTooLarge);
@@ -702,8 +717,8 @@ impl Coordinator {
             assert(d@ =~= extend_demand(ov, dd as nat));
             assert(prot@ =~= no_prot(ov));
             assert forall|c2: int| 0 <= c2 < d@.len() implies #[trigger] d@[c2] <= max_slots() by {
-                lemma_cdiv_le(l2 as nat, b as nat, max_slots());
-                assert(l2 as nat <= max_slots() * (b as nat)) by (nonlinear_arith) requires l2 <= max_slots(), b >= 1;
+                lemma_cdiv_le(nr2 as nat, b as nat, max_slots());
+                assert(nr2 as nat <= max_slots() * (b as nat)) by (nonlinear_arith) requires nr2 <= max_slots(), b >= 1;
             }
         }
         if !self.check_cap(&d, &prot) {
@@ -733,9 +748,12 @@ impl Coordinator {
                 mid.pv(0).leases[h.id].c == len,
                 mid.pv(0).leases[h.id].toks.len() == len,
                 l2 == len + suffix@.len(),
+                nr2 == l2 + mu,
+                mu as nat == mid.pv(0).cfg.mu,
+                rho as nat == mid.pv(0).leases[h.id].rho,
                 suffix@.len() > 0,
-                m2 as nat == cdiv(l2 as nat, b as nat),
-                m as nat == cdiv(len as nat, b as nat),
+                m2 as nat == cdiv(nr2 as nat, b as nat),
+                m as nat == cdiv(rho as nat, b as nat),
                 dd == m2 - m,
                 b == mid.b,
                 mid.fits_m(m2 as nat),
@@ -772,9 +790,11 @@ impl Coordinator {
                 assert(mid.pv(c as int).leases[h.id].toks == mid.pv(0).leases[h.id].toks);
                 assert(mid.pv(c as int).leases[h.id].c == mid.pv(0).leases[h.id].c);
                 assert(mid.pv(c as int).leases[h.id].pending == mid.pv(0).leases[h.id].pending);
+                assert(mid.pv(c as int).leases[h.id].rho == mid.pv(0).leases[h.id].rho);
+                assert(mid.pv(c as int).cfg == mid.pv(0).cfg);
                 assert(mid.unit@[c as int] >= 1);
                 lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m2 as nat, c as int);
-                lemma_cdiv_props(l2 as nat, b as nat);
+                lemma_cdiv_props(nr2 as nat, b as nat);
                 lemma_mul_mono(m2 as nat, mid.cunits(c as int), b as nat);
             }
             let mid_c = self.paged[c].mgr_id();
@@ -826,7 +846,8 @@ impl Coordinator {
         let lv = LeaseView { tables, slots: slv };
         proof {
             assert(ov.leases()[h.id].toks.len() == len);
-            assert(dd as nat == (cdiv(l2 as nat, b as nat) - cdiv(len as nat, b as nat)) as nat);
+            assert(ov.leases()[h.id].rho == rho as nat);
+            assert(dd as nat == (ov.reach_blocks(l2 as nat) - cdiv(rho as nat, b as nat)) as nat);
             assert(ov.b == b as nat);
             lemma_extend_ok(ov, mid@, self@, h, suffix@, lv);
         }
@@ -854,9 +875,9 @@ impl Coordinator {
             prot == no_prot(o@),
             mid@.plan_rel(pre@, d, prot),
             mid.pv(0).leases.contains_key(h),
-            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat)),
-            dd == cdiv(mid.pv(0).leases[h].toks.len() + suffix.len(), mid.b as nat) - cdiv(
-                mid.pv(0).leases[h].toks.len(),
+            mid.fits_m(cdiv(mid.pv(0).leases[h].toks.len() + suffix.len() + mid.pv(0).cfg.mu, mid.b as nat)),
+            dd == cdiv(mid.pv(0).leases[h].toks.len() + suffix.len() + mid.pv(0).cfg.mu, mid.b as nat) - cdiv(
+                mid.pv(0).leases[h].rho,
                 mid.b as nat,
             ),
             forall|c2: int| 0 <= c2 < mid.np() ==> (#[trigger] mid.pv(c2)).leases == pre.pv(c2).leases,
@@ -912,7 +933,7 @@ impl Coordinator {
         let tv = tables_view(tables@);
         assert forall|c: int| 0 <= c < o@.np implies {
             let fresh = (#[trigger] tv[c]).subrange(o@.paged[c].leases[h].table.len() as int, tv[c].len() as int);
-            &&& tv[c].len() == cdiv(o@.leases()[h].toks.len() + suffix.len(), o@.b)
+            &&& tv[c].len() == o@.reach_blocks(o@.leases()[h].toks.len() + suffix.len())
             &&& tv[c].subrange(0, o@.paged[c].leases[h].table.len() as int) == o@.paged[c].leases[h].table
             &&& fresh.len() == dd
             &&& fresh.no_duplicates()
@@ -925,6 +946,15 @@ impl Coordinator {
             assert(mid.paged@[c].valid());
             assert(mid.pv(c).leases.contains_key(h));
             assert(mid.pv(c).leases[h].toks == mid.pv(0).leases[h].toks);
+            assert(mid.pv(c).leases[h].rho == mid.pv(0).leases[h].rho);
+            assert(mid.pv(c).cfg == mid.pv(0).cfg);
+            assert(o@.mu() == mid.pv(0).cfg.mu) by {
+                assert(o@.paged[0] == pre.pv(0));
+                // The slab plan changes only ownership and keys of paged classes.
+                assert(mid@.paged[0] == (MgrV { own: mid@.paged[0].own, keys: mid@.paged[0].keys, ..pre@.paged[0] }));
+                assert(mid@.paged[0] == mid.pv(0));
+                assert(pre@.paged[0] == pre.pv(0));
+            }
             mid.lemma_table_len(c, h);
             mid.lemma_table_len(0, h);
             assert(o@.paged[0] == pre.pv(0));
@@ -938,8 +968,8 @@ impl Coordinator {
             let view = r->Ok_0;
             assert(view.pages@ == tables@[c]@);
             let fresh = view.pages@.subrange(l.table.len() as int, view.pages@.len() as int);
-            assert(view.pages@.len() == cdiv(l.toks.len() + suffix.len(), mv.b));
-            assert(fresh.len() == cdiv(l.toks.len() + suffix.len(), mv.b) - l.table.len());
+            assert(view.pages@.len() == cdiv(l.toks.len() + suffix.len() + mv.cfg.mu, mv.b));
+            assert(fresh.len() == cdiv(l.toks.len() + suffix.len() + mv.cfg.mu, mv.b) - l.table.len());
             assert(forall|j: int| 0 <= j < fresh.len() ==> mv.is_free(#[trigger] fresh[j]));
             assert(fin.pv(c) == extended(mv, h, suffix, fresh));
             assert(l.toks.len() == o@.leases()[h].toks.len());
@@ -1137,6 +1167,7 @@ impl Coordinator {
                     &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> self.pv(c).leases[h2]
                         == o.pv(c).leases[h2]
                     &&& self.pv(c).leases[h].toks == o.pv(c).leases[h].toks
+                    &&& self.pv(c).leases[h].rho == o.pv(c).leases[h].rho
                     &&& self.pv(c).leases[h].c == self.pv(0).leases[h].c
                     &&& self.pv(c).leases[h].pending == self.pv(0).leases[h].pending
                     &&& self.pv(c).leases[h].rho == self.pv(0).leases[h].rho
@@ -1215,11 +1246,13 @@ impl Coordinator {
                 }
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
-                cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
+                cdiv(self.pv(0).leases[h2].rho, self.b as nat),
             ) by {
                 assert(o.pv(0).leases.contains_key(h2));
                 if h2 != h {
                     assert(self.pv(0).leases[h2] == o.pv(0).leases[h2]);
+                } else {
+                    assert(self.pv(0).leases[h].rho == o.pv(0).leases[h].rho);
                 }
             }
         }
@@ -1823,8 +1856,14 @@ impl Coordinator {
 pub struct CoordRequestView {
     pub len: usize,
     pub computed: usize,
+    /// `ρ_h`: the reach the page tables cover (D18).
+    pub reach: usize,
     pub pending: Option<Ticket>,
     pub block_size: usize,
+    /// This instance's `λ`, `μ` and `δ` (C6).
+    pub lam: usize,
+    pub mu: usize,
+    pub delta: usize,
     pub lease: LeaseView,
 }
 
@@ -1850,7 +1889,11 @@ impl Coordinator {
                 let l = self@.leases()[h.id];
                 &&& v.len as nat == l.toks.len()
                 &&& v.computed as nat == l.c
+                &&& v.reach as nat == l.rho
                 &&& v.block_size as nat == self@.b
+                &&& v.lam as nat == self@.lam()
+                &&& v.mu as nat == self@.mu()
+                &&& v.delta as nat == self@.delta()
                 &&& (v.pending is Some) == (l.pending.len() > 0)
                 &&& v.pending matches Some(t) ==> t.mgr == self@.id && t.id == l.pending[0]
                 &&& v.lease.tables@.len() == self@.np
@@ -1924,11 +1967,17 @@ impl Coordinator {
             Some(t) => Some(Ticket { mgr: self.id, id: t.id }),
             None => None,
         };
+        let reach = self.paged[0].lease_rho(h.id);
+        let cfg = self.cfg_exec();
         Ok(CoordRequestView {
             len: rv0.len,
             computed: rv0.computed,
+            reach,
             pending,
             block_size: self.b,
+            lam: cfg.lam,
+            mu: cfg.mu,
+            delta: cfg.delta,
             lease: LeaseView { tables, slots },
         })
     }
@@ -1941,9 +1990,9 @@ impl Coordinator {
             !(h.mgr == self@.id && self@.leases().contains_key(h.id) && (c as nat) < self@.np) ==> r is Err,
             (h.mgr == self@.id && self@.leases().contains_key(h.id) && (c as nat) < self@.np) ==> {
                 let l = self@.paged[c as int].leases[h.id];
-                &&& (j as nat) < l.toks.len() ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
+                &&& (j as nat) < l.rho ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
                     && slot_of(self@.b, l.table, j as int) < self@.paged[c as int].p * self@.b
-                &&& (j as nat) >= l.toks.len() ==> r == Err::<usize, Error>(Error::InvalidArgument)
+                &&& (j as nat) >= l.rho ==> r == Err::<usize, Error>(Error::InvalidArgument)
             },
     {
         if self.lease_live(h).is_none() || c >= self.npaged {
