@@ -475,6 +475,54 @@ impl Coordinator {
     }
 
     /// `valid` after extending lease `h` in every paged class (state classes untouched).
+    /// `pools_ok` carries over a step that keeps every pool valid, with its size, B, namespace and
+    /// configuration. Kept small: the restatement is fragile inside large proof contexts.
+    pub(crate) proof fn lemma_pools_frame(&self, o: &Coordinator)
+        requires
+            o.pools_ok(),
+            self.npaged == o.npaged,
+            self.paged@.len() == o.paged@.len(),
+            self.state@.len() == o.state@.len(),
+            self.unit@ == o.unit@,
+            self.per@ == o.per@,
+            self.nslab == o.nslab,
+            self.b == o.b,
+            forall|i: int|
+                0 <= i < o.np() ==> {
+                    &&& (#[trigger] self.paged@[i]).valid()
+                    &&& self.pv(i).p == o.pv(i).p
+                    &&& self.pv(i).b == o.pv(i).b
+                    &&& self.pv(i).ns == o.pv(i).ns
+                    &&& self.pv(i).cfg == o.pv(i).cfg
+                },
+            forall|j: int|
+                0 <= j < o.nst() ==> {
+                    &&& (#[trigger] self.state@[j]).valid()
+                    &&& self.sv(j).p == o.sv(j).p
+                },
+        ensures
+            self.pools_ok(),
+    {
+        assert forall|i: int| 0 <= i < self.np() implies {
+            &&& #[trigger] self.paged@[i].valid()
+            &&& self.pv(i).p == self.cunits(i)
+            &&& self.pv(i).b == self.b as nat
+            &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
+        } by {
+            assert(o.paged@[i].valid());
+            assert(o.paged@[0].valid());
+            assert(self.paged@[0].valid());
+        }
+        assert forall|j: int| 0 <= j < self.nst() implies {
+            &&& #[trigger] self.state@[j].valid()
+            &&& self.sv(j).p == self.cunits(self.np() + j)
+        } by {
+            assert(o.state@[j].valid());
+        }
+    }
+
     proof fn lemma_extend_valid(&self, mid: &Coordinator, h: u64, suffix: Seq<Token>)
         requires
             mid.valid(),
@@ -517,27 +565,7 @@ impl Coordinator {
             self.valid(),
     {
         assert(self.cfg_ok());
-        assert(self.pools_ok()) by {
-            assert forall|i: int| 0 <= i < self.np() implies {
-                &&& #[trigger] self.paged@[i].valid()
-                &&& self.pv(i).p == self.cunits(i)
-                &&& self.pv(i).b == self.b as nat
-                &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).cfg == self.pv(0).cfg
-                &&& cfg_rel(self.pv(i).cfg, self.np())
-            } by {
-                assert(mid.paged@[i].valid());
-                assert(self.paged@[0].valid());
-                assert(mid.pv(i).cfg == mid.pv(0).cfg);
-                assert(self.pv(0).cfg == mid.pv(0).cfg);
-            }
-            assert forall|j: int| 0 <= j < self.nst() implies {
-                &&& #[trigger] self.state@[j].valid()
-                &&& self.sv(j).p == self.cunits(self.np() + j)
-            } by {
-                assert(mid.state@[j].valid());
-            }
-        }
+        self.lemma_pools_frame(mid);
         assert(self.own_ok()) by {
             assert forall|c: int, x: int| 0 <= c < self.ncls() && 0 <= x < self.cunits(c) implies #[trigger] self.cown(c, x)
                 == (self.owner@[x / (self.per_c(c) as int)] == c + 1) by {

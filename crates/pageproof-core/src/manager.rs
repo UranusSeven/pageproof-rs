@@ -54,6 +54,7 @@ pub struct PendC {
     pub lease: u64,
     pub a: usize,
     pub z: usize,
+    pub drafts: Vec<Token>,
 }
 
 pub struct Manager {
@@ -83,7 +84,7 @@ pub open spec fn lease_view(l: LeaseC) -> LeaseV {
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {
-    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat }
+    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@ }
 }
 
 impl Manager {

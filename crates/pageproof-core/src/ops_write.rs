@@ -22,11 +22,16 @@ broadcast use vstd::std_specs::hash::group_hash_axioms;
 // ---------------------------------------------------------------------------------------------
 
 pub open spec fn began(v: MgrV, h: u64, n: nat) -> MgrV {
+    began_d(v, h, n, Seq::empty())
+}
+
+/// `begin_write` with draft tokens `drafts` after the input `[c, c + n)` (D16).
+pub open spec fn began_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>) -> MgrV {
     let l = v.leases[h];
     let t = v.next_ticket;
     MgrV {
         leases: v.leases.insert(h, LeaseV { pending: seq![t], ..l }),
-        pend: v.pend.insert(t, PendV { lease: h, a: l.c, z: l.c + n }),
+        pend: v.pend.insert(t, PendV { lease: h, a: l.c, z: l.c + n, drafts }),
         next_ticket: (t + 1) as u64,
         ..v
     }
@@ -60,6 +65,29 @@ pub open spec fn plan_ok(v: MgrV, h: u64, n: nat, plan: ExecutionPlan) -> bool {
     &&& plan.page_table@ == l.table.subrange(0, cdiv(z, v.b) as int)
 }
 
+/// Plan correctness with drafts (C3): inputs `T_h[a:z] ++ D` at `[a, z + k)`, and write slots for
+/// `[a, z + k + ext)`, where `ext` is the class's extra write range (proposal rows, D20).
+pub open spec fn plan_ok_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>, ext: nat, plan: ExecutionPlan) -> bool {
+    let l = v.leases[h];
+    let a = l.c;
+    let z = l.c + n;
+    let k = drafts.len();
+    let w = z + k + ext;
+    &&& plan.ticket == Ticket { mgr: v.id, id: v.next_ticket }
+    &&& plan.handle == Handle { mgr: v.id, id: h }
+    &&& plan.block_size as nat == v.b
+    &&& plan.input_ids@ == l.toks.subrange(a as int, z as int) + drafts
+    &&& plan.positions@.len() == n + k
+    &&& forall|q: int| 0 <= q < n + k ==> #[trigger] plan.positions@[q] as int == a + q
+    &&& plan.write_slots@.len() == w - a
+    &&& forall|q: int| 0 <= q < w - a ==> #[trigger] plan.write_slots@[q] as int == slot_of(v.b, l.table, a + q)
+    &&& forall|q: int| 0 <= q < w - a ==> (#[trigger] plan.write_slots@[q] as nat) < v.p * v.b
+    &&& forall|q1: int, q2: int|
+        0 <= q1 < w - a && 0 <= q2 < w - a && q1 != q2 ==> #[trigger] plan.write_slots@[q1] != #[trigger] plan.write_slots@[q2]
+    &&& forall|q: int| 0 <= q < w - a ==> write_page_ok(v, h, #[trigger] l.table[(a + q) / (v.b as int)])
+    &&& plan.page_table@ == l.table.subrange(0, cdiv(w, v.b) as int)
+}
+
 pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<(Ticket, ExecutionPlan), Error>) -> bool {
     let live = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
@@ -80,27 +108,67 @@ pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<
     }
 }
 
-pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
+/// Arguments `begin_write_v` accepts on a live lease with no ticket in flight: input `[c, c + n)`,
+/// drafts only after the whole input, and the write range `[c, c + n + k + ext)` inside the reach.
+pub open spec fn begin_args_ok(l: LeaseV, n: nat, k: nat, ext: nat) -> bool {
+    &&& 0 < n
+    &&& l.c + n <= l.toks.len()
+    &&& (k > 0 || ext > 0) ==> l.c + n == l.toks.len()
+    &&& l.c + n + k + ext <= l.rho
+}
+
+pub open spec fn begin_result_v(
+    v: MgrV,
+    v2: MgrV,
+    h: Handle,
+    n: usize,
+    drafts: Seq<Token>,
+    ext: usize,
+    r: Result<(Ticket, ExecutionPlan), Error>,
+) -> bool {
+    let live = h.mgr == v.id && v.leases.contains_key(h.id);
+    let l = v.leases[h.id];
+    let ok = begin_args_ok(l, n as nat, drafts.len(), ext as nat);
+    &&& !live ==> r is Err && r->Err_0 == Error::InvalidHandle
+    &&& (live && l.pending.len() > 0) ==> r is Err && r->Err_0 == Error::Busy
+    &&& (live && l.pending.len() == 0 && !ok) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && l.pending.len() == 0 && ok) ==> (r is Ok <==> v.next_ticket < u64::MAX)
+    &&& (live && l.pending.len() == 0 && ok && v.next_ticket == u64::MAX) ==> r is Err && r->Err_0
+        == Error::IdentifierExhausted
+    &&& r matches Ok((t, plan)) ==> {
+        &&& live
+        &&& t == plan.ticket
+        &&& plan_ok_d(v, h.id, n as nat, drafts, ext as nat, plan)
+        // §9.0 (b): the context [0, a) is valid KV of the causal prefix.
+        &&& forall|j: int| 0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
+        &&& v2 == began_d(v, h.id, n as nat, drafts)
+    }
+}
+
+pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat, drafts: Seq<Token>)
     requires
         inv(v, log),
         v.leases.contains_key(h),
         v.leases[h].pending.len() == 0,
         0 < n,
         v.leases[h].c + n <= v.leases[h].toks.len(),
+        drafts.len() > 0 ==> v.leases[h].c + n == v.leases[h].toks.len(),
+        v.leases[h].c + n + drafts.len() <= v.leases[h].rho,
         v.next_ticket < u64::MAX,
     ensures
-        inv(began(v, h, n), log),
+        inv(began_d(v, h, n, drafts), log),
 {
     reveal(lease_ok);
     reveal(page_ok);
     reveal(pend_ok);
-    let v2 = began(v, h, n);
+    let v2 = began_d(v, h, n, drafts);
     let t = v.next_ticket;
     assert(!v.pend.contains_key(t)) by {
         if v.pend.contains_key(t) {
             assert(pend_ok(v, t));
         }
     }
+    assert(lease_ok(v, log, h));
     assert forall|h2: u64| #[trigger] v2.leases.contains_key(h2) implies lease_ok(v2, log, h2) by {
         assert(lease_ok(v, log, h2));
         let l = v2.leases[h2];
@@ -132,26 +200,33 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
                     assert(v.leases[h].pending == seq![t2]);
                 }
             }
+        } else {
+            // With nothing in flight and input left, the reach is whole (I16).
+            let l = v.leases[h];
+            if l.c + n < l.toks.len() {
+                assert(l.c < l.toks.len());
+            }
         }
     }
 }
 
-/// The plan's write pages are exclusive and unpublished; slots are in range and distinct.
-proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, z: nat)
+/// The plan's write pages are exclusive and unpublished; slots are in range and distinct, for any
+/// write end `w` inside the reach.
+proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, w: nat)
     requires
         inv(v, log),
         v.leases.contains_key(h),
         v.leases[h].c == a,
-        a < z <= v.leases[h].toks.len(),
+        a < w <= v.leases[h].rho,
     ensures
         forall|j: int|
-            a <= j < z ==> {
+            a <= j < w ==> {
                 &&& 0 <= #[trigger] slot_of(v.b, v.leases[h].table, j) < v.p * v.b
                 &&& (j / (v.b as int)) < v.leases[h].table.len()
                 &&& write_page_ok(v, h, v.leases[h].table[j / (v.b as int)])
             },
         forall|j1: int, j2: int|
-            a <= j1 < z && a <= j2 < z && j1 != j2 ==> #[trigger] slot_of(v.b, v.leases[h].table, j1) != #[trigger] slot_of(
+            a <= j1 < w && a <= j2 < w && j1 != j2 ==> #[trigger] slot_of(v.b, v.leases[h].table, j1) != #[trigger] slot_of(
                 v.b,
                 v.leases[h].table,
                 j2,
@@ -160,8 +235,7 @@ proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, z: nat)
     reveal(lease_ok);
     let l = v.leases[h];
     assert(lease_ok(v, log, h));
-    lemma_cdiv_props(l.toks.len(), v.b);
-    assert forall|j: int| a <= j < z implies {
+    assert forall|j: int| a <= j < w implies {
         &&& 0 <= #[trigger] slot_of(v.b, l.table, j) < v.p * v.b
         &&& (j / (v.b as int)) < l.table.len()
         &&& write_page_ok(v, h, l.table[j / (v.b as int)])
@@ -177,7 +251,7 @@ proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, z: nat)
         lemma_mul_succ(i as nat, v.b);
         lemma_uncomputed_exclusive(v, log, h, i as nat);
     }
-    assert forall|j1: int, j2: int| a <= j1 < z && a <= j2 < z && j1 != j2 implies #[trigger] slot_of(v.b, l.table, j1)
+    assert forall|j1: int, j2: int| a <= j1 < w && a <= j2 < w && j1 != j2 implies #[trigger] slot_of(v.b, l.table, j1)
         != #[trigger] slot_of(v.b, l.table, j2) by {
         lemma_div_bounds(j1 as nat, v.b);
         lemma_div_bounds(j2 as nat, v.b);
@@ -205,6 +279,43 @@ impl Manager {
             r is Err ==> final(self)@ == old(self)@,
             begin_result(old(self)@, final(self)@, h, n, r),
     {
+        let ghost v = self@;
+        let ghost dl = self.den_log();
+        proof {
+            self.lemma_valid();
+        }
+        let none: Vec<Token> = Vec::new();
+        let r = self.begin_write_v(h, n, none.as_slice(), 0);
+        proof {
+            let e = Seq::<Token>::empty();
+            assert(none@ =~= e);
+            if h.mgr == v.id && v.leases.contains_key(h.id) {
+                reveal(lease_ok);
+                assert(lease_ok(v, dl, h.id));
+                let l = v.leases[h.id];
+                assert(begin_args_ok(l, n as nat, 0, 0) == (0 < n && l.c + n <= l.toks.len()));
+            }
+            if r is Ok {
+                let plan = r->Ok_0.1;
+                let l = v.leases[h.id];
+                assert(l.toks.subrange(l.c as int, (l.c + n) as int) + e =~= l.toks.subrange(l.c as int, (l.c + n) as int));
+                assert(plan_ok(v, h.id, n as nat, plan));
+            }
+        }
+        r
+    }
+
+    /// C3 with drafts: issue a ticket and a plan feeding `T_h[c_h : c_h + n] ++ drafts`, with write
+    /// slots for `ext` more positions (a drafter class's proposal rows, D20).
+    pub fn begin_write_v(&mut self, h: Handle, n: usize, drafts: &[Token], ext: usize) -> (r: Result<(Ticket, ExecutionPlan), Error>)
+        requires
+            old(self).valid(),
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            r is Err ==> final(self)@ == old(self)@,
+            begin_result_v(old(self)@, final(self)@, h, n, drafts@, ext, r),
+    {
         if !self.handle_ok(h) {
             return Err(Error::InvalidHandle);
         }
@@ -228,7 +339,13 @@ impl Manager {
             return Err(Error::Busy);
         }
         let a = l.c;
-        if n == 0 || n > l.toks.len() - a {
+        let len = l.toks.len();
+        let k = drafts.len();
+        proof {
+            assert(l.rho as nat <= v.p * v.b);
+            assert(v.p * v.b <= max_slots());
+        }
+        if n == 0 || n > len - a || ((k > 0 || ext > 0) && a + n != len) || k > l.rho - a - n || ext > l.rho - a - n - k {
             self.leases.insert(h.id, l);
             proof {
                 assert(self.leases@ =~= old(self).leases@);
@@ -243,41 +360,43 @@ impl Manager {
             return Err(Error::IdentifierExhausted);
         }
         let z = a + n;
+        let zk = z + k;
+        let w = zk + ext;
         let b = self.b;
         proof {
-            lemma_plan_slots(v, log, h.id, a as nat, z as nat);
-            lemma_cdiv_props(l.toks@.len(), v.b);
-            lemma_cdiv_props(z as nat, v.b);
-            lemma_cdiv_mono(z as nat, l.toks@.len(), v.b);
+            lemma_plan_slots(v, log, h.id, a as nat, w as nat);
+            lemma_cdiv_le(w as nat, v.b, l.table@.len());
         }
         let ghost lv = v.leases[h.id];
-        let mut input_ids: Vec<Token> = Vec::new();
+        // Inputs: the input interval, then the drafts.
+        let mut input_ids = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.toks.as_slice(), a, z));
+        input_ids.extend_from_slice(drafts);
         let mut positions: Vec<usize> = Vec::new();
         let mut write_slots: Vec<usize> = Vec::new();
         let mut j = a;
-        while j < z
+        while j < w
             invariant
                 lv == lease_view(l),
                 b as nat == v.b,
                 b > 0,
-                a <= j <= z,
-                z <= l.toks@.len(),
+                a <= j <= w,
+                zk <= w,
                 v.p * v.b <= max_slots(),
-                input_ids@ == l.toks@.subrange(a as int, j as int),
-                positions@.len() == j - a,
-                forall|q: int| 0 <= q < j - a ==> #[trigger] positions@[q] as int == a + q,
+                positions@.len() == if j <= zk { j - a } else { zk - a },
+                forall|q: int| 0 <= q < positions@.len() ==> #[trigger] positions@[q] as int == a + q,
                 write_slots@.len() == j - a,
                 forall|q: int| 0 <= q < j - a ==> #[trigger] write_slots@[q] as int == slot_of(v.b, lv.table, a + q),
                 forall|jj: int|
-                    a <= jj < z ==> {
+                    a <= jj < w ==> {
                         &&& 0 <= #[trigger] slot_of(v.b, lv.table, jj) < v.p * v.b
                         &&& (jj / (v.b as int)) < lv.table.len()
                     },
                 forall|i: int| 0 <= i < lv.table.len() ==> (#[trigger] lv.table[i] as nat) < v.p,
-            decreases z - j,
+            decreases w - j,
         {
-            input_ids.push(l.toks[j]);
-            positions.push(j);
+            if j < zk {
+                positions.push(j);
+            }
             proof {
                 assert(0 <= slot_of(v.b, lv.table, j as int) < v.p * v.b);
                 assert((j as int / (v.b as int)) < lv.table.len());
@@ -285,16 +404,13 @@ impl Manager {
             }
             let pg = l.table[j / b];
             write_slots.push(pg * b + j % b);
-            proof {
-                assert(input_ids@ =~= l.toks@.subrange(a as int, j + 1));
-            }
             j += 1;
         }
         proof {
             assert(b as nat <= v.p * v.b) by (nonlinear_arith) requires v.p >= 1, b as nat == v.b;
-            lemma_cdiv_le(z as nat, v.b, lv.table.len());
+            assert(w as nat <= lv.rho);
         }
-        let nb = (z + b - 1) / b;
+        let nb = (w + b - 1) / b;
         let page_table = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.table.as_slice(), 0, nb));
         let t = self.next_ticket;
         self.next_ticket = t + 1;
@@ -302,10 +418,11 @@ impl Manager {
         l.pending.push(t);
         assert(l.pending@ =~= seq![t]);
         self.leases.insert(h.id, l);
-        self.pend.insert(t, PendC { lease: h.id, a, z });
-        let ghost v2 = began(v, h.id, n as nat);
+        let dv = vstd::slice::slice_to_vec(drafts);
+        self.pend.insert(t, PendC { lease: h.id, a, z, drafts: dv });
+        let ghost v2 = began_d(v, h.id, n as nat, drafts@);
         proof {
-            lemma_begin_inv(v, log, h.id, n as nat);
+            lemma_begin_inv(v, log, h.id, n as nat, drafts@);
         }
         self.g = Ghost(v2);
         let ticket = Ticket { mgr: self.id, id: t };
@@ -329,25 +446,29 @@ impl Manager {
                     assert(Self::head_ok(v, old(self).leases@[h2]));
                 }
             }
+            assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
+            }
             let lw = v.leases[h.id];
-            assert(plan.input_ids@ == lw.toks.subrange(a as int, z as int));
-            assert forall|q: int| 0 <= q < n implies (#[trigger] plan.write_slots@[q] as nat) < v.p * v.b by {
+            assert(plan.input_ids@ == lw.toks.subrange(a as int, z as int) + drafts@);
+            assert(positions@.len() == zk - a);
+            assert forall|q: int| 0 <= q < w - a implies (#[trigger] plan.write_slots@[q] as nat) < v.p * v.b by {
                 assert(plan.write_slots@[q] as int == slot_of(v.b, lw.table, a + q));
             }
-            assert forall|q1: int, q2: int| 0 <= q1 < n && 0 <= q2 < n && q1 != q2 implies #[trigger] plan.write_slots@[q1]
+            assert forall|q1: int, q2: int| 0 <= q1 < w - a && 0 <= q2 < w - a && q1 != q2 implies #[trigger] plan.write_slots@[q1]
                 != #[trigger] plan.write_slots@[q2] by {
                 assert(plan.write_slots@[q1] as int == slot_of(v.b, lw.table, a + q1));
                 assert(plan.write_slots@[q2] as int == slot_of(v.b, lw.table, a + q2));
             }
-            assert forall|q: int| 0 <= q < n implies write_page_ok(v, h.id, #[trigger] lw.table[(a + q) / (v.b as int)]) by {
+            assert forall|q: int| 0 <= q < w - a implies write_page_ok(v, h.id, #[trigger] lw.table[(a + q) / (v.b as int)]) by {
                 let jj = a + q;
-                assert(a <= jj < z);
+                assert(a <= jj < w);
                 assert(0 <= slot_of(v.b, lw.table, jj));
             }
             assert(lease_ok(v, log, h.id));
-            assert(nb as nat == cdiv(z as nat, v.b));
+            lemma_cdiv_props(w as nat, v.b);
+            assert(nb as nat == cdiv(w as nat, v.b));
             assert(page_table@ =~= lw.table.subrange(0, nb as int));
-            assert(plan_ok(v, h.id, n as nat, plan));
+            assert(plan_ok_d(v, h.id, n as nat, drafts@, ext as nat, plan));
         }
         Ok((ticket, plan))
     }
@@ -937,6 +1058,231 @@ impl Manager {
             }
         }
         Ok(z)
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// D17: committing accepted drafts
+// ---------------------------------------------------------------------------------------------
+
+/// The state after committing the first `n` drafts of pending ticket `t` (D17): they join the
+/// input `T_h`, and the ticket's input now ends `n` positions later. The frontier is unchanged;
+/// `finish_write` then credits `[a, z + n)` over the extended input.
+pub open spec fn committed(v: MgrV, t: u64, n: nat) -> MgrV {
+    let r = v.pend[t];
+    let h = r.lease;
+    let l = v.leases[h];
+    MgrV {
+        leases: v.leases.insert(h, LeaseV { toks: l.toks + r.drafts.subrange(0, n as int), ..l }),
+        pend: v.pend.insert(t, PendV { z: r.z + n, drafts: r.drafts.subrange(n as int, r.drafts.len() as int), ..r }),
+        ..v
+    }
+}
+
+/// `Valid` is preserved by committing accepted drafts.
+pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
+    requires
+        inv(v, log),
+        v.pend.contains_key(t),
+        n <= v.pend[t].drafts.len(),
+    ensures
+        inv(committed(v, t, n), log),
+{
+    reveal(lease_ok);
+    reveal(page_ok);
+    reveal(pend_ok);
+    let v2 = committed(v, t, n);
+    let r = v.pend[t];
+    let h = r.lease;
+    let l = v.leases[h];
+    let l2 = v2.leases[h];
+    assert(pend_ok(v, t));
+    assert(lease_ok(v, log, h));
+    assert(l.pending == seq![t]);
+    if n > 0 {
+        assert(r.z == l.toks.len());
+    }
+    assert(l2.toks.len() == l.toks.len() + n);
+    // The input only grows: every prefix of the old input is unchanged.
+    assert forall|j: int| 0 <= j <= l.toks.len() implies #[trigger] l2.toks.subrange(0, j) == l.toks.subrange(0, j) by {
+        assert(l2.toks.subrange(0, j) =~= l.toks.subrange(0, j));
+    }
+    assert forall|j: int| 0 <= j < l2.c implies (v2.vmap)(#[trigger] slot_of(v2.b, l2.table, j)) == l2.toks.subrange(
+        0,
+        j + 1,
+    ) by {
+        assert(l2.toks.subrange(0, j + 1) == l.toks.subrange(0, j + 1));
+    }
+    assert forall|i: nat| i < l2.table.len() implies #[trigger] blk_ok(v2, log, l2, i) by {
+        assert(blk_ok(v, log, l, i));
+        if (i + 1) * v.b <= l.c {
+            assert(l2.toks.subrange(0, ((i + 1) * v.b) as int) == l.toks.subrange(0, ((i + 1) * v.b) as int));
+            lemma_chain_key_prefix(v.seed(), l.toks, l2.toks, v.b, i);
+            lemma_chain_logged_prefix(log, v.ns, l.toks, l2.toks, v.b, i);
+        }
+    }
+    assert(lease_ok(v2, log, h));
+    assert forall|h2: u64| #[trigger] v2.leases.contains_key(h2) implies lease_ok(v2, log, h2) by {
+        if h2 != h {
+            assert(lease_ok(v, log, h2));
+            let lo = v.leases[h2];
+            if lo.pending.len() > 0 {
+                assert(lo.pending[0] != t);
+            }
+            lemma_lease_frame(v, v2, log, log, h2);
+        }
+    }
+    assert forall|x: PageId| (x as nat) < v2.p implies #[trigger] page_ok(v2, log, x) by {
+        assert(page_ok(v, log, x));
+        assert(hold_ok(v, x));
+        assert forall|h2: u64| #[trigger] v2.holders[x as int].contains(h2) <==> (v2.leases.contains_key(h2)
+            && v2.leases[h2].table.contains(x)) by {
+        }
+        if v.keys[x as int] is Some {
+            lemma_pub_frame(v, v2, log, log, x);
+        }
+    }
+    assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
+        if t2 != t {
+            assert(pend_ok(v, t2));
+            assert(v.pend[t2].lease != h) by {
+                if v.pend[t2].lease == h {
+                    assert(v.leases[h].pending == seq![t2]);
+                }
+            }
+            lemma_pend_frame(v, v2, t2);
+        } else {
+            let r2 = v2.pend[t];
+            if r2.drafts.len() > 0 {
+                assert(r.drafts.len() > 0);
+            }
+            if r2.z < l2.toks.len() {
+                assert(r.z < l.toks.len());
+                assert(r.drafts.len() == 0);
+            }
+        }
+    }
+    lemma_last_frame(v, v2);
+}
+
+impl Manager {
+    /// D17: commit the first `n` drafts of pending ticket `t`. Not public: the first half of
+    /// `finish_write_n`.
+    fn commit_drafts(&mut self, t: u64, n: usize)
+        requires
+            old(self).valid(),
+            old(self)@.pend.contains_key(t),
+            n <= old(self)@.pend[t].drafts.len(),
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            final(self)@ == committed(old(self)@, t, n as nat),
+            final(self).id == old(self).id,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log = self.den_log();
+        let ghost hid0 = v.pend[t].lease;
+        proof {
+            reveal(pend_ok);
+            reveal(lease_ok);
+            assert(pend_ok(v, t));
+            assert(lease_ok(v, log, hid0));
+            assert(Self::head_ok(v, self.leases@[hid0]));
+            assert(v.pend[t].z + v.pend[t].drafts.len() <= v.leases[hid0].rho);
+        }
+        let mut pr = self.pend.remove(&t).unwrap();
+        let hid = pr.lease;
+        let mut l = self.leases.remove(&hid).unwrap();
+        let ghost l0 = l;
+        let k = pr.drafts.len();
+        l.toks.extend_from_slice(vstd::slice::slice_subrange(pr.drafts.as_slice(), 0, n));
+        let rest = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(pr.drafts.as_slice(), n, k));
+        pr.drafts = rest;
+        pr.z = pr.z + n;
+        self.leases.insert(hid, l);
+        self.pend.insert(t, pr);
+        let ghost v2 = committed(v, t, n as nat);
+        proof {
+            lemma_commit_inv(v, log, t, n as nat);
+        }
+        self.g = Ghost(v2);
+        proof {
+            let lv = v.leases[hid];
+            assert(self.leases@.dom() =~= v2.leases.dom());
+            assert(self.pend@.dom() =~= v2.pend.dom());
+            assert forall|h2: u64| #[trigger] self.leases@.contains_key(h2) implies lease_view(self.leases@[h2])
+                == v2.leases[h2] && Self::head_ok(v2, self.leases@[h2]) by {
+                if h2 != hid {
+                    assert(Self::head_ok(v, self.leases@[h2]));
+                } else {
+                    let lc = self.leases@[h2];
+                    assert(lc.toks@ =~= lv.toks + v.pend[t].drafts.subrange(0, n as int));
+                    assert(lease_view(lc) == v2.leases[h2]);
+                    let q = lc.c as nat / v.b;
+                    if q > 0 {
+                        lemma_div_bounds(lc.c as nat, v.b);
+                        lemma_mul_succ((q - 1) as nat, v.b);
+                        assert(lc.toks@.subrange(0, (q * v.b) as int) =~= lv.toks.subrange(0, (q * v.b) as int));
+                        lemma_chain_key_prefix(v.seed(), lv.toks, lc.toks@, v.b, (q - 1) as nat);
+                    }
+                }
+            }
+            assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
+                if t2 == t {
+                    assert(self.pend@[t].drafts@ =~= v.pend[t].drafts.subrange(n as int, k as int));
+                }
+            }
+        }
+    }
+}
+
+/// C4 with an acceptance count (D17): commit the first `n` drafts, then complete the ticket.
+pub open spec fn finish_n_result(
+    v: MgrV,
+    v2: MgrV,
+    log2: Log,
+    t: Ticket,
+    c: Completion,
+    n: usize,
+    r: Result<usize, Error>,
+) -> bool {
+    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t;
+    &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
+    &&& (live && n > v.pend[t.id].drafts.len()) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && n <= v.pend[t.id].drafts.len()) ==> r is Ok
+    &&& r is Ok ==> live && n <= v.pend[t.id].drafts.len() && finish_result(committed(v, t.id, n as nat), v2, log2, t, c, r)
+}
+
+impl Manager {
+    /// C4 with an acceptance count `n` (D17): the first `n` drafts of the ticket join `T_h`, and
+    /// `[a, z + n)` is credited and published over the extended input.
+    pub fn finish_write_n(&mut self, t: Ticket, completion: Completion, n: usize) -> (r: Result<usize, Error>)
+        requires
+            old(self).valid(),
+        ensures
+            final(self).valid(),
+            old(self).den_log().submap_of(final(self).den_log()),
+            r is Err ==> final(self)@ == old(self)@,
+            finish_n_result(old(self)@, final(self)@, final(self).den_log(), t, completion, n, r),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id
+            || !self.pend.contains_key(&t.id) {
+            return Err(Error::InvalidTicket);
+        }
+        if n > self.pend.get(&t.id).unwrap().drafts.len() {
+            return Err(Error::InvalidArgument);
+        }
+        self.commit_drafts(t.id, n);
+        self.finish_write(t, completion)
     }
 }
 

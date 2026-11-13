@@ -53,6 +53,8 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& l.table.no_duplicates()
     &&& forall|i: int| 0 <= i < l.table.len() ==> (#[trigger] l.table[i] as nat) < v.p
     &&& l.c <= l.toks.len()
+    // I16: with no ticket in flight and input left, the reservation is whole.
+    &&& (l.pending.len() == 0 && l.c < l.toks.len()) ==> l.rho == l.toks.len() + v.cfg.mu
     &&& forall|j: int|
         0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
     &&& forall|i: nat| i < l.table.len() ==> #[trigger] blk_ok(v, log, l, i)
@@ -101,6 +103,10 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     &&& v.leases[r.lease].pending == seq![t]
     &&& r.a == v.leases[r.lease].c
     &&& r.a < r.z <= v.leases[r.lease].toks.len()
+    // D16: drafts follow the whole input and fit the reservation (D18, I16).
+    &&& r.drafts.len() > 0 ==> r.z == v.leases[r.lease].toks.len()
+    &&& r.z + r.drafts.len() <= v.leases[r.lease].rho
+    &&& r.z < v.leases[r.lease].toks.len() ==> v.leases[r.lease].rho == v.leases[r.lease].toks.len() + v.cfg.mu
 }
 
 /// `Valid(S)`.
@@ -185,6 +191,7 @@ pub proof fn lemma_pend_frame(v: MgrV, v2: MgrV, t: u64)
     requires
         pend_ok(v, t),
         v2.pend[t] == v.pend[t],
+        v2.cfg == v.cfg,
         v.next_ticket <= v2.next_ticket,
         v2.leases.contains_key(v.pend[t].lease),
         v2.leases[v.pend[t].lease] == v.leases[v.pend[t].lease],

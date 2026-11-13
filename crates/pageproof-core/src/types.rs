@@ -84,6 +84,8 @@ pub ghost struct PendV {
     pub lease: u64,
     pub a: nat,
     pub z: nat,
+    /// The draft tokens fed after the input (D16); empty unless `z = |T_h|`.
+    pub drafts: Seq<Token>,
 }
 
 /// Configuration fixed at create and shared by every paged class (I10).
