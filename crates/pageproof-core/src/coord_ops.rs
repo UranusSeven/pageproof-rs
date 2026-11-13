@@ -2808,6 +2808,8 @@ pub struct CoordRequestView {
     /// `ρ_h`: the reach the page tables cover (D18).
     pub reach: usize,
     pub pending: Option<Ticket>,
+    /// `Q_h`: the pending tickets in issue order; `pending` is its first entry.
+    pub queue: Vec<Ticket>,
     /// `X_h` is non-empty: position `L_h` is deferred, so `L̂_h = L_h + 1` (D22).
     pub deferred: bool,
     /// `p_h`: the planned frontier, and `s_h`: the drafts of the pending tickets (§3.2).
@@ -2850,6 +2852,8 @@ impl Coordinator {
                 &&& v.planned as nat == pfront(self@.paged[0], l)
                 &&& v.slack as nat == sdr(self@.paged[0], l)
                 &&& v.stopped == l.stopped
+                &&& v.queue@.len() == l.pending.len()
+                &&& forall|i: int| 0 <= i < l.pending.len() ==> (#[trigger] v.queue@[i]).mgr == self@.id && v.queue@[i].id == l.pending[i]
                 &&& v.block_size as nat == self@.b
                 &&& v.lam as nat == self@.lam()
                 &&& v.mu as nat == self@.mu()
@@ -2932,12 +2936,26 @@ impl Coordinator {
         let (_q, planned) = self.paged[0].queue_info(h.id);
         let slack = self.paged[0].queue_slack(h.id);
         let stopped = self.paged[0].lease_stopped(h.id);
+        let ids = self.paged[0].queue_ids(h.id);
+        let mut queue: Vec<Ticket> = Vec::new();
+        let mut i: usize = 0;
+        while i < ids.len()
+            invariant
+                i <= ids@.len(),
+                queue@.len() == i,
+                forall|i2: int| 0 <= i2 < i ==> (#[trigger] queue@[i2]).mgr == self.id && queue@[i2].id == ids@[i2],
+            decreases ids.len() - i,
+        {
+            queue.push(Ticket { mgr: self.id, id: ids[i] });
+            i += 1;
+        }
         let cfg = self.cfg_exec();
         Ok(CoordRequestView {
             len: rv0.len,
             computed: rv0.computed,
             reach,
             pending,
+            queue,
             deferred,
             planned,
             slack,

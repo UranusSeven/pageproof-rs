@@ -1,4 +1,4 @@
-//! Python facade for the verified block manager and the v0.3 coordinator. UNVERIFIED, part of the
+//! Python facade for the verified block manager and the v0.6 coordinator. UNVERIFIED, part of the
 //! trusted I/O shim.
 //!
 //! This file only converts between Python objects and the verified API. It never touches
@@ -152,14 +152,23 @@ impl PyBlockManager {
     }
 }
 
-/// Immutable execution plan across classes (contract v0.3 C3).
+/// Immutable execution plan across classes (contract v0.6 C3, §3.4).
 #[pyclass(frozen, get_all)]
 struct CoordPlan {
     ticket: PyTicket,
     handle: PyHandle,
+    /// `T_h[lo : lo + ℓ] ++ D`, or placeholders 0 for a continuation (D24).
     input_ids: Vec<u32>,
+    /// The positions of the lowest outcome; the executor shifts a continuation's by `σ = a - lo`.
     positions: Vec<usize>,
     block_size: usize,
+    /// Start bound and slack: the window starts at `lo + σ` with `0 <= σ <= slack` (D24).
+    lo: usize,
+    slack: usize,
+    /// `ℓ`: the input length.
+    num_inputs: usize,
+    /// For a continuation, the ticket whose bonus token is its input (D24).
+    producer: Option<PyTicket>,
     /// Drafts after the input (contract D16); the sampler checks outputs at `[z-1, z+k)`.
     num_drafts: usize,
     /// Drafter classes also write `λ` proposal rows (D20).
@@ -173,7 +182,8 @@ struct CoordPlan {
     init: bool,
 }
 
-/// v0.3 coordinator: one slab arena shared by paged classes and state classes.
+/// v0.6 coordinator: one slab arena shared by paged, drafter and state classes, with speculative
+/// decoding (λ drafts per ticket) and zero-overhead scheduling (δ tickets ahead).
 #[pyclass(name = "Coordinator", unsendable)]
 struct PyCoordinator {
     inner: Coordinator,
@@ -231,17 +241,41 @@ impl PyCoordinator {
         lease_dict(py, v.tables, v.slots)
     }
 
-    /// C3. `drafts` are the host's draft tokens after the input (D16); `propose` asks the drafter
-    /// classes for proposal rows (D20).
-    #[pyo3(signature = (handle, n, drafts = Vec::new(), propose = false))]
-    fn begin_write(&mut self, handle: PyHandle, n: usize, drafts: Vec<u32>, propose: bool) -> PyResult<CoordPlan> {
-        let (_, p) = self.inner.begin_write(handle.into(), n, Drafts::Known(drafts), propose).map_err(err)?;
+    /// C2b. Appends the bonus position of the newest pending ticket, whose token is not yet on the
+    /// host (D22).
+    fn extend_deferred<'py>(&mut self, py: Python<'py>, handle: PyHandle) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let v = self.inner.extend_deferred(handle.into()).map_err(err)?;
+        lease_dict(py, v.tables, v.slots)
+    }
+
+    /// C3. `drafts` are the host's draft tokens after the input (D16). A continuation takes
+    /// `deferred_drafts` drafts from its producer's proposal on the device instead (D24).
+    /// `propose` asks the drafter classes for proposal rows (D20).
+    #[pyo3(signature = (handle, n, drafts = Vec::new(), propose = false, *, deferred_drafts = None))]
+    fn begin_write(
+        &mut self,
+        handle: PyHandle,
+        n: usize,
+        drafts: Vec<u32>,
+        propose: bool,
+        deferred_drafts: Option<usize>,
+    ) -> PyResult<CoordPlan> {
+        let d = match deferred_drafts {
+            None => Drafts::Known(drafts),
+            Some(k) if drafts.is_empty() => Drafts::Deferred(k),
+            Some(_) => return Err(pyo3::exceptions::PyValueError::new_err("give drafts or deferred_drafts, not both")),
+        };
+        let (_, p) = self.inner.begin_write(handle.into(), n, d, propose).map_err(err)?;
         Ok(CoordPlan {
             ticket: p.ticket.into(),
             handle: p.handle.into(),
             input_ids: p.input_ids,
             positions: p.positions,
             block_size: p.block_size,
+            lo: p.lo,
+            slack: p.slack,
+            num_inputs: p.num_inputs,
+            producer: p.producer.map(PyTicket::from),
             num_drafts: p.num_drafts,
             propose: p.propose,
             write_slots: p.write_slots,
@@ -251,14 +285,16 @@ impl PyCoordinator {
         })
     }
 
-    /// C4. `accepted` is how many of the ticket's drafts the sampler accepted (D17). The caller
-    /// (executor) asserts that the plan has been executed in every class (E1/E2/E5/E10/E11).
-    #[pyo3(signature = (ticket, accepted = 0))]
-    fn finish_write(&mut self, ticket: PyTicket, accepted: usize) -> PyResult<usize> {
+    /// C4. `accepted` is how many of the ticket's drafts the sampler accepted (D17). `token` is the
+    /// token it sampled after them, required when the ticket heads the deferred tail (D22).
+    /// `drafts` are the drafts a continuation accepted from its producer's proposal (D24). `stop`
+    /// ends the lease and orphans every later ticket (D25). The caller (executor) asserts that the
+    /// plan has been executed in every class and that these are the device's values
+    /// (E1/E2/E5/E10–E13).
+    #[pyo3(signature = (ticket, accepted = 0, token = None, drafts = Vec::new(), stop = false))]
+    fn finish_write(&mut self, ticket: PyTicket, accepted: usize, token: Option<u32>, drafts: Vec<u32>, stop: bool) -> PyResult<usize> {
         let t: Ticket = ticket.into();
-        self.inner
-            .finish_write(t, CoordCompletion { ticket: t, accepted, token: None, drafts: Vec::new(), stop: false })
-            .map_err(err)
+        self.inner.finish_write(t, CoordCompletion { ticket: t, accepted, token, drafts, stop }).map_err(err)
     }
 
     /// C5.
@@ -272,8 +308,17 @@ impl PyCoordinator {
         let d = lease_dict(py, v.lease.tables, v.lease.slots)?;
         d.set_item("len", v.len)?;
         d.set_item("computed", v.computed)?;
+        d.set_item("reach", v.reach)?;
+        d.set_item("planned", v.planned)?;
+        d.set_item("slack", v.slack)?;
+        d.set_item("deferred", v.deferred)?;
+        d.set_item("stopped", v.stopped)?;
         d.set_item("pending", v.pending.map(PyTicket::from))?;
+        d.set_item("queue", v.queue.into_iter().map(PyTicket::from).collect::<Vec<_>>())?;
         d.set_item("block_size", v.block_size)?;
+        d.set_item("max_drafts", v.lam)?;
+        d.set_item("margin", v.mu)?;
+        d.set_item("zos_depth", v.delta)?;
         Ok(d)
     }
 

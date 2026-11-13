@@ -110,3 +110,68 @@ assert len(hs) >= 2
 for h in hs:
     co.release(h)
 print("pageproof coordinator demo: ok")
+
+# ---------------------------------------------------------------------------------------------
+# v0.6: speculative decoding with one drafter class, and zero-overhead scheduling (δ = 1).
+# The §7 walk-through: B = 4, λ = 2, μ = 3λ = 6.
+# ---------------------------------------------------------------------------------------------
+sd = pp.Coordinator(8, 64, [16], [], B, b"dummy-v0.6", drafter_units=[16], max_drafts=2, zos_depth=1)
+
+
+def window(plan, c, sigma):
+    """The slots a device runs for `plan` in class `c` when the older tickets accepted `sigma`
+    drafts: the window starts at index sigma of the listed slots (D24, E13)."""
+    width = plan.num_inputs + plan.num_drafts
+    assert sigma <= plan.slack
+    return plan.write_slots[c][sigma:sigma + width]
+
+
+def lease_l7():
+    """A lease with L = 7 and c_h = 6. A repeat attach hits the published block 0 (cached = 4)."""
+    h, cached, _ = sd.attach(list(range(300, 307)))
+    p = sd.begin_write(h, 6 - cached)
+    sd.finish_write(p.ticket)
+    assert sd.inspect(h)["computed"] == 6
+    return h
+
+
+# A verify step with host drafts and proposal rows, then the next step planned behind it.
+h = lease_l7()
+v = sd.begin_write(h, 1, [11, 12], propose=True)
+assert (len(v.write_slots[0]), len(v.write_slots[1])) == (3, 5)
+sd.extend_deferred(h)
+info = sd.inspect(h)
+assert (info["len"], info["deferred"], info["reach"]) == (7, True, 14)
+c2 = sd.begin_write(h, 1, propose=True, deferred_drafts=2)
+assert (c2.lo, c2.slack, c2.num_inputs, c2.num_drafts) == (7, 2, 1, 2)
+assert c2.producer == v.ticket and c2.input_ids == [0, 0, 0]
+for n1 in range(3):
+    # Whatever the producer accepts, the continuation's window is inside its listed slots.
+    for i, s in enumerate(window(c2, 0, n1)):
+        assert s == sd.slot_of(0, h, 7 + n1 + i)
+print(f"verify + continuation planned: {len(sd.inspect(h)['queue'])} tickets, slack={sd.inspect(h)['slack']}")
+# The producer accepts one draft and samples 21; the continuation accepts both of its drafts.
+assert sd.finish_write(v.ticket, accepted=1, token=21) == 8
+assert sd.inspect(h)["computed"] == 8
+sd.finish_write(c2.ticket, accepted=2, drafts=[31, 32])
+snap = sd.release(h)
+assert snap[7:] == [11, 21, 31, 32]
+print(f"spec decode with ZOS: committed {snap[7:]}")
+
+# EOS at the first draft: stop orphans the continuation and ends the lease.
+h = lease_l7()
+v = sd.begin_write(h, 1, [11, 12], propose=True)
+sd.extend_deferred(h)
+c2 = sd.begin_write(h, 1, propose=True, deferred_drafts=2)
+sd.finish_write(v.ticket, accepted=1, stop=True)
+info = sd.inspect(h)
+assert info["stopped"] and info["queue"] == [c2.ticket]
+for what, bad in (("begin_write", lambda: sd.begin_write(h, 1)), ("extend", lambda: sd.extend(h, [1])),
+                  ("release while an orphan is pending", lambda: sd.release(h))):
+    try:
+        bad()
+    except pp.BlockManagerError as e:
+        print(f"stopped lease, {what}: {e}")
+sd.finish_write(c2.ticket, accepted=7, token=99)  # an orphan accepts any completion
+assert sd.release(h)[7:] == [11]
+print("pageproof v0.6 demo: ok")

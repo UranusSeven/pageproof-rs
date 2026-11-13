@@ -1947,6 +1947,21 @@ impl Manager {
         vstd::slice::slice_to_vec(vstd::slice::slice_subrange(self.pend.get(&t).unwrap().drafts.as_slice(), 0, n))
     }
 
+    /// `Q_h` of a live lease, in issue order (C6).
+    pub fn queue_ids(&self, h: u64) -> (r: Vec<u64>)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r@ == self@.leases[h].pending,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        vstd::slice::slice_to_vec(self.leases.get(&h).unwrap().pending.as_slice())
+    }
+
     /// `Q_h[0]` of a live lease with a pending ticket.
     pub fn queue_head(&self, h: u64) -> (r: u64)
         requires

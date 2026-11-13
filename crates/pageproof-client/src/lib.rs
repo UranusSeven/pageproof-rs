@@ -88,8 +88,9 @@ pub fn churn(m: &mut Manager, reqs: &Vec<Vec<u32>>)
     }
 }
 
-/// v0.3: a scheduler loop over the coordinator. Validity and the metadata bound hold at every
-/// iteration, whatever the inputs and however the calls fail.
+/// A scheduler loop over the coordinator: chunks, a deferred decode step behind the first ticket
+/// (v0.5), and a completion with `stop` that orphans it (v0.6). Validity and the metadata bound
+/// hold at every iteration, whatever the inputs and however the calls fail.
 pub fn coord_churn(co: &mut Coordinator, reqs: &Vec<Vec<u32>>)
     requires
         old(co).inv(),
@@ -108,6 +109,14 @@ pub fn coord_churn(co: &mut Coordinator, reqs: &Vec<Vec<u32>>)
                 let _ = co.finish_write(t, CoordCompletion { ticket: t, accepted: 0, token: None, drafts: Vec::new(), stop: false });
             }
             let _ = co.extend(h, reqs[i].as_slice());
+            if let Ok((t1, _)) = co.begin_write(h, reqs[i].len(), Drafts::Known(Vec::new()), false) {
+                let _ = co.extend_deferred(h);
+                let r2 = co.begin_write(h, 1, Drafts::Known(Vec::new()), false);
+                let _ = co.finish_write(t1, CoordCompletion { ticket: t1, accepted: 0, token: None, drafts: Vec::new(), stop: true });
+                if let Ok((t2, _)) = r2 {
+                    let _ = co.finish_write(t2, CoordCompletion { ticket: t2, accepted: 0, token: None, drafts: Vec::new(), stop: false });
+                }
+            }
             let _ = co.release(h);
         }
         proof {
