@@ -218,7 +218,7 @@ impl Manager {
             self.valid(),
         ensures
             r is None <==> !self@.leases.contains_key(h),
-            r matches Some(p) ==> p == (self@.leases[h].pending is Some),
+            r matches Some(p) ==> p == (self@.leases[h].pending.len() > 0),
     {
         proof {
             self.lemma_valid();
@@ -226,7 +226,7 @@ impl Manager {
         }
         match self.leases.get(&h) {
             None => None,
-            Some(l) => Some(l.pending.is_some()),
+            Some(l) => Some(l.pending.len() > 0),
         }
     }
 
@@ -238,14 +238,14 @@ impl Manager {
         ensures
             r.0 as nat == self@.leases[h].toks.len(),
             r.1 as nat == self@.leases[h].c,
-            r.2 == (self@.leases[h].pending is Some),
+            r.2 == (self@.leases[h].pending.len() > 0),
     {
         proof {
             self.lemma_valid();
             self.lemma_rep_dom();
         }
         let l = self.leases.get(&h).unwrap();
-        (l.toks.len(), l.c, l.pending.is_some())
+        (l.toks.len(), l.c, l.pending.len() > 0)
     }
 
     /// `Pending[t]` as `(lease, a, z)`, if live.

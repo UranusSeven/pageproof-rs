@@ -325,7 +325,7 @@ impl Coordinator {
         mid.lemma_view();
         assert(mid.paged@[0].valid());
         mid.paged@[0].lemma_handles_lt();
-        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: None };
+        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty() };
         assert forall|c: int| 0 <= c < mid.np() implies (#[trigger] self.pv(c)).leases.dom() == mid.pv(0).leases.dom().insert(h)
             && self.pv(c).pend == mid.pv(0).pend && self.pv(c).next_handle == (h + 1) as u64 && self.pv(c).next_ticket
             == mid.pv(0).next_ticket && self.pv(c).p == mid.pv(c).p && self.pv(c).b == mid.pv(c).b && self.pv(c).ns == mid.pv(c).ns

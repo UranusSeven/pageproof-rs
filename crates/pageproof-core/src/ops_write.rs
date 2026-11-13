@@ -25,7 +25,7 @@ pub open spec fn began(v: MgrV, h: u64, n: nat) -> MgrV {
     let l = v.leases[h];
     let t = v.next_ticket;
     MgrV {
-        leases: v.leases.insert(h, LeaseV { pending: Some(t), ..l }),
+        leases: v.leases.insert(h, LeaseV { pending: seq![t], ..l }),
         pend: v.pend.insert(t, PendV { lease: h, a: l.c, z: l.c + n }),
         next_ticket: (t + 1) as u64,
         ..v
@@ -64,11 +64,11 @@ pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<
     let live = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidHandle
-    &&& (live && l.pending is Some) ==> r is Err && r->Err_0 == Error::Busy
-    &&& (live && l.pending is None && !(0 < n && l.c + n <= l.toks.len())) ==> r is Err && r->Err_0
+    &&& (live && l.pending.len() > 0) ==> r is Err && r->Err_0 == Error::Busy
+    &&& (live && l.pending.len() == 0 && !(0 < n && l.c + n <= l.toks.len())) ==> r is Err && r->Err_0
         == Error::InvalidArgument
-    &&& (live && l.pending is None && 0 < n && l.c + n <= l.toks.len()) ==> (r is Ok <==> v.next_ticket < u64::MAX)
-    &&& (live && l.pending is None && 0 < n && l.c + n <= l.toks.len() && v.next_ticket == u64::MAX) ==> r is Err
+    &&& (live && l.pending.len() == 0 && 0 < n && l.c + n <= l.toks.len()) ==> (r is Ok <==> v.next_ticket < u64::MAX)
+    &&& (live && l.pending.len() == 0 && 0 < n && l.c + n <= l.toks.len() && v.next_ticket == u64::MAX) ==> r is Err
         && r->Err_0 == Error::IdentifierExhausted
     &&& r matches Ok((t, plan)) ==> {
         &&& live
@@ -84,7 +84,7 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].pending is None,
+        v.leases[h].pending.len() == 0,
         0 < n,
         v.leases[h].c + n <= v.leases[h].toks.len(),
         v.next_ticket < u64::MAX,
@@ -107,8 +107,8 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
         assert forall|i: nat| i < l.table.len() implies #[trigger] blk_ok(v2, log, l, i) by {
             assert(blk_ok(v, log, v.leases[h2], i));
         }
-        if h2 != h && l.pending is Some {
-            let t2 = l.pending->Some_0;
+        if h2 != h && l.pending.len() > 0 {
+            let t2 = l.pending[0];
             assert(v.pend.contains_key(t2));
             assert(t2 != t);
         }
@@ -129,7 +129,7 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat)
             assert(pend_ok(v, t2));
             assert(v.pend[t2].lease != h) by {
                 if v.pend[t2].lease == h {
-                    assert(v.leases[h].pending == Some(t2));
+                    assert(v.leases[h].pending == seq![t2]);
                 }
             }
         }
@@ -220,7 +220,7 @@ impl Manager {
             assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
         }
         let mut l = self.leases.remove(&h.id).unwrap();
-        if l.pending.is_some() {
+        if l.pending.len() > 0 {
             self.leases.insert(h.id, l);
             proof {
                 assert(self.leases@ =~= old(self).leases@);
@@ -298,7 +298,10 @@ impl Manager {
         let page_table = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.table.as_slice(), 0, nb));
         let t = self.next_ticket;
         self.next_ticket = t + 1;
-        l.pending = Some(t);
+        let mut q: Vec<u64> = Vec::new();
+        q.push(t);
+        l.pending = q;
+        assert(l.pending@ =~= seq![t]);
         self.leases.insert(h.id, l);
         self.pend.insert(t, PendC { lease: h.id, a, z });
         let ghost v2 = began(v, h.id, n as nat);
@@ -382,7 +385,7 @@ pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64) -> bool {
     let lo = r.a / v.b;
     let hi = r.z / v.b;
     &&& v2.same_config(v)
-    &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: None, ..l })
+    &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: Seq::empty(), ..l })
     &&& v2.pend == v.pend.remove(t)
     &&& v2.refs == v.refs
     &&& v2.own == v.own
@@ -622,8 +625,8 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
                     }
                 }
             }
-            if lo2.pending is Some {
-                let t2 = lo2.pending->Some_0;
+            if lo2.pending.len() > 0 {
+                let t2 = lo2.pending[0];
                 assert(pend_ok(v, t2));
                 assert(t2 != t);
             }
@@ -687,7 +690,7 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
         assert(pend_ok(v, t2));
         assert(v.pend[t2].lease != h) by {
             if v.pend[t2].lease == h {
-                assert(v.leases[h].pending == Some(t2));
+                assert(v.leases[h].pending == seq![t2]);
             }
         }
         lemma_pend_frame(v, v2, t2);
@@ -869,11 +872,12 @@ impl Manager {
             i += 1;
         }
         l.c = z;
-        l.pending = None;
+        l.pending = Vec::new();
+        assert(l.pending@ =~= Seq::<u64>::empty());
         l.head = head;
         self.leases.insert(hid, l);
         let ghost v2 = MgrV {
-            leases: v.leases.insert(hid, LeaseV { c: z as nat, pending: None, ..lv }),
+            leases: v.leases.insert(hid, LeaseV { c: z as nat, pending: Seq::empty(), ..lv }),
             pend: v.pend.remove(t.id),
             vmap: vmap_after(v, lv, a as nat, z as nat),
             keys: self.keys@,

@@ -52,7 +52,8 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& forall|j: int|
         0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
     &&& forall|i: nat| i < l.table.len() ==> #[trigger] blk_ok(v, log, l, i)
-    &&& l.pending matches Some(t) ==> v.pend.contains_key(t) && v.pend[t].lease == h
+    &&& l.pending.len() <= 1
+    &&& l.pending.len() > 0 ==> v.pend.contains_key(l.pending[0]) && v.pend[l.pending[0]].lease == h
 }
 
 /// I2 (exact reference count) via the ghost holder set.
@@ -93,7 +94,7 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     let r = v.pend[t];
     &&& t < v.next_ticket
     &&& v.leases.contains_key(r.lease)
-    &&& v.leases[r.lease].pending == Some(t)
+    &&& v.leases[r.lease].pending == seq![t]
     &&& r.a == v.leases[r.lease].c
     &&& r.a < r.z <= v.leases[r.lease].toks.len()
 }
@@ -135,7 +136,7 @@ pub proof fn lemma_lease_frame(v: MgrV, v2: MgrV, log: Log, log2: Log, h: u64)
             0 <= j < v.leases[h].c ==> (v2.vmap)(#[trigger] slot_of(v.b, v.leases[h].table, j)) == (v.vmap)(
                 slot_of(v.b, v.leases[h].table, j),
             ),
-        v.leases[h].pending matches Some(t) ==> v2.pend.contains_key(t) && v2.pend[t].lease == h,
+        v.leases[h].pending.len() > 0 ==> v2.pend.contains_key(v.leases[h].pending[0]) && v2.pend[v.leases[h].pending[0]].lease == h,
     ensures
         lease_ok(v2, log2, h),
 {
@@ -344,7 +345,7 @@ pub proof fn lemma_inv_log_mono(v: MgrV, log: Log, log2: Log)
     assert forall|h: u64| #[trigger] v.leases.contains_key(h) implies lease_ok(v, log2, h) by {
         assert(lease_ok(v, log, h));
         reveal(lease_ok);
-        if v.leases[h].pending is Some {
+        if v.leases[h].pending.len() > 0 {
         }
         lemma_lease_frame(v, v, log, log2, h);
     }

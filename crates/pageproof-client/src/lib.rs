@@ -142,7 +142,7 @@ pub fn attach_release(co: &mut Coordinator, toks: &Vec<u32>) -> (r: Option<Vec<u
                 assert(h.id == o.next_handle());
                 assert(mid.paged[0].next_handle == o.paged[0].next_handle);
                 assert(co@.leases().contains_key(h.id));
-                assert(co@.leases()[h.id].pending is None);
+                assert(co@.leases()[h.id].pending.len() == 0);
                 assert(co@.leases()[h.id].toks == toks@);
                 assert(h.mgr == co@.id);
             }

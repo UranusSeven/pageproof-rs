@@ -42,7 +42,8 @@ pub struct LeaseC {
     pub toks: Vec<Token>,
     pub table: Vec<PageId>,
     pub c: usize,
-    pub pending: Option<u64>,
+    /// `Q_h`: pending ticket ids in issue order.
+    pub pending: Vec<u64>,
     /// Chain head: key of the last published complete block, or `Seed(ns)`.
     pub head: Digest,
 }
@@ -74,7 +75,7 @@ pub struct Manager {
 }
 
 pub open spec fn lease_view(l: LeaseC) -> LeaseV {
-    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending }
+    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@ }
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {

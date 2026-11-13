@@ -86,14 +86,14 @@ pub open spec fn coord_extend_result(o: CoordV, n: CoordV, h: Handle, suffix: Se
     let l = o.leases()[h.id];
     let l2 = l.toks.len() + suffix.len();
     let d = (cdiv(l2, o.b) - cdiv(l.toks.len(), o.b)) as nat;
-    let ok = live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(cdiv(l2, o.b));
+    let ok = live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(cdiv(l2, o.b));
     &&& !live ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
-    &&& (live && l.pending is Some) ==> r == Err::<LeaseView, Error>(Error::Busy)
-    &&& (live && l.pending is None && l.c != l.toks.len()) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
+    &&& (live && l.pending.len() > 0) ==> r == Err::<LeaseView, Error>(Error::Busy)
+    &&& (live && l.pending.len() == 0 && l.c != l.toks.len()) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
         Error::InvalidArgument,
     )
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(cdiv(l2, o.b))) ==> r == Err::<
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(cdiv(l2, o.b))) ==> r == Err::<
         LeaseView,
         Error,
     >(Error::RequestTooLarge)
@@ -107,7 +107,7 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
     requires
         h.mgr == o.id,
         o.leases().contains_key(h.id),
-        o.leases()[h.id].pending is None,
+        o.leases()[h.id].pending.len() == 0,
         o.leases()[h.id].c == o.leases()[h.id].toks.len(),
         suffix.len() > 0,
         o.fits_m(cdiv(o.leases()[h.id].toks.len() + suffix.len(), o.b)),
@@ -143,7 +143,7 @@ impl Coordinator {
             self.valid(),
         ensures
             r is None <==> !(h.mgr == self@.id && self@.leases().contains_key(h.id)),
-            r matches Some(p) ==> p == (self@.leases()[h.id].pending is Some),
+            r matches Some(p) ==> p == (self@.leases()[h.id].pending.len() > 0),
     {
         proof {
             self.lemma_view();
@@ -164,15 +164,15 @@ impl Coordinator {
             !(h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id)) ==> r == Err::<Vec<Token>, Error>(
                 Error::InvalidHandle,
             ),
-            (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending is Some)
+            (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending.len() > 0)
                 ==> r == Err::<Vec<Token>, Error>(Error::Busy),
             r is Err ==> final(self)@ == old(self)@,
-            (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending is None)
+            (h.mgr == old(self)@.id && old(self)@.leases().contains_key(h.id) && old(self)@.leases()[h.id].pending.len() == 0)
                 ==> r is Ok,
             r matches Ok(toks) ==> {
                 &&& h.mgr == old(self)@.id
                 &&& old(self)@.leases().contains_key(h.id)
-                &&& old(self)@.leases()[h.id].pending is None
+                &&& old(self)@.leases()[h.id].pending.len() == 0
                 &&& toks@ == old(self)@.leases()[h.id].toks
                 &&& coord_released(old(self)@, final(self)@, h.id)
             },
@@ -192,7 +192,7 @@ impl Coordinator {
             invariant
                 o.valid(),
                 o.pv(0).leases.contains_key(h.id),
-                o.pv(0).leases[h.id].pending is None,
+                o.pv(0).leases[h.id].pending.len() == 0,
                 self.npaged == o.npaged,
                 self.paged@.len() == o.paged@.len(),
                 self.state@ == o.state@,
@@ -223,7 +223,7 @@ impl Coordinator {
             proof {
                 assert(self.pv(c as int) == o.pv(c as int));
                 assert(self.pv(c as int).leases.contains_key(h.id));
-                assert(self.pv(c as int).leases[h.id].pending is None);
+                assert(self.pv(c as int).leases[h.id].pending.len() == 0);
             }
             let r = self.paged[c].release(Handle { mgr: mid, id: h.id });
             proof {
@@ -311,7 +311,7 @@ impl Coordinator {
         requires
             o.valid(),
             o.pv(0).leases.contains_key(h),
-            o.pv(0).leases[h].pending is None,
+            o.pv(0).leases[h].pending.len() == 0,
             self.id == o.id,
             self.nslab == o.nslab,
             self.sbytes == o.sbytes,
@@ -717,7 +717,7 @@ impl Coordinator {
             invariant
                 mid.valid(),
                 mid.pv(0).leases.contains_key(h.id),
-                mid.pv(0).leases[h.id].pending is None,
+                mid.pv(0).leases[h.id].pending.len() == 0,
                 mid.pv(0).leases[h.id].c == len,
                 mid.pv(0).leases[h.id].toks.len() == len,
                 l2 == len + suffix@.len(),
@@ -1009,12 +1009,12 @@ pub open spec fn coord_begin_result(o: CoordV, n: CoordV, h: Handle, k: usize, r
     let live = h.mgr == o.id && o.leases().contains_key(h.id);
     let l = o.leases()[h.id];
     &&& !live ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidHandle)
-    &&& (live && l.pending is Some) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
-    &&& (live && l.pending is None && !(0 < k && l.c + k <= l.toks.len())) ==> r == Err::<(Ticket, CoordPlan), Error>(
+    &&& (live && l.pending.len() > 0) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
+    &&& (live && l.pending.len() == 0 && !(0 < k && l.c + k <= l.toks.len())) ==> r == Err::<(Ticket, CoordPlan), Error>(
         Error::InvalidArgument,
     )
-    &&& (live && l.pending is None && 0 < k && l.c + k <= l.toks.len()) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
-    &&& (live && l.pending is None && 0 < k && l.c + k <= l.toks.len() && o.next_ticket() == u64::MAX) ==> r == Err::<
+    &&& (live && l.pending.len() == 0 && 0 < k && l.c + k <= l.toks.len()) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
+    &&& (live && l.pending.len() == 0 && 0 < k && l.c + k <= l.toks.len() && o.next_ticket() == u64::MAX) ==> r == Err::<
         (Ticket, CoordPlan),
         Error,
     >(Error::IdentifierExhausted)
@@ -1308,7 +1308,7 @@ impl Coordinator {
                 o.valid(),
                 ov == o@,
                 o.pv(0).leases.contains_key(h.id),
-                o.pv(0).leases[h.id].pending is None,
+                o.pv(0).leases[h.id].pending.len() == 0,
                 o.pv(0).leases[h.id].c == a,
                 o.pv(0).leases[h.id].toks.len() == len,
                 0 < k <= len - a,
@@ -1448,7 +1448,7 @@ impl Coordinator {
         requires
             o.valid(),
             o.pv(0).leases.contains_key(h),
-            o.pv(0).leases[h].pending is None,
+            o.pv(0).leases[h].pending.len() == 0,
             tid == o.pv(0).next_ticket,
             tid < u64::MAX,
             0 < k,
@@ -1853,8 +1853,8 @@ impl Coordinator {
                 &&& v.len as nat == l.toks.len()
                 &&& v.computed as nat == l.c
                 &&& v.block_size as nat == self@.b
-                &&& (v.pending is Some) == (l.pending is Some)
-                &&& v.pending matches Some(t) ==> t.mgr == self@.id && Some(t.id) == l.pending
+                &&& (v.pending is Some) == (l.pending.len() > 0)
+                &&& v.pending matches Some(t) ==> t.mgr == self@.id && t.id == l.pending[0]
                 &&& v.lease.tables@.len() == self@.np
                 &&& forall|c: int| 0 <= c < self@.np ==> (#[trigger] v.lease.tables@[c])@ == self@.paged[c].leases[h.id].table
                 &&& v.lease.slots@ == self@.slots[h.id]

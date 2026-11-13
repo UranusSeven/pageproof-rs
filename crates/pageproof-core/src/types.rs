@@ -68,12 +68,13 @@ pub struct RequestView {
 // Abstract state (§3.2)
 // ---------------------------------------------------------------------------------------------
 
-/// `Req[h]`: input `T_h`, page table `M_h`, frontier `c_h`, optional pending ticket id.
+/// `Req[h]`: input `T_h`, page table `M_h`, frontier `c_h`, and `Q_h`, the ids of its pending
+/// tickets in issue order (at most one so far).
 pub ghost struct LeaseV {
     pub toks: Seq<Token>,
     pub table: Seq<PageId>,
     pub c: nat,
-    pub pending: Option<u64>,
+    pub pending: Seq<u64>,
 }
 
 /// `Pending[t]`: lease, original frontier `a`, interval end `z`.
