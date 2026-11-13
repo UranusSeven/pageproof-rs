@@ -1111,7 +1111,7 @@ pub open spec fn coord_begun(o: CoordV, n: CoordV, h: u64, k: nat, d: Seq<Token>
     &&& cplan_ok(o, h, k, d, propose, plan)
     &&& paged_step(o, n)
     &&& n.state == o.state
-    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] n.paged[c] == began_d(o.paged[c], h, k, d)
+    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] n.paged[c] == began_d(o.paged[c], h, k, d, propose)
 }
 
 pub open spec fn coord_begin_result(
@@ -1177,7 +1177,7 @@ pub open spec fn coord_finished(o: CoordV, n: CoordV, t: u64, z: usize) -> bool 
 /// C4: with acceptance count n, `T'_h = T_h ++ D[0:n]` and `c'_h = z + n` (D17); every state slot
 /// then holds the state after `T'_h[0:z+n]` (D19, E11).
 pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: CoordCompletion, r: Result<usize, Error>) -> bool {
-    let live = t.mgr == o.id && o.pend().contains_key(t.id) && comp.ticket == t;
+    let live = t.mgr == o.id && o.pend().contains_key(t.id) && comp.ticket == t && o.leases()[o.pend()[t.id].lease].pending[0] == t.id;
     let ok = comp.accepted as nat <= o.pend()[t.id].drafts.len() && !comp.stop;
     &&& !live ==> r == Err::<usize, Error>(Error::InvalidTicket)
     &&& (live && !ok) ==> r == Err::<usize, Error>(Error::InvalidArgument)
@@ -1455,7 +1455,7 @@ impl Coordinator {
                             block_size: o.b,
                         };
                         &&& (#[trigger] self.paged@[c2]).valid()
-                        &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@)
+                        &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@, propose)
                         &&& plan_ok_d(o.pv(c2), h.id, n as nat, dv@, ov.ext_of(c2, propose), plan)
                         &&& forall|j: int|
                             0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
@@ -1486,11 +1486,12 @@ impl Coordinator {
                 assert(a < len);
                 assert(o.pv(0).leases[h.id].rho == len + o.pv(0).cfg.mu);
                 assert(k + ext <= o.pv(0).cfg.mu);
-                assert(begin_args_ok(o.pv(c as int).leases[h.id], n as nat, k as nat, ext as nat));
+                assert(pfront(o.pv(c as int), o.pv(c as int).leases[h.id]) == a);
+                assert(begin_args_ok(o.pv(c as int).leases[h.id], a as nat, n as nat, k as nat, ext as nat, propose));
             }
             let mid_c = self.paged[c].mgr_id();
             let ghost p0 = self.paged@;
-            let r = self.paged[c].begin_write_v(Handle { mgr: mid_c, id: h.id }, n, dv.as_slice(), ext);
+            let r = self.paged[c].begin_write_v(Handle { mgr: mid_c, id: h.id }, n, dv.as_slice(), ext, propose);
             proof {
                 assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
             }
@@ -1521,7 +1522,7 @@ impl Coordinator {
                                 block_size: o.b,
                             };
                             &&& (#[trigger] self.paged@[c2]).valid()
-                            &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@)
+                            &&& self.pv(c2) == began_d(o.pv(c2), h.id, n as nat, dv@, propose)
                             &&& plan_ok_d(o.pv(c2), h.id, n as nat, dv@, ov.ext_of(c2, propose), pl)
                             &&& forall|j: int|
                                 0 <= j < o.pv(c2).leases[h.id].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
@@ -1615,7 +1616,7 @@ impl Coordinator {
                         block_size: o.b,
                     };
                     &&& (#[trigger] fin.paged@[c2]).valid()
-                    &&& fin.pv(c2) == began_d(o.pv(c2), h, n, d)
+                    &&& fin.pv(c2) == began_d(o.pv(c2), h, n, d, propose)
                     &&& plan_ok_d(o.pv(c2), h, n, d, o@.ext_of(c2, propose), pl)
                     &&& forall|j: int|
                         0 <= j < o.pv(c2).leases[h].c ==> (o.pv(c2).vmap)(#[trigger] slot_of(
@@ -1679,6 +1680,8 @@ impl Coordinator {
         assert(ov.paged[0] == o.pv(0));
         assert forall|c2: int| 0 <= c2 < ov.np implies #[trigger] cplan_class(ov, h, n, d, propose, *plan, c2) by {
             assert(ov.paged[c2] == o.pv(c2));
+            assert(o.pv(c2).leases[h].pending == o.pv(0).leases[h].pending);
+            assert(pfront(o.pv(c2), o.pv(c2).leases[h]) == o.pv(c2).leases[h].c);
             assert(o.paged@[c2].valid());
             assert(o.pv(c2).b == o.b as nat);
             assert(o.pv(c2).leases.contains_key(h));
@@ -1711,7 +1714,7 @@ impl Coordinator {
         assert(ov.b == o.b as nat);
         assert(ov.leases()[h] == o.pv(0).leases[h]);
         assert(cplan_ok(ov, h, n, d, propose, *plan));
-        assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began_d(ov.paged[c], h, n, d) by {}
+        assert forall|c: int| 0 <= c < ov.np implies #[trigger] fin@.paged[c] == began_d(ov.paged[c], h, n, d, propose) by {}
         assert(fin@.state =~= ov.state);
         assert(fin@.slots =~= ov.slots);
     }
@@ -1738,7 +1741,7 @@ impl Coordinator {
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id {
             return Err(Error::InvalidTicket);
         }
-        if self.paged[0].pend_info(t.id).is_none() {
+        if self.paged[0].pend_info(t.id).is_none() || !self.paged[0].is_head(t.id) {
             return Err(Error::InvalidTicket);
         }
         let k = self.paged[0].pend_drafts_len(t.id);
@@ -1759,11 +1762,13 @@ impl Coordinator {
         requires
             old(self).valid(),
             old(self).pv(0).pend.contains_key(t),
+            old(self).pv(0).leases[old(self).pv(0).pend[t].lease].pending[0] == t,
             n <= old(self).pv(0).pend[t].drafts.len(),
         ensures
             final(self).valid(),
             final(self)@ == coord_committed(old(self)@, t, n as nat),
             final(self).pv(0).pend.contains_key(t),
+            final(self).pv(0).leases[final(self).pv(0).pend[t].lease].pending[0] == t,
             final(self).id == old(self).id,
     {
         let ghost o = *self;
@@ -1772,6 +1777,7 @@ impl Coordinator {
             invariant
                 o.valid(),
                 o.pv(0).pend.contains_key(t),
+                o.pv(0).leases[o.pv(0).pend[t].lease].pending[0] == t,
                 n <= o.pv(0).pend[t].drafts.len(),
                 self.npaged == o.npaged,
                 self.paged@.len() == o.paged@.len(),
@@ -1794,6 +1800,10 @@ impl Coordinator {
                 assert(self.paged@[c as int] == o.paged@[c as int]);
                 assert(o.paged@[c as int].valid());
                 assert(o.pv(c as int).pend == o.pv(0).pend);
+                assert(o.paged@[0].valid());
+                lemma_finish_facts(o.pv(0), o.paged@[0].den_log(), t);
+                assert(o.pv(c as int).leases.contains_key(o.pv(0).pend[t].lease));
+                assert(o.pv(c as int).leases[o.pv(0).pend[t].lease].pending == o.pv(0).leases[o.pv(0).pend[t].lease].pending);
             }
             let ghost p0 = self.paged@;
             self.paged[c].commit_drafts(t, n);
@@ -1820,6 +1830,7 @@ impl Coordinator {
         requires
             o.valid(),
             o.pv(0).pend.contains_key(t),
+            o.pv(0).leases[o.pv(0).pend[t].lease].pending[0] == t,
             n <= o.pv(0).pend[t].drafts.len(),
             fin.npaged == o.npaged,
             fin.paged@.len() == o.paged@.len(),
@@ -1838,6 +1849,7 @@ impl Coordinator {
             fin.valid(),
             fin@ == coord_committed(o@, t, n),
             fin.pv(0).pend.contains_key(t),
+            fin.pv(0).leases[fin.pv(0).pend[t].lease].pending[0] == t,
     {
         assert(o.paged@[0].valid());
         lemma_finish_facts(o.pv(0), o.paged@[0].den_log(), t);
@@ -1902,6 +1914,7 @@ impl Coordinator {
             old(self).valid(),
             t.mgr == old(self).id,
             old(self).pv(0).pend.contains_key(t.id),
+            old(self).pv(0).leases[old(self).pv(0).pend[t.id].lease].pending[0] == t.id,
         ensures
             final(self).valid(),
             coord_finished(old(self)@, final(self)@, t.id, z),
@@ -1933,6 +1946,8 @@ impl Coordinator {
                 ov == o@,
                 o.pv(0).pend.contains_key(t.id),
                 o.pv(0).pend[t.id].lease == hid,
+                o.pv(0).leases.contains_key(hid),
+                o.pv(0).leases[hid].pending[0] == t.id,
                 t.mgr == o.id,
                 self.npaged == o.npaged,
                 self.paged@.len() == o.paged@.len(),
@@ -1956,6 +1971,8 @@ impl Coordinator {
                 assert(self.paged@[c as int] == o.paged@[c as int]);
                 assert(o.paged@[c as int].valid());
                 assert(o.pv(c as int).pend == o.pv(0).pend);
+                assert(o.pv(c as int).leases.contains_key(hid));
+                assert(o.pv(c as int).leases[hid].pending == o.pv(0).leases[hid].pending);
             }
             let mid_c = self.paged[c].mgr_id();
             let tc = Ticket { mgr: mid_c, id: t.id };
@@ -2044,6 +2061,7 @@ impl Coordinator {
         requires
             o.valid(),
             o.pv(0).pend.contains_key(t),
+            o.pv(0).leases[o.pv(0).pend[t].lease].pending[0] == t,
             o.pv(0).pend[t].lease == h,
             o.pv(0).pend[t].z == z,
             tau == o.pv(0).leases[h].toks.subrange(0, z as int),
@@ -2483,12 +2501,13 @@ impl Coordinator {
         ensures
             self.num_leases() <= self@.nslab * (self@.per[0] as nat),
             self.num_slot_records() == self.num_leases(),
-            self.num_pending() <= self.num_leases(),
+            self.num_pending() <= (self@.delta() + 1) * self.num_leases(),
             forall|c: int| 0 <= c < self@.np ==> #[trigger] self.index_buckets(c) <= self@.nslab * (self@.per[c] as nat),
     {
         self.lemma_view();
         assert(self.paged@[0].valid());
         self.paged@[0].lemma_bounded();
+        assert(self@.paged[0] == self.pv(0));
         assert(self.slots@.dom() == self.pv(0).leases.dom());
         assert(self.paged@[0].num_leases() == self.pv(0).leases.dom().len());
         assert forall|c: int| 0 <= c < self@.np implies #[trigger] self.index_buckets(c) <= self@.nslab * (self@.per[c] as nat) by {

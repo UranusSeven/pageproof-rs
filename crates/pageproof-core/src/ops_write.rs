@@ -22,16 +22,23 @@ broadcast use vstd::std_specs::hash::group_hash_axioms;
 // ---------------------------------------------------------------------------------------------
 
 pub open spec fn began(v: MgrV, h: u64, n: nat) -> MgrV {
-    began_d(v, h, n, Seq::empty())
+    began_d(v, h, n, Seq::empty(), false)
 }
 
-/// `begin_write` with draft tokens `drafts` after the input `[c, c + n)` (D16).
-pub open spec fn began_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>) -> MgrV {
+/// `p_h`, the planned frontier (§3.2): `c_h`, or the end of the newest pending ticket.
+pub open spec fn pfront(v: MgrV, l: LeaseV) -> nat {
+    if l.pending.len() == 0 { l.c } else { v.pend[l.pending[l.pending.len() - 1]].z }
+}
+
+/// `begin_write` of `[p_h, p_h + n)` with draft tokens `drafts` after it (D16, D21): the ticket
+/// joins the end of the lease's queue.
+pub open spec fn began_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>, propose: bool) -> MgrV {
     let l = v.leases[h];
     let t = v.next_ticket;
+    let a = pfront(v, l);
     MgrV {
-        leases: v.leases.insert(h, LeaseV { pending: seq![t], ..l }),
-        pend: v.pend.insert(t, PendV { lease: h, a: l.c, z: l.c + n, drafts }),
+        leases: v.leases.insert(h, LeaseV { pending: l.pending.push(t), ..l }),
+        pend: v.pend.insert(t, PendV { lease: h, a, z: a + n, drafts, propose }),
         next_ticket: (t + 1) as u64,
         ..v
     }
@@ -69,8 +76,8 @@ pub open spec fn plan_ok(v: MgrV, h: u64, n: nat, plan: ExecutionPlan) -> bool {
 /// `[a, z + k + ext)`, where `ext` is the class's extra write range (proposal rows, D20).
 pub open spec fn plan_ok_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>, ext: nat, plan: ExecutionPlan) -> bool {
     let l = v.leases[h];
-    let a = l.c;
-    let z = l.c + n;
+    let a = pfront(v, l);
+    let z = a + n;
     let k = drafts.len();
     let w = z + k + ext;
     &&& plan.ticket == Ticket { mgr: v.id, id: v.next_ticket }
@@ -108,13 +115,14 @@ pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<
     }
 }
 
-/// Arguments `begin_write_v` accepts on a live lease with no ticket in flight: input `[c, c + n)`,
-/// drafts only after the whole input, and the write range `[c, c + n + k + ext)` inside the reach.
-pub open spec fn begin_args_ok(l: LeaseV, n: nat, k: nat, ext: nat) -> bool {
+/// Arguments `begin_write_v` accepts on a live lease whose queue has room: input `[p, p + n)` from
+/// the planned frontier `p`, drafts and proposal rows only after the whole input, and the write
+/// range `[p, p + n + k + ext)` inside the reach.
+pub open spec fn begin_args_ok(l: LeaseV, p: nat, n: nat, k: nat, ext: nat, propose: bool) -> bool {
     &&& 0 < n
-    &&& l.c + n <= l.toks.len()
-    &&& (k > 0 || ext > 0) ==> l.c + n == l.toks.len()
-    &&& l.c + n + k + ext <= l.rho
+    &&& p + n <= l.toks.len()
+    &&& (k > 0 || ext > 0 || propose) ==> p + n == l.toks.len()
+    &&& p + n + k + ext <= l.rho
 }
 
 pub open spec fn begin_result_v(
@@ -124,61 +132,90 @@ pub open spec fn begin_result_v(
     n: usize,
     drafts: Seq<Token>,
     ext: usize,
+    propose: bool,
     r: Result<(Ticket, ExecutionPlan), Error>,
 ) -> bool {
     let live = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
-    let ok = begin_args_ok(l, n as nat, drafts.len(), ext as nat);
+    // D21: the queue holds at most δ + 1 tickets.
+    let busy = l.pending.len() > v.cfg.delta;
+    let ok = begin_args_ok(l, pfront(v, l), n as nat, drafts.len(), ext as nat, propose);
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidHandle
-    &&& (live && l.pending.len() > 0) ==> r is Err && r->Err_0 == Error::Busy
-    &&& (live && l.pending.len() == 0 && !ok) ==> r is Err && r->Err_0 == Error::InvalidArgument
-    &&& (live && l.pending.len() == 0 && ok) ==> (r is Ok <==> v.next_ticket < u64::MAX)
-    &&& (live && l.pending.len() == 0 && ok && v.next_ticket == u64::MAX) ==> r is Err && r->Err_0
+    &&& (live && busy) ==> r is Err && r->Err_0 == Error::Busy
+    &&& (live && !busy && !ok) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && !busy && ok) ==> (r is Ok <==> v.next_ticket < u64::MAX)
+    &&& (live && !busy && ok && v.next_ticket == u64::MAX) ==> r is Err && r->Err_0
         == Error::IdentifierExhausted
     &&& r matches Ok((t, plan)) ==> {
         &&& live
         &&& t == plan.ticket
         &&& plan_ok_d(v, h.id, n as nat, drafts, ext as nat, plan)
-        // §9.0 (b): the context [0, a) is valid KV of the causal prefix.
+        // §9.0 (b): the computed prefix [0, c) is valid KV of the causal prefix.
         &&& forall|j: int| 0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
-        &&& v2 == began_d(v, h.id, n as nat, drafts)
+        &&& v2 == began_d(v, h.id, n as nat, drafts, propose)
     }
 }
 
-pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat, drafts: Seq<Token>)
+pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat, drafts: Seq<Token>, propose: bool)
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].pending.len() == 0,
-        0 < n,
-        v.leases[h].c + n <= v.leases[h].toks.len(),
-        drafts.len() > 0 ==> v.leases[h].c + n == v.leases[h].toks.len(),
-        v.leases[h].c + n + drafts.len() <= v.leases[h].rho,
+        v.leases[h].pending.len() <= v.cfg.delta,
+        begin_args_ok(v.leases[h], pfront(v, v.leases[h]), n, drafts.len(), 0, propose),
         v.next_ticket < u64::MAX,
     ensures
-        inv(began_d(v, h, n, drafts), log),
+        inv(began_d(v, h, n, drafts, propose), log),
 {
     reveal(lease_ok);
     reveal(page_ok);
     reveal(pend_ok);
-    let v2 = began_d(v, h, n, drafts);
+    let v2 = began_d(v, h, n, drafts, propose);
     let t = v.next_ticket;
+    let l = v.leases[h];
+    let q = l.pending;
     assert(!v.pend.contains_key(t)) by {
         if v.pend.contains_key(t) {
             assert(pend_ok(v, t));
         }
     }
     assert(lease_ok(v, log, h));
+    assert(!q.contains(t));
+    if q.len() > 0 {
+        assert(v.pend.contains_key(q[q.len() - 1]));
+        assert(pend_ok(v, q[q.len() - 1]));
+        assert(v.pend.contains_key(q[0]));
+        assert(pend_ok(v, q[0]));
+    }
+    assert(v2.leases[h].pending == q.push(t));
     assert forall|h2: u64| #[trigger] v2.leases.contains_key(h2) implies lease_ok(v2, log, h2) by {
         assert(lease_ok(v, log, h2));
-        let l = v2.leases[h2];
-        assert forall|i: nat| i < l.table.len() implies #[trigger] blk_ok(v2, log, l, i) by {
+        let l2 = v2.leases[h2];
+        assert forall|i: nat| i < l2.table.len() implies #[trigger] blk_ok(v2, log, l2, i) by {
             assert(blk_ok(v, log, v.leases[h2], i));
         }
-        if h2 != h && l.pending.len() > 0 {
-            let t2 = l.pending[0];
-            assert(v.pend.contains_key(t2));
-            assert(t2 != t);
+        if h2 != h {
+            assert forall|i: int| 0 <= i < l2.pending.len() implies v2.pend.contains_key(#[trigger] l2.pending[i])
+                && v2.pend[l2.pending[i]].lease == h2 by {
+                assert(v.pend.contains_key(l2.pending[i]));
+            }
+        } else {
+            assert forall|i: int| 0 <= i < l2.pending.len() implies v2.pend.contains_key(#[trigger] l2.pending[i])
+                && v2.pend[l2.pending[i]].lease == h2 by {
+                if i < q.len() {
+                    assert(l2.pending[i] == q[i]);
+                    assert(v.pend.contains_key(q[i]));
+                }
+            }
+            assert(l2.pending.no_duplicates()) by {
+                assert forall|i: int, j: int| 0 <= i < l2.pending.len() && 0 <= j < l2.pending.len() && i != j implies l2.pending[i]
+                    != l2.pending[j] by {
+                    if i == q.len() {
+                        assert(q.contains(l2.pending[j]) || j == q.len());
+                    } else if j == q.len() {
+                        assert(l2.pending[i] == q[i]);
+                    }
+                }
+            }
         }
     }
     assert forall|x: PageId| (x as nat) < v2.p implies #[trigger] page_ok(v2, log, x) by {
@@ -195,16 +232,26 @@ pub proof fn lemma_begin_inv(v: MgrV, log: Log, h: u64, n: nat, drafts: Seq<Toke
     assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
         if t2 != t {
             assert(pend_ok(v, t2));
-            assert(v.pend[t2].lease != h) by {
-                if v.pend[t2].lease == h {
-                    assert(v.leases[h].pending == seq![t2]);
+            if v.pend[t2].lease == h {
+                assert(q.contains(t2));
+                assert(v2.leases[h].pending.contains(t2)) by {
+                    let i = choose|i: int| 0 <= i < q.len() && q[i] == t2;
+                    assert(v2.leases[h].pending[i] == t2);
                 }
+                assert(v2.leases[h].pending[0] == q[0]);
+            } else {
+                lemma_pend_frame(v, v2, t2);
             }
         } else {
-            // With nothing in flight and input left, the reach is whole (I16).
-            let l = v.leases[h];
-            if l.c + n < l.toks.len() {
-                assert(l.c < l.toks.len());
+            assert(v2.leases[h].pending[q.len() as int] == t);
+            if q.len() == 0 {
+                // With nothing in flight and input left, the reach is whole (I16).
+                if l.c + n < l.toks.len() {
+                    assert(l.c < l.toks.len());
+                }
+            } else {
+                assert(v2.leases[h].pending[0] == q[0]);
+                assert(q[0] != t);
             }
         }
     }
@@ -216,7 +263,7 @@ proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, w: nat)
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].c == a,
+        v.leases[h].c <= a,
         a < w <= v.leases[h].rho,
     ensures
         forall|j: int|
@@ -247,7 +294,7 @@ proof fn lemma_plan_slots(v: MgrV, log: Log, h: u64, a: nat, w: nat)
             lemma_mul_mono(m, i as nat, v.b);
         }
         lemma_slot_of_props(v.b, v.p, l.table, j);
-        // (i+1)*b > j >= a = c.
+        // (i+1)*b > j >= a >= c.
         lemma_mul_succ(i as nat, v.b);
         lemma_uncomputed_exclusive(v, log, h, i as nat);
     }
@@ -284,8 +331,16 @@ impl Manager {
         proof {
             self.lemma_valid();
         }
+        if self.handle_ok(h) {
+            proof {
+                self.lemma_rep_dom();
+            }
+            if self.leases.get(&h.id).unwrap().pending.len() > 0 {
+                return Err(Error::Busy);
+            }
+        }
         let none: Vec<Token> = Vec::new();
-        let r = self.begin_write_v(h, n, none.as_slice(), 0);
+        let r = self.begin_write_v(h, n, none.as_slice(), 0, false);
         proof {
             let e = Seq::<Token>::empty();
             assert(none@ =~= e);
@@ -293,7 +348,8 @@ impl Manager {
                 reveal(lease_ok);
                 assert(lease_ok(v, dl, h.id));
                 let l = v.leases[h.id];
-                assert(begin_args_ok(l, n as nat, 0, 0) == (0 < n && l.c + n <= l.toks.len()));
+                assert(pfront(v, l) == l.c);
+                assert(begin_args_ok(l, l.c, n as nat, 0, 0, false) == (0 < n && l.c + n <= l.toks.len()));
             }
             if r is Ok {
                 let plan = r->Ok_0.1;
@@ -307,14 +363,14 @@ impl Manager {
 
     /// C3 with drafts: issue a ticket and a plan feeding `T_h[c_h : c_h + n] ++ drafts`, with write
     /// slots for `ext` more positions (a drafter class's proposal rows, D20).
-    pub fn begin_write_v(&mut self, h: Handle, n: usize, drafts: &[Token], ext: usize) -> (r: Result<(Ticket, ExecutionPlan), Error>)
+    pub fn begin_write_v(&mut self, h: Handle, n: usize, drafts: &[Token], ext: usize, propose: bool) -> (r: Result<(Ticket, ExecutionPlan), Error>)
         requires
             old(self).valid(),
         ensures
             final(self).valid(),
             final(self).den_log() == old(self).den_log(),
             r is Err ==> final(self)@ == old(self)@,
-            begin_result_v(old(self)@, final(self)@, h, n, drafts@, ext, r),
+            begin_result_v(old(self)@, final(self)@, h, n, drafts@, ext, propose, r),
     {
         if !self.handle_ok(h) {
             return Err(Error::InvalidHandle);
@@ -330,22 +386,32 @@ impl Manager {
             assert(lease_ok(v, log, h.id));
             assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
         }
-        let mut l = self.leases.remove(&h.id).unwrap();
-        if l.pending.len() > 0 {
-            self.leases.insert(h.id, l);
-            proof {
-                assert(self.leases@ =~= old(self).leases@);
-            }
+        let q = self.leases.get(&h.id).unwrap().pending.len();
+        if q > self.cfg.delta {
             return Err(Error::Busy);
         }
-        let a = l.c;
+        // The planned frontier p_h: c_h, or the end of the newest pending ticket (§3.2).
+        let a = if q == 0 {
+            self.leases.get(&h.id).unwrap().c
+        } else {
+            let last = self.leases.get(&h.id).unwrap().pending[q - 1];
+            proof {
+                reveal(pend_ok);
+                assert(v.pend.contains_key(last));
+                assert(pend_ok(v, last));
+            }
+            self.pend.get(&last).unwrap().z
+        };
+        let mut l = self.leases.remove(&h.id).unwrap();
         let len = l.toks.len();
         let k = drafts.len();
         proof {
+            assert(a as nat == pfront(v, v.leases[h.id]));
+            assert(a <= len);
             assert(l.rho as nat <= v.p * v.b);
             assert(v.p * v.b <= max_slots());
         }
-        if n == 0 || n > len - a || ((k > 0 || ext > 0) && a + n != len) || k > l.rho - a - n || ext > l.rho - a - n - k {
+        if n == 0 || n > len - a || ((k > 0 || ext > 0 || propose) && a + n != len) || k > l.rho - a - n || ext > l.rho - a - n - k {
             self.leases.insert(h.id, l);
             proof {
                 assert(self.leases@ =~= old(self).leases@);
@@ -364,6 +430,11 @@ impl Manager {
         let w = zk + ext;
         let b = self.b;
         proof {
+            if q > 0 {
+                reveal(pend_ok);
+                assert(pend_ok(v, v.leases[h.id].pending[q - 1]));
+            }
+            assert(v.leases[h.id].c <= a);
             lemma_plan_slots(v, log, h.id, a as nat, w as nat);
             lemma_cdiv_le(w as nat, v.b, l.table@.len());
         }
@@ -414,15 +485,15 @@ impl Manager {
         let page_table = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.table.as_slice(), 0, nb));
         let t = self.next_ticket;
         self.next_ticket = t + 1;
-        // The queue was empty (no pending ticket); it is now `[t]`.
+        // The ticket joins the end of the queue (D21).
         l.pending.push(t);
-        assert(l.pending@ =~= seq![t]);
         self.leases.insert(h.id, l);
         let dv = vstd::slice::slice_to_vec(drafts);
-        self.pend.insert(t, PendC { lease: h.id, a, z, drafts: dv });
-        let ghost v2 = began_d(v, h.id, n as nat, drafts@);
+        self.pend.insert(t, PendC { lease: h.id, a, z, drafts: dv, propose });
+        let ghost v2 = began_d(v, h.id, n as nat, drafts@, propose);
         proof {
-            lemma_begin_inv(v, log, h.id, n as nat, drafts@);
+            assert(begin_args_ok(v.leases[h.id], pfront(v, v.leases[h.id]), n as nat, drafts@.len(), 0, propose));
+            lemma_begin_inv(v, log, h.id, n as nat, drafts@, propose);
         }
         self.g = Ghost(v2);
         let ticket = Ticket { mgr: self.id, id: t };
@@ -449,8 +520,14 @@ impl Manager {
             assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
             }
             let lw = v.leases[h.id];
+            assert(lw == lv);
+            assert(lv.toks == l.toks@);
+            assert(a as nat == pfront(v, lw));
+            assert(z as nat == pfront(v, lw) + n);
+            assert(w as nat == pfront(v, lw) + n + drafts@.len() + ext);
             assert(plan.input_ids@ == lw.toks.subrange(a as int, z as int) + drafts@);
             assert(positions@.len() == zk - a);
+            assert(plan.write_slots@.len() == w - a);
             assert forall|q: int| 0 <= q < w - a implies (#[trigger] plan.write_slots@[q] as nat) < v.p * v.b by {
                 assert(plan.write_slots@[q] as int == slot_of(v.b, lw.table, a + q));
             }
@@ -474,6 +551,28 @@ impl Manager {
     }
 }
 
+
+impl Manager {
+    /// Ticket `t` is the oldest ticket of its lease's queue (D21).
+    pub fn is_head(&self, t: u64) -> (r: bool)
+        requires
+            self.valid(),
+            self@.pend.contains_key(t),
+        ensures
+            r == (self@.leases[self@.pend[t].lease].pending[0] == t),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(pend_ok);
+            reveal(lease_ok);
+            assert(pend_ok(self@, t));
+            assert(lease_ok(self@, self.den_log(), self@.pend[t].lease));
+        }
+        let h = self.pend.get(&t).unwrap().lease;
+        self.leases.get(&h).unwrap().pending[0] == t
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // C4 finish_write
@@ -505,7 +604,7 @@ pub open spec fn finish_rel(v: MgrV, v2: MgrV, t: u64) -> bool {
     let lo = r.a / v.b;
     let hi = r.z / v.b;
     &&& v2.same_config(v)
-    &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: Seq::empty(), ..l })
+    &&& v2.leases == v.leases.insert(h, LeaseV { c: r.z, pending: l.pending.drop_first(), ..l })
     &&& v2.pend == v.pend.remove(t)
     &&& v2.refs == v.refs
     &&& v2.own == v.own
@@ -546,7 +645,7 @@ pub open spec fn fin_untouched(v: MgrV, v2: MgrV, t: u64) -> bool {
 }
 
 pub open spec fn finish_result(v: MgrV, v2: MgrV, log2: Log, t: Ticket, c: Completion, r: Result<usize, Error>) -> bool {
-    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t;
+    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
     &&& live ==> r is Ok
     &&& r matches Ok(z) ==> {
@@ -607,6 +706,7 @@ pub proof fn lemma_finish_facts(v: MgrV, log: Log, t: u64)
     requires
         inv(v, log),
         v.pend.contains_key(t),
+        v.leases[v.pend[t].lease].pending[0] == t,
     ensures
         v.leases.contains_key(v.pend[t].lease),
         v.pend[t].a == v.leases[v.pend[t].lease].c,
@@ -653,6 +753,7 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
         inv(v, log),
         log.submap_of(log2),
         v.pend.contains_key(t),
+        v.leases[v.pend[t].lease].pending[0] == t,
         finish_rel(v, v2, t),
         v.pend[t].z / v.b > 0 ==> chain_logged(
             log2,
@@ -763,10 +864,8 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
                     }
                 }
             }
-            if lo2.pending.len() > 0 {
-                let t2 = lo2.pending[0];
-                assert(pend_ok(v, t2));
-                assert(t2 != t);
+            assert forall|i: int| 0 <= i < lo2.pending.len() implies #[trigger] lo2.pending[i] != t by {
+                assert(v.pend.contains_key(lo2.pending[i]));
             }
             lemma_lease_frame(v, v2, lg, lg, h2);
         }
@@ -823,15 +922,18 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
         }
     }
     lemma_last_frame(v, v2);
-    // ---- pending
+    // ---- pending: the next ticket of the queue, if any, is now the oldest and starts at c' = z.
     assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
         assert(pend_ok(v, t2));
-        assert(v.pend[t2].lease != h) by {
-            if v.pend[t2].lease == h {
-                assert(v.leases[h].pending == seq![t2]);
-            }
+        if v.pend[t2].lease == h {
+            let q = v.leases[h].pending;
+            let i = choose|i: int| 0 <= i < q.len() && q[i] == t2;
+            assert(i != 0);
+            assert(i == 1 && q.len() == 2);
+            assert(v2.leases[h].pending[0] == t2);
+        } else {
+            lemma_pend_frame(v, v2, t2);
         }
-        lemma_pend_frame(v, v2, t2);
     }
 }
 
@@ -852,7 +954,7 @@ impl Manager {
             self.lemma_rep_dom();
         }
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id
-            || !self.pend.contains_key(&t.id) {
+            || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
         }
         let ghost v = self@;
@@ -1010,12 +1112,14 @@ impl Manager {
             i += 1;
         }
         l.c = z;
-        l.pending = Vec::new();
-        assert(l.pending@ =~= Seq::<u64>::empty());
+        // The oldest ticket leaves the front of the queue (D21).
+        let ghost q0 = l.pending@;
+        l.pending.remove(0);
+        assert(l.pending@ =~= q0.drop_first());
         l.head = head;
         self.leases.insert(hid, l);
         let ghost v2 = MgrV {
-            leases: v.leases.insert(hid, LeaseV { c: z as nat, pending: Seq::empty(), ..lv }),
+            leases: v.leases.insert(hid, LeaseV { c: z as nat, pending: lv.pending.drop_first(), ..lv }),
             pend: v.pend.remove(t.id),
             vmap: vmap_after(v, lv, a as nat, z as nat),
             keys: self.keys@,
@@ -1085,6 +1189,7 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
     requires
         inv(v, log),
         v.pend.contains_key(t),
+        v.leases[v.pend[t].lease].pending[0] == t,
         n <= v.pend[t].drafts.len(),
     ensures
         inv(committed(v, t, n), log),
@@ -1099,9 +1204,13 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
     let l2 = v2.leases[h];
     assert(pend_ok(v, t));
     assert(lease_ok(v, log, h));
-    assert(l.pending == seq![t]);
     if n > 0 {
         assert(r.z == l.toks.len());
+        // A second ticket would start at z = L and end past L: with drafts, t is alone.
+        if l.pending.len() == 2 {
+            assert(pend_ok(v, l.pending[1]));
+        }
+        assert(l.pending.len() == 1);
     }
     assert(l2.toks.len() == l.toks.len() + n);
     // The input only grows: every prefix of the old input is unchanged.
@@ -1127,8 +1236,8 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
         if h2 != h {
             assert(lease_ok(v, log, h2));
             let lo = v.leases[h2];
-            if lo.pending.len() > 0 {
-                assert(lo.pending[0] != t);
+            assert forall|i: int| 0 <= i < lo.pending.len() implies #[trigger] lo.pending[i] != t by {
+                assert(v.pend.contains_key(lo.pending[i]));
             }
             lemma_lease_frame(v, v2, log, log, h2);
         }
@@ -1146,12 +1255,9 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
     assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
         if t2 != t {
             assert(pend_ok(v, t2));
-            assert(v.pend[t2].lease != h) by {
-                if v.pend[t2].lease == h {
-                    assert(v.leases[h].pending == seq![t2]);
-                }
+            if v.pend[t2].lease != h {
+                lemma_pend_frame(v, v2, t2);
             }
-            lemma_pend_frame(v, v2, t2);
         } else {
             let r2 = v2.pend[t];
             if r2.drafts.len() > 0 {
@@ -1173,6 +1279,7 @@ impl Manager {
         requires
             old(self).valid(),
             old(self)@.pend.contains_key(t),
+            old(self)@.leases[old(self)@.pend[t].lease].pending[0] == t,
             n <= old(self)@.pend[t].drafts.len(),
         ensures
             final(self).valid(),
@@ -1251,7 +1358,7 @@ pub open spec fn finish_n_result(
     n: usize,
     r: Result<usize, Error>,
 ) -> bool {
-    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t;
+    let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
     &&& (live && n > v.pend[t.id].drafts.len()) ==> r is Err && r->Err_0 == Error::InvalidArgument
     &&& (live && n <= v.pend[t.id].drafts.len()) ==> r is Ok
@@ -1275,7 +1382,7 @@ impl Manager {
             self.lemma_rep_dom();
         }
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id
-            || !self.pend.contains_key(&t.id) {
+            || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
         }
         if n > self.pend.get(&t.id).unwrap().drafts.len() {
@@ -1309,9 +1416,27 @@ pub proof fn lemma_pending_disjoint(v: MgrV, log: Log, t1: u64, t2: u64)
     assert(pend_ok(v, t2));
     let h1 = v.pend[t1].lease;
     let h2 = v.pend[t2].lease;
-    assert(h1 != h2);
     let l1 = v.leases[h1];
     let l2 = v.leases[h2];
+    if h1 == h2 {
+        // Two tickets of one queue write consecutive, disjoint intervals [a0, z0), [z0, z1) (I9).
+        assert(lease_ok(v, log, h1));
+        let q = l1.pending;
+        let i1 = choose|i: int| 0 <= i < q.len() && q[i] == t1;
+        let i2 = choose|i: int| 0 <= i < q.len() && q[i] == t2;
+        assert(q.len() == 2);
+        let r0 = v.pend[q[0]];
+        let r1 = v.pend[q[1]];
+        assert(pend_ok(v, q[0]));
+        assert(pend_ok(v, q[1]));
+        lemma_plan_slots(v, log, h1, r0.a, r1.z);
+        assert forall|j1: int, j2: int|
+            v.pend[t1].a <= j1 < v.pend[t1].z && v.pend[t2].a <= j2 < v.pend[t2].z implies #[trigger] slot_of(v.b, l1.table, j1)
+            != #[trigger] slot_of(v.b, l2.table, j2) by {
+            assert(j1 != j2);
+        }
+        return;
+    }
     lemma_plan_slots(v, log, h1, v.pend[t1].a, v.pend[t1].z);
     lemma_plan_slots(v, log, h2, v.pend[t2].a, v.pend[t2].z);
     assert forall|j1: int, j2: int|

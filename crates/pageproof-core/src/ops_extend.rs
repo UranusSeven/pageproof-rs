@@ -28,27 +28,37 @@ pub open spec fn extended(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId
     }
 }
 
+/// C2's Busy (D21): the queue is full, or its oldest ticket has drafts or proposal rows.
+pub open spec fn extend_busy(v: MgrV, l: LeaseV) -> bool {
+    l.pending.len() > v.cfg.delta || (l.pending.len() > 0 && (v.pend[l.pending[0]].drafts.len() > 0
+        || v.pend[l.pending[0]].propose))
+}
+
+/// The planned frontier of a lease (§3.2), as `ops_write::pfront`.
+pub open spec fn pfront_x(v: MgrV, l: LeaseV) -> nat {
+    if l.pending.len() == 0 { l.c } else { v.pend[l.pending[l.pending.len() - 1]].z }
+}
+
 /// The complete C2 contract.
 pub open spec fn extend_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, r: Result<PageTableView, Error>) -> bool {
     let live = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
     let l2 = l.toks.len() + suffix.len();
     let d = cdiv(l2 + v.cfg.mu, v.b) - l.table.len();
+    // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); every
+    // input position must be computed or covered by a pending ticket.
+    let busy = extend_busy(v, l);
+    let ph = pfront_x(v, l) == l.toks.len();
     &&& !live ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
-    &&& (live && l.pending.len() > 0) ==> r == Err::<PageTableView, Error>(Error::Busy)
-    &&& (live && l.pending.len() == 0 && l.c != l.toks.len()) ==> r == Err::<PageTableView, Error>(
-        Error::InvalidPhase,
+    &&& (live && busy) ==> r == Err::<PageTableView, Error>(Error::Busy)
+    &&& (live && !busy && !ph) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
+    &&& (live && !busy && ph && suffix.len() == 0) ==> r == Err::<PageTableView, Error>(Error::InvalidArgument)
+    &&& (live && !busy && ph && suffix.len() > 0 && l2 + v.cfg.mu > v.p * v.b) ==> r == Err::<PageTableView, Error>(
+        Error::RequestTooLarge,
     )
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<
-        PageTableView,
-        Error,
-    >(Error::InvalidArgument)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu > v.p * v.b) ==> r
-        == Err::<PageTableView, Error>(Error::RequestTooLarge)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b) ==> (
-    r is Ok <==> v.free_set().len() >= d)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b && v.free_set().len()
-        < d) ==> r == Err::<PageTableView, Error>(Error::NoCapacity)
+    &&& (live && !busy && ph && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b) ==> (r is Ok <==> v.free_set().len() >= d)
+    &&& (live && !busy && ph && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b && v.free_set().len() < d) ==> r
+        == Err::<PageTableView, Error>(Error::NoCapacity)
     &&& r matches Ok(view) ==> {
         let fresh = view.pages@.subrange(l.table.len() as int, view.pages@.len() as int);
         &&& live
@@ -67,8 +77,8 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].pending.len() == 0,
-        v.leases[h].c == v.leases[h].toks.len(),
+        !extend_busy(v, v.leases[h]),
+        pfront_x(v, v.leases[h]) == v.leases[h].toks.len(),
         suffix.len() > 0,
         v.leases[h].toks.len() + suffix.len() + v.cfg.mu <= v.p * v.b,
         blocks_for(v.leases[h].toks.len() + suffix.len() + v.cfg.mu, v.b, v.leases[h].table.len() + fresh.len()),
@@ -90,6 +100,14 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
     let l2 = v2.leases[h];
     let n = l.table.len();
     assert(lease_ok(v, log, h));
+    // With δ <= 1 and room in the queue, at most one ticket is pending; it has no drafts and ends
+    // at L, so c <= L.
+    assert(l.pending.len() <= 1);
+    if l.pending.len() == 1 {
+        assert(v.pend.contains_key(l.pending[0]));
+        assert(pend_ok(v, l.pending[0]));
+    }
+    assert(l.c <= l.toks.len());
     assert(fresh.subrange(0, fresh.len() as int) =~= fresh);
     // Old table pages are referenced by h, fresh pages are free: disjoint.
     assert forall|i: int, j: int| 0 <= i < n && 0 <= j < fresh.len() implies #[trigger] l.table[i] != #[trigger] fresh[j] by {
@@ -222,12 +240,13 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
     }
     assert forall|t: u64| #[trigger] v2.pend.contains_key(t) implies pend_ok(v2, t) by {
         assert(pend_ok(v, t));
-        assert(v.pend[t].lease != h) by {
-            if v.pend[t].lease == h {
-                assert(v.leases[h].pending == seq![t]);
-            }
+        if v.pend[t].lease == h {
+            // The pending ticket is the oldest; the reach is now whole for the longer input (I16).
+            assert(l.pending.contains(t));
+            assert(l.pending[0] == t);
+        } else {
+            lemma_pend_frame(v, v2, t);
         }
-        lemma_pend_frame(v, v2, t);
     }
     // Either nothing was added (last page unchanged) or the new last page is a fresh free page.
     assert(v2.leases.dom() =~= v.leases.dom().insert(h));
@@ -320,14 +339,37 @@ impl Manager {
         }
         let ghost v = self@;
         let ghost log = self.den_log();
-        let (l_len, l_c, l_pend, m) = {
+        let (l_len, l_c, q, m) = {
             let l = self.leases.get(&h.id).unwrap();
-            (l.toks.len(), l.c, l.pending.len() > 0, l.table.len())
+            (l.toks.len(), l.c, l.pending.len(), l.table.len())
         };
-        if l_pend {
+        proof {
+            reveal(lease_ok);
+            reveal(pend_ok);
+            assert(lease_ok(v, log, h.id));
+        }
+        // Busy (D21): the queue is full, or its oldest ticket has drafts or proposal rows.
+        let (busy, pf) = if q == 0 {
+            (false, l_c)
+        } else {
+            let t0 = self.leases.get(&h.id).unwrap().pending[0];
+            let tl = self.leases.get(&h.id).unwrap().pending[q - 1];
+            proof {
+                assert(v.pend.contains_key(t0));
+                assert(v.pend.contains_key(tl));
+            }
+            let r0 = self.pend.get(&t0).unwrap();
+            let rl = self.pend.get(&tl).unwrap();
+            (q > self.cfg.delta || r0.drafts.len() > 0 || r0.propose, rl.z)
+        };
+        proof {
+            assert(busy == extend_busy(v, v.leases[h.id]));
+            assert(pf as nat == pfront_x(v, v.leases[h.id]));
+        }
+        if busy {
             return Err(Error::Busy);
         }
-        if l_c != l_len {
+        if pf != l_len {
             return Err(Error::InvalidPhase);
         }
         if suffix.len() == 0 {

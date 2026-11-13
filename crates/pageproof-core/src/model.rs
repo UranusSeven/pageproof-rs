@@ -19,6 +19,7 @@ pub open spec fn cfg_ok(v: MgrV, log: Log) -> bool {
     &&& v.b >= 1
     &&& v.p * v.b <= max_slots()
     &&& v.cfg.mu <= max_slots()
+    &&& v.cfg.delta <= 1
     &&& ns_ok(v.ns)
     &&& v.refs.len() == v.p
     &&& v.keys.len() == v.p
@@ -58,8 +59,13 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& forall|j: int|
         0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
     &&& forall|i: nat| i < l.table.len() ==> #[trigger] blk_ok(v, log, l, i)
-    &&& l.pending.len() <= 1
-    &&& l.pending.len() > 0 ==> v.pend.contains_key(l.pending[0]) && v.pend[l.pending[0]].lease == h
+    // I9, D21: Q_h holds at most δ + 1 <= 2 tickets of this lease, in issue order, each starting
+    // where the one before it ends.
+    &&& l.pending.len() <= v.cfg.delta + 1
+    &&& l.pending.len() <= 2
+    &&& l.pending.no_duplicates()
+    &&& forall|i: int| 0 <= i < l.pending.len() ==> v.pend.contains_key(#[trigger] l.pending[i]) && v.pend[l.pending[i]].lease == h
+    &&& l.pending.len() == 2 ==> v.pend[l.pending[1]].a == v.pend[l.pending[0]].z
 }
 
 /// I2 (exact reference count) via the ghost holder set.
@@ -100,8 +106,10 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     let r = v.pend[t];
     &&& t < v.next_ticket
     &&& v.leases.contains_key(r.lease)
-    &&& v.leases[r.lease].pending == seq![t]
-    &&& r.a == v.leases[r.lease].c
+    &&& v.leases[r.lease].pending.contains(t)
+    // The oldest ticket starts at the frontier; a later one starts past it (§3.4).
+    &&& v.leases[r.lease].pending[0] == t ==> r.a == v.leases[r.lease].c
+    &&& v.leases[r.lease].c <= r.a
     &&& r.a < r.z <= v.leases[r.lease].toks.len()
     // D16: drafts follow the whole input and fit the reservation (D18, I16).
     &&& r.drafts.len() > 0 ==> r.z == v.leases[r.lease].toks.len()
@@ -146,7 +154,12 @@ pub proof fn lemma_lease_frame(v: MgrV, v2: MgrV, log: Log, log2: Log, h: u64)
             0 <= j < v.leases[h].c ==> (v2.vmap)(#[trigger] slot_of(v.b, v.leases[h].table, j)) == (v.vmap)(
                 slot_of(v.b, v.leases[h].table, j),
             ),
-        v.leases[h].pending.len() > 0 ==> v2.pend.contains_key(v.leases[h].pending[0]) && v2.pend[v.leases[h].pending[0]].lease == h,
+        forall|i: int|
+            0 <= i < v.leases[h].pending.len() ==> v2.pend.contains_key(#[trigger] v.leases[h].pending[i]) && v2.pend[v.leases[h].pending[i]].lease
+                == h,
+        v.leases[h].pending.len() == 2 ==> v2.pend[v.leases[h].pending[1]].a == v.pend[v.leases[h].pending[1]].a
+            && v2.pend[v.leases[h].pending[0]].z == v.pend[v.leases[h].pending[0]].z,
+        v2.cfg == v.cfg,
     ensures
         lease_ok(v2, log2, h),
 {
@@ -356,8 +369,6 @@ pub proof fn lemma_inv_log_mono(v: MgrV, log: Log, log2: Log)
     assert forall|h: u64| #[trigger] v.leases.contains_key(h) implies lease_ok(v, log2, h) by {
         assert(lease_ok(v, log, h));
         reveal(lease_ok);
-        if v.leases[h].pending.len() > 0 {
-        }
         lemma_lease_frame(v, v, log, log2, h);
     }
     assert forall|x: PageId| (x as nat) < v.p implies #[trigger] page_ok(v, log2, x) by {
@@ -445,14 +456,14 @@ pub proof fn lemma_last_fresh(v: MgrV, log: Log, v2: MgrV, h: u64)
     }
 }
 
-/// I11 (contract §4, bounded metadata): at most `P` leases, at most one pending
-/// ticket per lease, each lease's table at most `P` entries and input at most `P*B` tokens.
+/// I11 (contract §4, bounded metadata): at most `P` leases, at most `δ + 1` pending tickets per
+/// lease, each lease's table at most `P` entries and input at most `P*B` tokens.
 pub proof fn lemma_counts_bounded(v: MgrV, log: Log)
     requires
         inv(v, log),
     ensures
         v.leases.dom().len() <= v.p,
-        v.pend.dom().len() <= v.leases.dom().len(),
+        v.pend.dom().len() <= (v.cfg.delta + 1) * v.leases.dom().len(),
         forall|h: u64| #[trigger] v.leases.contains_key(h) ==> v.leases[h].table.len() <= v.p && v.leases[h].toks.len()
             <= v.p * v.b,
 {
@@ -490,24 +501,68 @@ pub proof fn lemma_counts_bounded(v: MgrV, log: Log)
         assert((t[t.len() - 1] as nat) < v.p);
     }
     vstd::set_lib::lemma_len_subset(img, pages);
-    // Pending tickets inject into leases.
+    // Pending tickets: the oldest of each queue, and the second of each queue, each inject into
+    // the leases (I9: at most two per lease, at most one with δ = 0).
     let pd = v.pend.dom();
     let g = |t: u64| v.pend[t].lease;
-    let gi = pd.map(g);
-    assert(pd.injective_on(g)) by {
-        assert forall|t1: u64, t2: u64| pd.contains(t1) && pd.contains(t2) && #[trigger] g(t1) == #[trigger] g(t2) implies t1
+    let heads = pd.filter(|t: u64| v.leases[v.pend[t].lease].pending[0] == t);
+    let seconds = pd.filter(|t: u64| v.leases[v.pend[t].lease].pending[0] != t);
+    assert(pd =~= heads.union(seconds));
+    assert(heads.injective_on(g)) by {
+        assert forall|t1: u64, t2: u64| heads.contains(t1) && heads.contains(t2) && #[trigger] g(t1) == #[trigger] g(t2) implies t1
+            == t2 by {}
+    }
+    assert(seconds.injective_on(g)) by {
+        assert forall|t1: u64, t2: u64| seconds.contains(t1) && seconds.contains(t2) && #[trigger] g(t1) == #[trigger] g(t2) implies t1
             == t2 by {
             assert(pend_ok(v, t1));
             assert(pend_ok(v, t2));
+            let h = g(t1);
+            assert(lease_ok(v, log, h));
+            let q = v.leases[h].pending;
+            let i1 = choose|i: int| 0 <= i < q.len() && q[i] == t1;
+            let i2 = choose|i: int| 0 <= i < q.len() && q[i] == t2;
+            assert(i1 == 1 && i2 == 1);
         }
     }
-    vstd::set_lib::lemma_map_size(pd, gi, g);
-    assert forall|h: u64| #[trigger] gi.contains(h) implies dom.contains(h) by {
-        pd.lemma_map_contains(g, h);
-        let t = choose|t: u64| pd.contains(t) && h == g(t);
+    let hi = heads.map(g);
+    let si = seconds.map(g);
+    vstd::set_lib::lemma_map_size(heads, hi, g);
+    vstd::set_lib::lemma_map_size(seconds, si, g);
+    assert forall|h: u64| #[trigger] hi.contains(h) implies dom.contains(h) by {
+        heads.lemma_map_contains(g, h);
+        let t = choose|t: u64| heads.contains(t) && h == g(t);
         assert(pend_ok(v, t));
     }
-    vstd::set_lib::lemma_len_subset(gi, dom);
+    assert forall|h: u64| #[trigger] si.contains(h) implies dom.contains(h) by {
+        seconds.lemma_map_contains(g, h);
+        let t = choose|t: u64| seconds.contains(t) && h == g(t);
+        assert(pend_ok(v, t));
+    }
+    vstd::set_lib::lemma_len_subset(hi, dom);
+    vstd::set_lib::lemma_len_subset(si, dom);
+    vstd::set_lib::lemma_len_union(heads, seconds);
+    if v.cfg.delta == 0 {
+        // With δ = 0 every queue holds one ticket, so every pending ticket is the oldest.
+        assert(seconds =~= Set::<u64>::empty()) by {
+            assert forall|t: u64| !seconds.contains(t) by {
+                if seconds.contains(t) {
+                    assert(pend_ok(v, t));
+                    assert(lease_ok(v, log, v.pend[t].lease));
+                    let q = v.leases[v.pend[t].lease].pending;
+                    let i = choose|i: int| 0 <= i < q.len() && q[i] == t;
+                }
+            }
+        }
+    }
+    assert(v.pend.dom().len() <= (v.cfg.delta + 1) * v.leases.dom().len()) by (nonlinear_arith)
+        requires
+            v.pend.dom().len() <= heads.len() + seconds.len(),
+            heads.len() <= v.leases.dom().len(),
+            seconds.len() <= v.leases.dom().len(),
+            v.cfg.delta == 0 ==> seconds.len() == 0,
+            v.cfg.delta <= 1,
+    ;
     // Tables: no duplicates, all entries < P.
     assert forall|h: u64| #[trigger] v.leases.contains_key(h) implies v.leases[h].table.len() <= v.p
         && v.leases[h].toks.len() <= v.p * v.b by {

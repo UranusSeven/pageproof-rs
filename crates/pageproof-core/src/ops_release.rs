@@ -346,11 +346,9 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
         assert forall|i: nat| i < l.table.len() implies #[trigger] blk_ok(v2, log, l, i) by {
             assert(blk_ok(v, log, l, i));
         }
-        if l.pending.len() > 0 {
-            let t = l.pending[0];
-            assert(v.pend.contains_key(t));
-            assert(pend_ok(v, t));
-            assert(v.pend[t].lease == h2);
+        assert forall|i: int| 0 <= i < l.pending.len() implies v2.pend.contains_key(#[trigger] l.pending[i])
+            && v2.pend[l.pending[i]].lease == h2 by {
+            assert(v.pend.contains_key(l.pending[i]));
         }
     }
     // Pages.
@@ -387,7 +385,7 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
         let r = v.pend[t];
         assert(r.lease != h) by {
             if r.lease == h {
-                assert(v.leases[h].pending == seq![t]);
+                assert(v.leases[h].pending.contains(t));
             }
         }
     }

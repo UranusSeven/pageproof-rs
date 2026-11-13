@@ -55,6 +55,7 @@ pub struct PendC {
     pub a: usize,
     pub z: usize,
     pub drafts: Vec<Token>,
+    pub propose: bool,
 }
 
 pub struct Manager {
@@ -84,7 +85,7 @@ pub open spec fn lease_view(l: LeaseC) -> LeaseV {
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {
-    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@ }
+    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@, propose: r.propose }
 }
 
 impl Manager {
@@ -168,7 +169,7 @@ impl Manager {
             self.index_buckets() <= self@.p,
             self.num_leases() <= self@.p,
             self.num_leases() == self@.leases.dom().len(),
-            self.num_pending() <= self.num_leases(),
+            self.num_pending() <= (self@.cfg.delta + 1) * self.num_leases(),
             forall|h: u64| #[trigger] self@.leases.contains_key(h) ==> self@.leases[h].table.len() <= self@.p
                 && self@.leases[h].toks.len() <= self@.p * self@.b,
             self@.free_set().len() <= self@.p,
@@ -289,7 +290,8 @@ impl Manager {
                 &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
+                || cfg.delta > 1) ==> r is Err,
     {
         Self::create_own(p, b, ns, false, cfg)
     }
@@ -301,9 +303,10 @@ impl Manager {
                 &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
+                || cfg.delta > 1) ==> r is Err,
     {
-        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || cfg.mu > MAX_SLOTS as usize {
+        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || cfg.mu > MAX_SLOTS as usize || cfg.delta > 1 {
             return Err(Error::ConfigError);
         }
         proof {

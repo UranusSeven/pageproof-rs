@@ -1535,6 +1535,7 @@ impl Coordinator {
                         // ConfigError is impossible: the configuration was checked above.
                         assert((units as nat) * (b as nat) <= max_slots());
                         assert(cfg0.mu as nat <= max_slots());
+                        assert(cfg0.delta <= 1);
                     }
                     return Err(Error::IdentifierExhausted);
                 },

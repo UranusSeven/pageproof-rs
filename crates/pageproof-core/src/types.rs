@@ -86,6 +86,8 @@ pub ghost struct PendV {
     pub z: nat,
     /// The draft tokens fed after the input (D16); empty unless `z = |T_h|`.
     pub drafts: Seq<Token>,
+    /// The drafter classes also write proposal rows (D20).
+    pub propose: bool,
 }
 
 /// Configuration fixed at create and shared by every paged class (I10).
