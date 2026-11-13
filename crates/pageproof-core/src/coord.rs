@@ -37,7 +37,7 @@ pub open spec fn cfg_rel(c: PCfg, np: nat) -> bool {
     &&& 1 <= c.ntarget <= np
     &&& c.lam <= max_slots()
     &&& c.delta <= 1
-    &&& c.mu == (if c.delta == 1 { c.lam + c.lam } else { c.lam }) + (if c.ntarget < np { c.lam } else { 0 })
+    &&& c.mu == create_mu(c.lam, c.delta, (np - c.ntarget) as nat)
 }
 
 /// The configuration checks `create` makes before it builds anything (C0).
@@ -62,6 +62,122 @@ pub open spec fn per_of(sbytes: nat, units: Seq<usize>) -> Seq<usize> {
 /// `Fits(m)` of §3.1: a lease of `m` blocks fits in an otherwise empty arena.
 pub open spec fn fits(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m: nat) -> bool {
     psum(per, np as int, m) + nstate <= nslab
+}
+
+/// `Fits(m)` over per-class unit counts `per` (§3.5): `Σ_{c < np} ceil(m / per[c]) + nst <= nslab`.
+pub fn fits_vec(per: &Vec<usize>, np: usize, nst: usize, nslab: usize, m: usize) -> (r: bool)
+    requires
+        np <= per@.len(),
+        np < 0x1_0000,
+        nst < 0x1_0000,
+        forall|i: int| 0 <= i < np ==> #[trigger] per@[i] >= 1,
+    ensures
+        r == fits(per@, np as nat, nst as nat, nslab as nat, m as nat),
+{
+    let mut sum: u128 = 0;
+    let mut i: usize = 0;
+    while i < np
+        invariant
+            np <= per@.len(),
+            forall|k: int| 0 <= k < np ==> #[trigger] per@[k] >= 1,
+            i <= np,
+            sum as nat == psum(per@, i as int, m as nat),
+            sum as nat <= i * (m as nat),
+            np < 0x1_0000,
+        decreases np - i,
+    {
+        let p = per[i];
+        proof {
+            assert(per@[i as int] >= 1);
+            if m > 0 {
+                vstd::arithmetic::div_mod::lemma_div_plus_one((m - 1) as int, p as int);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator((m - 1) as int, 1, p as int);
+            }
+        }
+        let q: usize = if m == 0 { 0 } else { (m - 1) / p + 1 };
+        proof {
+            if m == 0 {
+                assert(cdiv(0, p as nat) == 0) by {
+                    vstd::arithmetic::div_mod::lemma_basic_div((p - 1) as int, p as int);
+                }
+            }
+            assert(q as nat == cdiv(m as nat, p as nat));
+            assert(q <= m);
+            lemma_mul_succ(i as nat, m as nat);
+            assert((i + 1) * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires i + 1 <= 0x1_0000;
+            assert(0x1_0000 * (m as nat) <= u128::MAX) by (nonlinear_arith) requires m as nat <= u64::MAX;
+        }
+        sum = sum + q as u128;
+        i += 1;
+    }
+    proof {
+        assert(np * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires np <= 0x1_0000;
+        assert(0x1_0000 * (m as nat) <= u64::MAX * 0x1_0000) by (nonlinear_arith) requires m as nat <= u64::MAX;
+        assert(nst < 0x1_0000);
+    }
+    sum + (nst as u128) <= nslab as u128
+}
+
+/// C0's last check: a one-token lease with its reservation fits, `Fits(ceil((1 + μ)/B))`.
+#[verifier::opaque]
+pub open spec fn create_fits_ok(nslab: nat, sbytes: nat, b: nat, pu: Seq<usize>, du: Seq<usize>, su: Seq<usize>, lambda: nat, delta: nat) -> bool {
+    fits(per_of(sbytes, pu + du + su), pu.len() + du.len(), su.len(), nslab, cdiv(1 + create_mu(lambda, delta, du.len()), b))
+}
+
+/// Decides `create_fits_ok` from the unit counts `create` computed, before any identifier is taken.
+fn create_fits(
+    per: &Vec<usize>,
+    Ghost(pu): Ghost<Seq<usize>>,
+    Ghost(du): Ghost<Seq<usize>>,
+    Ghost(su): Ghost<Seq<usize>>,
+    np: usize,
+    nst: usize,
+    nslab: usize,
+    Ghost(sbytes): Ghost<usize>,
+    b: usize,
+    Ghost(lambda): Ghost<usize>,
+    Ghost(delta): Ghost<usize>,
+    mu: usize,
+) -> (r: bool)
+    requires
+        b >= 1,
+        sbytes >= 1,
+        np == pu.len() + du.len(),
+        nst == su.len(),
+        mu as nat == create_mu(lambda as nat, delta as nat, du.len()),
+        mu as nat <= max_slots(),
+        per@.len() == pu.len() + du.len() + su.len(),
+        pu.len() + du.len() + su.len() < 0x1_0000,
+        forall|k: int| 0 <= k < per@.len() ==> {
+            &&& #[trigger] (pu + du + su)[k] >= 1
+            &&& per@[k] == sbytes / (pu + du + su)[k]
+            &&& per@[k] >= 1
+        },
+    ensures
+        r == create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu, du, su, lambda as nat, delta as nat),
+        per@ == per_of(sbytes as nat, pu + du + su),
+        r == fits(per@, pu.len() + du.len(), su.len(), nslab as nat, cdiv(1 + mu as nat, b as nat)),
+{
+    reveal(create_fits_ok);
+    let ghost all = pu + du + su;
+    assert(per@ =~= per_of(sbytes as nat, all)) by {
+        assert forall|k: int| 0 <= k < per@.len() implies #[trigger] per@[k] == per_of(sbytes as nat, all)[k] by {
+            assert(per@[k] == sbytes / all[k]);
+        }
+    }
+    let n1 = 1 + mu;
+    let m1 = (n1 - 1) / b + 1;
+    proof {
+        vstd::arithmetic::div_mod::lemma_div_plus_one((n1 - 1) as int, b as int);
+        assert(((n1 - 1 + b) as int) / (b as int) == ((n1 - 1) as int) / (b as int) + 1);
+        assert(m1 as nat == cdiv(n1 as nat, b as nat));
+    }
+    proof {
+        assert forall|k: int| 0 <= k < np implies #[trigger] per@[k] >= 1 by {
+            assert(per@[k] >= 1);
+        }
+    }
+    fits_vec(per, np, nst, nslab, m1)
 }
 
 /// `psum` is monotone in the block count.
@@ -1415,9 +1531,10 @@ impl Coordinator {
             // C0: no target class, drafter classes without drafts, δ >= 2, or an unrepresentable μ.
             (pu@.len() == 0 || (du@.len() > 0 && lambda == 0) || delta > 1 || lambda as nat > max_slots()
                 || create_mu(lambda as nat, delta as nat, du@.len()) > max_slots()) ==> r == Err::<Coordinator, Error>(Error::ConfigError),
-            // C0: not even a one-token lease (with its reservation) could attach.
-            r is Ok ==> fits(per_of(sbytes as nat, pu@ + du@ + su@), pu@.len() + du@.len(), su@.len(), nslab as nat,
-                cdiv(1 + create_mu(lambda as nat, delta as nat, du@.len()), b as nat)),
+            // C0: not even a one-token lease (with its reservation) could attach, `¬Fits(ceil((1 + μ)/B))`.
+            // Checked before any identifier is taken, so this is always ConfigError.
+            !create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat) ==> r
+                == Err::<Coordinator, Error>(Error::ConfigError),
     {
         // C0: drafter classes need λ >= 1; δ <= 1 (§1.1).
         if pu.len() == 0 || pu.len() >= 0x1_0000 || du.len() >= 0x1_0000 || (du.len() > 0 && lambda == 0) || delta > 1
@@ -1538,6 +1655,15 @@ impl Coordinator {
                 }
             }
         }
+        // C0: a one-token lease must fit with its reservation, `Fits(ceil((1 + μ)/B))`. Checked before
+        // any identifier is taken, so an unusable configuration consumes none.
+        proof {
+            assert(all == pu@ + du@ + su@);
+        }
+        if !create_fits(&per, Ghost(pu@), Ghost(du@), Ghost(su@), pall.len(), su.len(), nslab, Ghost(sbytes), b, Ghost(lambda), Ghost(delta), mu) {
+            return Err(Error::ConfigError);
+        }
+        let ghost fits1 = cdiv(1 + mu as nat, b as nat);
         let id = match fresh_mgr_id() {
             Some(id) => id,
             None => return Err(Error::IdentifierExhausted),
@@ -1558,10 +1684,13 @@ impl Coordinator {
                 pall@ == pu@ + du@,
                 create_early_ok(pu@, du@, lambda as nat, delta as nat),
                 cfg_accepts(nslab as nat, sbytes as nat, b as nat, pall@, su@, ns@),
+                create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat),
+                fits(per@, pall@.len(), su@.len(), nslab as nat, fits1),
+                fits1 == cdiv(1 + mu as nat, b as nat),
                 cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
                 lambda as nat <= max_slots(),
                 mu as nat <= max_slots(),
-                mu as nat == (if delta == 1 { lambda as nat + lambda as nat } else { lambda as nat }) + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
+                mu as nat == create_mu(lambda as nat, delta as nat, (pall@.len() - ntarget) as nat),
                 1 <= ntarget <= pall@.len(),
                 delta <= 1,
                 0 <= i <= pall@.len(),
@@ -1633,9 +1762,12 @@ impl Coordinator {
             invariant
                 pall@ == pu@ + du@,
                 create_early_ok(pu@, du@, lambda as nat, delta as nat),
+                create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat),
+                fits(per@, pall@.len(), su@.len(), nslab as nat, fits1),
+                fits1 == cdiv(1 + mu as nat, b as nat),
                 cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
                 mu as nat <= max_slots(),
-                mu as nat == (if delta == 1 { lambda as nat + lambda as nat } else { lambda as nat }) + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
+                mu as nat == create_mu(lambda as nat, delta as nat, (pall@.len() - ntarget) as nat),
                 1 <= ntarget <= pall@.len(),
                 delta <= 1,
                 lambda as nat <= max_slots(),
@@ -1800,16 +1932,12 @@ impl Coordinator {
                 assert(co@.paged[0] == co.pv(0));
             }
         }
-        // C0: a one-token lease must fit with its reservation, `Fits(ceil((1 + μ)/B))`.
-        let n1 = 1 + mu;
-        let m1 = (n1 - 1) / b + 1;
         proof {
-            vstd::arithmetic::div_mod::lemma_div_plus_one((n1 - 1) as int, b as int);
-            assert(((n1 - 1 + b) as int) / (b as int) == ((n1 - 1) as int) / (b as int) + 1);
-            assert(m1 as nat == cdiv(n1 as nat, b as nat));
-        }
-        if !co.fits_exec(m1) {
-            return Err(Error::ConfigError);
+            assert(co@.fits_m(fits1)) by {
+                assert(co@.per == per@);
+                assert(co@.np == pall@.len());
+                assert(co@.nst() == su@.len());
+            }
         }
         Ok(co)
     }

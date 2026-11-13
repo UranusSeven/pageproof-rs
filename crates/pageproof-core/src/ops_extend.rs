@@ -60,11 +60,6 @@ pub open spec fn grow_busy(v: MgrV, l: LeaseV, dfr: bool) -> bool {
     if dfr { l.pending.len() > v.cfg.delta } else { extend_busy(v, l) }
 }
 
-/// The planned frontier of a lease (§3.2), as `ops_write::pfront`.
-pub open spec fn pfront_x(v: MgrV, l: LeaseV) -> nat {
-    if l.pending.len() == 0 { l.c } else { v.pend[l.pending[l.pending.len() - 1]].z }
-}
-
 /// The complete C2 (`dfr` false) and C2b (`dfr`, empty suffix) contracts.
 pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, dfr: bool, r: Result<PageTableView, Error>) -> bool {
     let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
@@ -77,7 +72,7 @@ pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, d
     // input position must be computed or covered by a pending ticket, and none may be deferred.
     // extend_deferred needs a pending ticket whose bonus position it appends (D22).
     let busy = grow_busy(v, l, dfr);
-    let ph = !l.dfr && pfront_x(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
+    let ph = !l.dfr && pfront(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
     let arg = dfr || suffix.len() > 0;
     &&& !live0 ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
     &&& (live0 && l.stopped) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
@@ -115,7 +110,7 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
         !grow_busy(v, v.leases[h], dfr),
         !v.leases[h].dfr,
         !v.leases[h].stopped,
-        pfront_x(v, v.leases[h]) == v.leases[h].toks.len(),
+        pfront(v, v.leases[h]) == v.leases[h].toks.len(),
         dfr ==> suffix.len() == 0 && v.leases[h].pending.len() > 0,
         !dfr ==> suffix.len() > 0,
         v.leases[h].toks.len() + (if dfr { 1nat } else { suffix.len() }) + v.cfg.mu <= v.p * v.b,
@@ -385,7 +380,7 @@ impl Manager {
             self@.leases.contains_key(h),
         ensures
             r.0 == extend_busy(self@, self@.leases[h]),
-            r.1 as nat == pfront_x(self@, self@.leases[h]),
+            r.1 as nat == pfront(self@, self@.leases[h]),
     {
         proof {
             self.lemma_valid();
@@ -463,7 +458,7 @@ impl Manager {
         if self.leases.get(&h.id).unwrap().stopped {
             return Err(Error::InvalidPhase);
         }
-        let (l_len, l_c, q, m, l_dfr) = {
+        let (l_len, _l_c, q, m, l_dfr) = {
             let l = self.leases.get(&h.id).unwrap();
             (l.toks.len(), l.c, l.pending.len(), l.table.len(), l.dfr)
         };
@@ -473,24 +468,10 @@ impl Manager {
             assert(lease_ok(v, log, h.id));
         }
         // Busy (D21): the queue is full, or, for extend, its oldest ticket has drafts or proposal rows.
-        let (busy0, pf) = if q == 0 {
-            (false, l_c)
-        } else {
-            let t0 = self.leases.get(&h.id).unwrap().pending[0];
-            let tl = self.leases.get(&h.id).unwrap().pending[q - 1];
-            proof {
-                assert(v.pend.contains_key(t0));
-                assert(v.pend.contains_key(tl));
-            }
-            let r0 = self.pend.get(&t0).unwrap();
-            let rl = self.pend.get(&tl).unwrap();
-            (q > self.cfg.delta || r0.drafts.len() > 0 || r0.propose, rl.z)
-        };
+        let (busy0, pf) = self.extend_gate(h.id);
         let busy = if dfr { q > self.cfg.delta } else { busy0 };
         proof {
-            assert(busy0 == extend_busy(v, v.leases[h.id]));
             assert(busy == grow_busy(v, v.leases[h.id], dfr));
-            assert(pf as nat == pfront_x(v, v.leases[h.id]));
         }
         if busy {
             return Err(Error::Busy);

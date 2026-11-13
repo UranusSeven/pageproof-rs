@@ -360,26 +360,6 @@ impl StatePool {
             assert(self.free@ =~= v2.free_set());
         }
     }
-
-    /// Ghost update of a held slot's provenance (C4: the slot now holds the state after `tau`).
-    // `x` names the slot in the contract only; the update is ghost.
-    #[allow(unused_variables)]
-    pub fn set_w(&mut self, x: usize, Ghost(tau): Ghost<Seq<Token>>)
-        requires
-            old(self).valid(),
-            (x as nat) < old(self)@.p,
-            old(self)@.holder[x as int] is Some,
-        ensures
-            final(self).valid(),
-            final(self)@ == (StateV { w: old(self)@.w.update(x as int, Some(tau)), ..old(self)@ }),
-    {
-        let ghost v = self@;
-        let ghost v2 = StateV { w: v.w.update(x as int, Some(tau)), ..v };
-        self.g = Ghost(v2);
-        proof {
-            assert(self.free@ =~= v2.free_set());
-        }
-    }
 }
 
 } // verus!

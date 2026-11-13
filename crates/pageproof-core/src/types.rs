@@ -64,12 +64,24 @@ pub struct RequestView {
     pub block_size: usize,
 }
 
+/// A live lease's metadata in one read (C6, per class).
+pub struct LeaseMeta {
+    pub len: usize,
+    pub computed: usize,
+    pub reach: usize,
+    pub planned: usize,
+    pub slack: usize,
+    pub deferred: bool,
+    pub stopped: bool,
+    pub queue: Vec<u64>,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Abstract state (§3.2)
 // ---------------------------------------------------------------------------------------------
 
 /// `Req[h]`: input `T_h`, page table `M_h`, frontier `c_h`, and `Q_h`, the ids of its pending
-/// tickets in issue order (at most one so far).
+/// tickets in issue order (at most `δ + 1 <= 2`).
 pub ghost struct LeaseV {
     pub toks: Seq<Token>,
     pub table: Seq<PageId>,

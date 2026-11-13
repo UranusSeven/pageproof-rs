@@ -172,6 +172,8 @@ for what, bad in (("begin_write", lambda: sd.begin_write(h, 1)), ("extend", lamb
         bad()
     except pp.BlockManagerError as e:
         print(f"stopped lease, {what}: {e}")
+    else:
+        raise AssertionError(f"stopped lease: {what} succeeded")
 sd.finish_write(c2.ticket, accepted=7, token=99)  # an orphan accepts any completion
 assert sd.release(h)[7:] == [11]
 print("pageproof v0.6 demo: ok")

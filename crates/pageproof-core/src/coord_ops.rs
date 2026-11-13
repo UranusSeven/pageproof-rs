@@ -95,7 +95,7 @@ pub open spec fn coord_grow_result(o: CoordV, n: CoordV, h: Handle, suffix: Seq<
     // ...and none is deferred; extend_deferred needs a pending ticket whose bonus position it
     // appends (D22).
     let busy = grow_busy(o.paged[0], l, dfr);
-    let ph = !l.dfr && pfront_x(o.paged[0], l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
+    let ph = !l.dfr && pfront(o.paged[0], l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
     let arg = dfr || suffix.len() > 0;
     let ok = live && !busy && ph && arg && o.fits_m(m2);
     &&& !live0 ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
@@ -131,7 +131,7 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
         !grow_busy(o.paged[0], o.leases()[h.id], dfr),
         !o.leases()[h.id].dfr,
         !o.leases()[h.id].stopped,
-        pfront_x(o.paged[0], o.leases()[h.id]) == o.leases()[h.id].toks.len(),
+        pfront(o.paged[0], o.leases()[h.id]) == o.leases()[h.id].toks.len(),
         dfr ==> o.leases()[h.id].pending.len() > 0,
         dfr || suffix.len() > 0,
         o.fits_m(o.reach_blocks(glen(o.leases()[h.id], suffix, dfr))),
@@ -725,7 +725,7 @@ impl Coordinator {
             return Err(Error::InvalidPhase);
         }
         let (busy0, pf) = self.paged[0].extend_gate(h.id);
-        let (q, _pf) = self.paged[0].queue_info(h.id);
+        let (q, _pf, _s) = self.paged[0].queue_info(h.id);
         let cfg = self.cfg_exec();
         // C2b: extend_deferred needs only room in the queue; extend also a head without drafts or
         // proposal rows (D21).
@@ -852,7 +852,7 @@ impl Coordinator {
                 !grow_busy(mid.pv(0), mid.pv(0).leases[h.id], dfr),
                 !mid.pv(0).leases[h.id].dfr,
                 !mid.pv(0).leases[h.id].stopped,
-                pfront_x(mid.pv(0), mid.pv(0).leases[h.id]) == len,
+                pfront(mid.pv(0), mid.pv(0).leases[h.id]) == len,
                 dfr ==> mid.pv(0).leases[h.id].pending.len() > 0,
                 dfr ==> suffix@.len() == 0,
                 mid.pv(0).leases[h.id].toks.len() == len,
@@ -907,7 +907,7 @@ impl Coordinator {
                 assert(grow_busy(mid.pv(c as int), mid.pv(c as int).leases[h.id], dfr) == grow_busy(mid.pv(0), mid.pv(0).leases[h.id], dfr));
                 assert(mid.pv(c as int).leases[h.id].dfr == mid.pv(0).leases[h.id].dfr);
                 assert(mid.pv(c as int).leases[h.id].stopped == mid.pv(0).leases[h.id].stopped);
-                assert(pfront_x(mid.pv(c as int), mid.pv(c as int).leases[h.id]) == pfront_x(mid.pv(0), mid.pv(0).leases[h.id]));
+                assert(pfront(mid.pv(c as int), mid.pv(c as int).leases[h.id]) == pfront(mid.pv(0), mid.pv(0).leases[h.id]));
                 assert(mid.unit@[c as int] >= 1);
                 lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m2 as nat, c as int);
                 lemma_cdiv_props(nr2 as nat, b as nat);
@@ -1266,8 +1266,9 @@ pub open spec fn coord_begin_result(
 }
 
 /// The executor's completion notice for a coordinator ticket (C4): its acceptance count, the token
-/// it sampled after its input and accepted drafts, the drafts it accepted, and `stop` (D25, not
-/// yet supported). Its truth is the external assumption E1/E5/E13.
+/// it sampled after its input and accepted drafts, the drafts a continuation accepted (D24), and
+/// `stop`, which ends the lease and orphans every later ticket (D25). Its truth is the external
+/// assumption E1/E5/E13.
 pub struct CoordCompletion {
     pub ticket: Ticket,
     pub accepted: usize,
@@ -1539,7 +1540,7 @@ impl Coordinator {
         if self.paged[0].lease_stopped(h.id) {
             return Err(Error::InvalidPhase);
         }
-        let (q, pf) = self.paged[0].queue_info(h.id);
+        let (q, pf, slack) = self.paged[0].queue_info(h.id);
         let cfg = self.cfg_exec();
         // D21: at most δ + 1 tickets in flight.
         if q > cfg.delta {
@@ -1583,15 +1584,33 @@ impl Coordinator {
             || pf + n != lh)) || (ddr && pf + n <= len) {
             return Err(Error::InvalidArgument);
         }
-        // Deferred drafts come from the producer's proposal forward (D24).
-        if ddr && k > 0 {
+        // A continuation's producer is the head of the queue, whose bonus token is its input (D24).
+        let producer_id: Option<u64> = if pf + n > len {
             proof {
                 reveal(lease_ok);
                 assert(o.pv(0).leases[h.id].dfr);
+                assert(o.pv(0).leases[h.id].pending.len() > 0);
+            }
+            Some(self.paged[0].queue_head(h.id))
+        } else {
+            None
+        };
+        // Deferred drafts come from the producer's proposal forward (D24).
+        if ddr && k > 0 {
+            let t0 = match producer_id {
+                Some(t0) => t0,
+                None => {
+                    proof {
+                        assert(false);
+                    }
+                    return Err(Error::InvalidArgument);
+                },
+            };
+            proof {
+                reveal(lease_ok);
                 assert(q == 1);
                 assert(o.pv(0).pend.contains_key(o.pv(0).leases[h.id].pending[0]));
             }
-            let t0 = self.paged[0].queue_head(h.id);
             if !self.paged[0].pend_propose(t0) {
                 return Err(Error::InvalidArgument);
             }
@@ -1601,17 +1620,10 @@ impl Coordinator {
         if tid == u64::MAX {
             return Err(Error::IdentifierExhausted);
         }
-        // A continuation's producer is the head of the queue, whose bonus token is its input (D24).
-        let producer = if pf + n > len {
-            proof {
-                assert(o.pv(0).leases[h.id].dfr);
-                assert(o.pv(0).leases[h.id].pending.len() > 0);
-            }
-            Some(Ticket { mgr: self.id, id: self.paged[0].queue_head(h.id) })
-        } else {
-            None
+        let producer = match producer_id {
+            Some(t0) => Some(Ticket { mgr: self.id, id: t0 }),
+            None => None,
         };
-        let slack = self.paged[0].queue_slack(h.id);
         let mut wslots: Vec<Vec<usize>> = Vec::new();
         let mut ptabs: Vec<Vec<PageId>> = Vec::new();
         let mut input_ids: Vec<Token> = Vec::new();
@@ -1628,6 +1640,7 @@ impl Coordinator {
                 q > 0 && !ddr ==> k == 0,
                 ddr ==> a + n > len,
                 a as nat == pfront(o.pv(0), o.pv(0).leases[h.id]),
+                pf == a,
                 o.pv(0).leases[h.id].toks.len() == len,
                 lh as nat == lhat(o.pv(0).leases[h.id]),
                 !o.pv(0).leases[h.id].stopped,
@@ -1724,12 +1737,13 @@ impl Coordinator {
             }
             let mid_c = self.paged[c].mgr_id();
             let ghost p0 = self.paged@;
-            let r = self.paged[c].begin_write_v(Handle { mgr: mid_c, id: h.id }, n, dv.as_slice(), ext, propose, ddr);
+            // The checks above hold in every class (lockstep), so each class only builds its plan.
+            let (_t, plan) = self.paged[c].begin_plan(Handle { mgr: mid_c, id: h.id }, n, dv.as_slice(), ext, propose, ddr, pf, slack);
             proof {
                 assert forall|c2: int| 0 <= c2 < p0.len() && c2 != c implies #[trigger] self.paged@[c2] == p0[c2] by {}
             }
-            match r {
-                Ok((_t, plan)) => {
+            {
+                {
                     let ghost wb = wslots@;
                     let ghost pb = ptabs@;
                     if c == 0 {
@@ -1773,13 +1787,7 @@ impl Coordinator {
                             }
                         }
                     }
-                },
-                Err(_) => {
-                    proof {
-                        assert(false);
-                    }
-                    return Err(Error::Busy);
-                },
+                }
             }
             c += 1;
         }
@@ -1997,24 +2005,26 @@ impl Coordinator {
             return Ok(self.drop_all(t.id));
         }
         let k = self.paged[0].pend_drafts_len(t.id);
-        if completion.accepted > k {
+        let accepted = completion.accepted;
+        let token = completion.token;
+        let stop = completion.stop;
+        if accepted > k {
             return Err(Error::InvalidArgument);
         }
         let dfr = self.paged[0].ticket_dfr(t.id);
-        let stop = completion.stop;
         // Without stop, a ticket heading X_h must report its token (D22).
-        if dfr && !stop && completion.token.is_none() {
+        if dfr && !stop && token.is_none() {
             return Err(Error::InvalidArgument);
         }
         // A continuation's deferred drafts are known only from its completion (D24).
         let dk = self.paged[0].pend_ddr(t.id) && k > 0;
-        if dk && completion.drafts.len() != completion.accepted {
+        if dk && completion.drafts.len() != accepted {
             return Err(Error::InvalidArgument);
         }
         let xs: Vec<Token> = if dk {
-            vstd::slice::slice_to_vec(completion.drafts.as_slice())
+            completion.drafts
         } else {
-            self.paged[0].pend_drafts_prefix(t.id, completion.accepted)
+            self.paged[0].pend_drafts_prefix(t.id, accepted)
         };
         proof {
             assert(self.paged@[0].valid());
@@ -2024,14 +2034,11 @@ impl Coordinator {
         // and no token, X_h just empties (D25).
         self.commit_all(t.id, xs.as_slice());
         if dfr {
-            if let Some(x) = completion.token {
+            if let Some(x) = token {
                 self.bind_all(t.id, x);
             }
         }
         let z = self.finish_core(t, stop);
-        proof {
-            assert(completion.ticket == t);
-        }
         Ok(z)
     }
 
@@ -2912,31 +2919,12 @@ impl Coordinator {
         }
         proof {
             assert(self.paged@[0].valid());
-        }
-        let r0 = self.paged[0].inspect(Handle { mgr: self.paged[0].mgr_id(), id: h.id });
-        let rv0 = match r0 {
-            Ok(v) => v,
-            Err(_) => {
-                proof {
-                    assert(false);
-                }
-                return Err(Error::InvalidHandle);
-            },
-        };
-        proof {
             assert(self.slots@.contains_key(h.id));
         }
         let slots = vstd::slice::slice_to_vec(self.slots.get(&h.id).unwrap().as_slice());
-        let pending = match rv0.pending {
-            Some(t) => Some(Ticket { mgr: self.id, id: t.id }),
-            None => None,
-        };
-        let reach = self.paged[0].lease_rho(h.id);
-        let deferred = self.paged[0].lease_dfr(h.id);
-        let (_q, planned) = self.paged[0].queue_info(h.id);
-        let slack = self.paged[0].queue_slack(h.id);
-        let stopped = self.paged[0].lease_stopped(h.id);
-        let ids = self.paged[0].queue_ids(h.id);
+        let meta = self.paged[0].lease_meta(h.id);
+        let ids = meta.queue;
+        let pending = if ids.len() > 0 { Some(Ticket { mgr: self.id, id: ids[0] }) } else { None };
         let mut queue: Vec<Ticket> = Vec::new();
         let mut i: usize = 0;
         while i < ids.len()
@@ -2951,15 +2939,15 @@ impl Coordinator {
         }
         let cfg = self.cfg_exec();
         Ok(CoordRequestView {
-            len: rv0.len,
-            computed: rv0.computed,
-            reach,
+            len: meta.len,
+            computed: meta.computed,
+            reach: meta.reach,
             pending,
             queue,
-            deferred,
-            planned,
-            slack,
-            stopped,
+            deferred: meta.deferred,
+            planned: meta.planned,
+            slack: meta.slack,
+            stopped: meta.stopped,
             block_size: self.b,
             lam: cfg.lam,
             mu: cfg.mu,

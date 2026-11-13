@@ -549,6 +549,63 @@ impl Manager {
         if self.next_ticket == u64::MAX {
             return Err(Error::IdentifierExhausted);
         }
+        proof {
+            assert(a as nat == pfront(v, v.leases[h.id]));
+            assert(s as nat == sdr(v, v.leases[h.id]));
+        }
+        Ok(self.begin_plan(h, n, drafts, ext, propose, ddr, a, s))
+    }
+
+    /// C3's plan and ticket for a call the caller has already checked: a live lease that is not
+    /// stopped, with room in its queue, valid arguments, and a fresh ticket id. `a` and `s` are
+    /// `p_h` and `s_h`.
+    pub(crate) fn begin_plan(
+        &mut self,
+        h: Handle,
+        n: usize,
+        drafts: &[Token],
+        ext: usize,
+        propose: bool,
+        ddr: bool,
+        a: usize,
+        s: usize,
+    ) -> (r: (Ticket, ExecutionPlan))
+        requires
+            old(self).valid(),
+            h.mgr == old(self)@.id,
+            old(self)@.leases.contains_key(h.id),
+            !old(self)@.leases[h.id].stopped,
+            old(self)@.leases[h.id].pending.len() <= old(self)@.cfg.delta,
+            begin_args_ok(old(self)@, old(self)@.leases[h.id], n as nat, drafts@.len(), ext as nat, propose),
+            old(self)@.next_ticket < u64::MAX,
+            a as nat == pfront(old(self)@, old(self)@.leases[h.id]),
+            s as nat == sdr(old(self)@, old(self)@.leases[h.id]),
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            final(self).id == old(self).id,
+            r.0 == r.1.ticket,
+            plan_ok_d(old(self)@, h.id, n as nat, drafts@, ext as nat, r.1),
+            forall|j: int|
+                0 <= j < old(self)@.leases[h.id].c ==> (old(self)@.vmap)(#[trigger] slot_of(
+                    old(self)@.b,
+                    old(self)@.leases[h.id].table,
+                    j,
+                )) == old(self)@.leases[h.id].toks.subrange(0, j + 1),
+            final(self)@ == began_d(old(self)@, h.id, n as nat, drafts@, propose, ddr),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log = self.den_log();
+        proof {
+            reveal(lease_ok);
+            assert(lease_ok(v, log, h.id));
+            assert(v.p <= v.p * v.b) by (nonlinear_arith) requires v.b >= 1;
+        }
+        let ghost q = v.leases[h.id].pending.len();
         let k = drafts.len();
         let mut l = self.leases.remove(&h.id).unwrap();
         let len = l.toks.len();
@@ -668,14 +725,14 @@ impl Manager {
             assert(page_table@ =~= lw.table.subrange(0, nb as int));
             lemma_plan_post(v, log, h, n as nat, drafts@, ext as nat, plan);
         }
-        Ok((ticket, plan))
+        (ticket, plan)
     }
 }
 
 
 impl Manager {
-    /// `(|Q_h|, p_h)` of a live lease (§3.2).
-    pub fn queue_info(&self, h: u64) -> (r: (usize, usize))
+    /// `(|Q_h|, p_h, s_h)` of a live lease (§3.2).
+    pub fn queue_info(&self, h: u64) -> (r: (usize, usize, usize))
         requires
             self.valid(),
             self@.leases.contains_key(h),
@@ -683,6 +740,7 @@ impl Manager {
             r.0 as nat == self@.leases[h].pending.len(),
             r.1 as nat == pfront(self@, self@.leases[h]),
             !self@.leases[h].stopped ==> r.1 as nat <= lhat(self@.leases[h]),
+            r.2 as nat == sdr(self@, self@.leases[h]),
     {
         proof {
             self.lemma_valid();
@@ -694,14 +752,19 @@ impl Manager {
         let l = self.leases.get(&h).unwrap();
         let q = l.pending.len();
         if q == 0 {
-            (0, l.c)
+            (0, l.c, 0)
         } else {
+            let t0 = l.pending[0];
             let last = l.pending[q - 1];
             proof {
+                assert(self@.pend.contains_key(t0));
+                assert(pend_ok(self@, t0));
                 assert(self@.pend.contains_key(last));
                 assert(pend_ok(self@, last));
             }
-            (q, self.pend.get(&last).unwrap().z)
+            let k0 = self.pend.get(&t0).unwrap().drafts.len();
+            let s = if q == 1 { k0 } else { k0 + self.pend.get(&last).unwrap().drafts.len() };
+            (q, self.pend.get(&last).unwrap().z, s)
         }
     }
 
@@ -1382,9 +1445,6 @@ impl Manager {
 // D17: committing accepted drafts
 // ---------------------------------------------------------------------------------------------
 
-/// The state after committing the first `n` drafts of pending ticket `t` (D17): they join the
-/// input `T_h`, and the ticket's input now ends `n` positions later. The frontier is unchanged;
-/// `finish_write` then credits `[a, z + n)` over the extended input.
 /// D17, D24: commit the tokens `xs` of head ticket `t`, its accepted drafts, known (`D[0:n]`) or
 /// reported by a continuation's completion. `T'_h = T_h ++ xs` and `z' = z + |xs|`; the rejected
 /// drafts are dropped, and the ticket behind it has its base raised by `|xs|`.
@@ -1701,8 +1761,11 @@ impl Manager {
 }
 
 
-/// §9.1.4: two different pending tickets never write the same slot, and no pending write slot
-/// lies on a page of another lease (in particular, never on a shared or published page).
+/// §9.1.4 for input slots: the input intervals `[a, z)` of two different pending tickets never
+/// share a slot. Tickets of one lease have consecutive intervals (I9); tickets of different leases
+/// write exclusive pages. The tentative slots past `z` (drafts, proposal rows, a continuation's
+/// slack) are covered across leases by `lemma_reserved_disjoint`; within one lease they may
+/// overlap a later ticket's window, which obligation 26 allows.
 pub proof fn lemma_pending_disjoint(v: MgrV, log: Log, t1: u64, t2: u64)
     requires
         inv(v, log),
@@ -1762,6 +1825,47 @@ pub proof fn lemma_pending_disjoint(v: MgrV, log: Log, t1: u64, t2: u64)
     }
 }
 
+
+/// §9.1.4 for every listed slot: positions at or past the frontier of two different leases, up
+/// to their reach, never share a slot. Every slot a plan lists at a position `>= c_h` (inputs,
+/// drafts, proposal rows, a continuation's slack) lies in `[c_h, ρ_h)`, so no two leases' plans
+/// can write the same slot.
+pub proof fn lemma_reserved_disjoint(v: MgrV, log: Log, h1: u64, h2: u64)
+    requires
+        inv(v, log),
+        v.leases.contains_key(h1),
+        v.leases.contains_key(h2),
+        h1 != h2,
+    ensures
+        forall|j1: int, j2: int|
+            v.leases[h1].c <= j1 < v.leases[h1].rho && v.leases[h2].c <= j2 < v.leases[h2].rho ==> #[trigger] slot_of(
+                v.b,
+                v.leases[h1].table,
+                j1,
+            ) != #[trigger] slot_of(v.b, v.leases[h2].table, j2),
+{
+    let l1 = v.leases[h1];
+    let l2 = v.leases[h2];
+    if l1.c < l1.rho {
+        lemma_plan_slots(v, log, h1, l1.c, l1.rho);
+    }
+    if l2.c < l2.rho {
+        lemma_plan_slots(v, log, h2, l2.c, l2.rho);
+    }
+    assert forall|j1: int, j2: int| l1.c <= j1 < l1.rho && l2.c <= j2 < l2.rho implies #[trigger] slot_of(v.b, l1.table, j1)
+        != #[trigger] slot_of(v.b, l2.table, j2) by {
+        assert(0 <= slot_of(v.b, l1.table, j1));
+        assert(0 <= slot_of(v.b, l2.table, j2));
+        let x1 = l1.table[j1 / (v.b as int)];
+        let x2 = l2.table[j2 / (v.b as int)];
+        assert(write_page_ok(v, h1, x1));
+        if slot_of(v.b, l1.table, j1) == slot_of(v.b, l2.table, j2) {
+            lemma_div_bounds(j2 as nat, v.b);
+            lemma_write_slot_page(v, l1.table, j1, x2 as int, j2 % (v.b as int));
+            assert(l2.table.contains(x2));
+        }
+    }
+}
 
 /// D22: the deferred token `x` of lease `h` is bound: `T'_h = T_h ++ [x]` and `X_h` empties.
 /// `L̂_h`, the frontier, the tables and the queue are unchanged.
@@ -1876,46 +1980,6 @@ impl Manager {
         self.pend.get(&t).unwrap().propose
     }
 
-    /// `s_h`, the planned slack of a live lease (§3.2).
-    pub fn queue_slack(&self, h: u64) -> (r: usize)
-        requires
-            self.valid(),
-            self@.leases.contains_key(h),
-        ensures
-            r as nat == sdr(self@, self@.leases[h]),
-    {
-        proof {
-            self.lemma_valid();
-            self.lemma_rep_dom();
-            reveal(lease_ok);
-            reveal(pend_ok);
-            assert(lease_ok(self@, self.den_log(), h));
-        }
-        let l = self.leases.get(&h).unwrap();
-        let q = l.pending.len();
-        if q == 0 {
-            0
-        } else {
-            let t0 = l.pending[0];
-            proof {
-                assert(self@.pend.contains_key(t0));
-                assert(pend_ok(self@, t0));
-            }
-            let k0 = self.pend.get(&t0).unwrap().drafts.len();
-            if q == 1 {
-                k0
-            } else {
-                let t1 = l.pending[1];
-                proof {
-                    assert(self@.pend.contains_key(t1));
-                    assert(pend_ok(self@, t1));
-                }
-                let k1 = self.pend.get(&t1).unwrap().drafts.len();
-                k0 + k1
-            }
-        }
-    }
-
     /// The drafts of pending ticket `t` are a continuation's deferred drafts.
     pub fn pend_ddr(&self, t: u64) -> (r: bool)
         requires
@@ -1947,19 +2011,37 @@ impl Manager {
         vstd::slice::slice_to_vec(vstd::slice::slice_subrange(self.pend.get(&t).unwrap().drafts.as_slice(), 0, n))
     }
 
-    /// `Q_h` of a live lease, in issue order (C6).
-    pub fn queue_ids(&self, h: u64) -> (r: Vec<u64>)
+    /// One read of a live lease's metadata for C6.
+    pub fn lease_meta(&self, h: u64) -> (r: LeaseMeta)
         requires
             self.valid(),
             self@.leases.contains_key(h),
         ensures
-            r@ == self@.leases[h].pending,
+            r.len as nat == self@.leases[h].toks.len(),
+            r.computed as nat == self@.leases[h].c,
+            r.reach as nat == self@.leases[h].rho,
+            r.planned as nat == pfront(self@, self@.leases[h]),
+            r.slack as nat == sdr(self@, self@.leases[h]),
+            r.deferred == self@.leases[h].dfr,
+            r.stopped == self@.leases[h].stopped,
+            r.queue@ == self@.leases[h].pending,
     {
+        let (_q, planned, slack) = self.queue_info(h);
         proof {
             self.lemma_valid();
             self.lemma_rep_dom();
         }
-        vstd::slice::slice_to_vec(self.leases.get(&h).unwrap().pending.as_slice())
+        let l = self.leases.get(&h).unwrap();
+        LeaseMeta {
+            len: l.toks.len(),
+            computed: l.c,
+            reach: l.rho,
+            planned,
+            slack,
+            deferred: l.dfr,
+            stopped: l.stopped,
+            queue: vstd::slice::slice_to_vec(l.pending.as_slice()),
+        }
     }
 
     /// `Q_h[0]` of a live lease with a pending ticket.

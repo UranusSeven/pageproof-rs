@@ -482,48 +482,12 @@ impl Coordinator {
         proof {
             self.lemma_view();
             self.lemma_shape();
-        }
-        let mut sum: u128 = 0;
-        let mut i: usize = 0;
-        while i < self.npaged
-            invariant
-                self.valid(),
-                i <= self.npaged,
-                sum as nat == psum(self.per@, i as int, m as nat),
-                sum as nat <= i * (m as nat),
-                self.npaged < 0x1_0000,
-            decreases self.npaged - i,
-        {
-            let p = self.per[i];
-            proof {
-                assert(self.unit@[i as int] >= 1);
-                if m > 0 {
-                    vstd::arithmetic::div_mod::lemma_div_plus_one((m - 1) as int, p as int);
-                    vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator((m - 1) as int, 1, p as int);
-                }
+            assert forall|i: int| 0 <= i < self.npaged implies #[trigger] self.per@[i] >= 1 by {
+                assert(i < self.ncls());
+                assert(self.unit@[i] >= 1);
             }
-            let q: usize = if m == 0 { 0 } else { (m - 1) / p + 1 };
-            proof {
-                if m == 0 {
-                    assert(cdiv(0, p as nat) == 0) by {
-                        vstd::arithmetic::div_mod::lemma_basic_div((p - 1) as int, p as int);
-                    }
-                }
-                assert(q as nat == cdiv(m as nat, p as nat));
-                assert(q <= m);
-                lemma_mul_succ(i as nat, m as nat);
-                assert((i + 1) * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires i + 1 <= 0x1_0000;
-                assert(0x1_0000 * (m as nat) <= u128::MAX) by (nonlinear_arith) requires m as nat <= u64::MAX;
-            }
-            sum = sum + q as u128;
-            i += 1;
         }
-        proof {
-            assert(self.npaged * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires self.npaged <= 0x1_0000;
-            assert(0x1_0000 * (m as nat) <= u64::MAX * 0x1_0000) by (nonlinear_arith) requires m as nat <= u64::MAX;
-            assert(self.state@.len() < 0x1_0000);
-        }
-        sum + (self.state.len() as u128) <= self.nslab as u128
+        fits_vec(&self.per, self.npaged, self.state.len(), self.nslab, m)
     }
 
     /// Joint probe of C1 over every paged class, each capped at `cap`. Only ghost E8 logs change.

@@ -98,12 +98,17 @@ Speculative decoding with a drafter class and ZOS:
 ```python
 sd = pp.Coordinator(1024, 1966080, [96 << 10], [], 16, b"model-v1",
                     drafter_units=[96 << 10], max_drafts=4, zos_depth=1)
-v = sd.begin_write(h, 1, drafts, propose=True)      # verify step
-sd.extend_deferred(h)                               # plan the next step now
+h, cached, _ = sd.attach(prompt_ids)
+p = sd.begin_write(h, len(prompt_ids) - 1 - cached)  # prefill all but the last token
+sd.finish_write(p.ticket)
+v = sd.begin_write(h, 1, drafts, propose=True)       # verify step: the last token + drafts
+sd.extend_deferred(h)                                # plan the next step now
 c = sd.begin_write(h, 1, propose=True, deferred_drafts=4)
-# ... the device runs v, then c from position c.lo + accepted (slots c.write_slots[k][accepted:]) ...
+# The device runs v, then c. If v accepted n1 drafts, c's window in paged class i is
+#   c.write_slots[i][n1 : n1 + c.num_inputs + c.num_drafts]
+# plus max_drafts proposal rows in a drafter class with propose (D24, E13).
 sd.finish_write(v.ticket, accepted=n1, token=bonus1)
-sd.finish_write(c.ticket, accepted=n2, token=None, drafts=accepted_drafts_of_c)
+sd.finish_write(c.ticket, accepted=n2, drafts=accepted_drafts_of_c)
 ```
 
 The v0.2.1 single-pool API is still available as `pp.BlockManager(num_pages, block_size, namespace)`.

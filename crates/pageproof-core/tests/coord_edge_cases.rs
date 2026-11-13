@@ -1419,3 +1419,13 @@ fn extend_deferred_behind_a_verify_may_need_two_pages() {
     assert_eq!(co.inspect(h).unwrap().computed, 10);
     co.release(h).unwrap();
 }
+
+#[test]
+fn create_rejects_a_configuration_without_room_for_one_lease() {
+    // C0: one slab, one paged class and one state class pass `cfg_accepts`, but a one-token lease
+    // needs a page and a slot, two slabs: `¬Fits(1)`. This is ConfigError, decided before any
+    // identifier is taken (review of PR 7).
+    assert_eq!(Coordinator::create(1, 64, &[64], &[], &[64], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    // With a second slab the same classes fit.
+    assert!(Coordinator::create(2, 64, &[64], &[], &[64], 4, 0, 0, NS).is_ok());
+}
