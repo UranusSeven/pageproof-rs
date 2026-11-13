@@ -20,6 +20,7 @@ pub open spec fn cfg_ok(v: MgrV, log: Log) -> bool {
     &&& v.p * v.b <= max_slots()
     &&& v.cfg.mu <= max_slots()
     &&& v.cfg.delta <= 1
+    &&& cfg_room(v.cfg)
     &&& ns_ok(v.ns)
     &&& v.refs.len() == v.p
     &&& v.keys.len() == v.p
@@ -46,6 +47,32 @@ pub open spec fn lhat(l: LeaseV) -> nat {
     l.toks.len() + if l.dfr { 1nat } else { 0nat }
 }
 
+/// `δ·λ`: the drafts the older tickets of a full queue may hold (D18).
+pub open spec fn dlam(c: PCfg) -> nat {
+    if c.delta == 1 { c.lam } else { 0nat }
+}
+
+/// D18: the margin covers a ticket's drafts and the drafts of up to δ tickets ahead of it.
+pub open spec fn cfg_room(c: PCfg) -> bool {
+    c.lam + dlam(c) <= c.mu
+}
+
+/// `p_h`: the planned frontier, `c_h` or the end of the newest pending ticket (§3.2).
+pub open spec fn pfront(v: MgrV, l: LeaseV) -> nat {
+    if l.pending.len() == 0 { l.c } else { v.pend[l.pending[l.pending.len() - 1]].z }
+}
+
+/// `s_h`: the planned slack, the drafts of the pending tickets (§3.2); `|Q_h| <= 2`.
+pub open spec fn sdr(v: MgrV, l: LeaseV) -> nat {
+    if l.pending.len() == 0 {
+        0nat
+    } else if l.pending.len() == 1 {
+        v.pend[l.pending[0]].drafts.len()
+    } else {
+        v.pend[l.pending[0]].drafts.len() + v.pend[l.pending[1]].drafts.len()
+    }
+}
+
 /// I1, I4, I5 (lease part), I5b, I9 (lease -> Pending direction), I16, I17.
 #[verifier::opaque]
 pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
@@ -60,8 +87,9 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& l.table.no_duplicates()
     &&& forall|i: int| 0 <= i < l.table.len() ==> (#[trigger] l.table[i] as nat) < v.p
     &&& l.c <= l.toks.len()
-    // I16: with no ticket in flight and input left, the reservation is whole.
-    &&& (l.pending.len() == 0 && l.c < l.toks.len()) ==> l.rho == l.toks.len() + v.cfg.mu
+    // I16 (room to issue): with input left, the reach covers the slack and a new ticket's drafts
+    // and proposal rows, μ − δλ = λ + λ·[Cx ≠ ∅].
+    &&& pfront(v, l) < lhat(l) ==> lhat(l) + sdr(v, l) + v.cfg.mu <= l.rho + dlam(v.cfg)
     &&& forall|j: int|
         0 <= j < l.c ==> (v.vmap)(#[trigger] slot_of(v.b, l.table, j)) == l.toks.subrange(0, j + 1)
     &&& forall|i: nat| i < l.table.len() ==> #[trigger] blk_ok(v, log, l, i)
@@ -72,12 +100,16 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& l.pending.no_duplicates()
     &&& forall|i: int| 0 <= i < l.pending.len() ==> v.pend.contains_key(#[trigger] l.pending[i]) && v.pend[l.pending[i]].lease == h
     &&& l.pending.len() == 2 ==> v.pend[l.pending[1]].a == v.pend[l.pending[0]].z
-    // I17: the deferred tail is the oldest ticket, it has no drafts, and it ends at L_h.
+    // I9 (bounded start): the second ticket fits the reach for every acceptance count of the first.
+    &&& l.pending.len() == 2 ==> v.pend[l.pending[1]].z + v.pend[l.pending[1]].drafts.len() + v.pend[l.pending[0]].drafts.len()
+        <= l.rho
+    // I17: the deferred tail is the oldest ticket and ends at L_h; its bonus token fits the
+    // reach after every accepted draft.
     &&& l.dfr ==> {
         &&& v.cfg.delta == 1
         &&& l.pending.len() >= 1
         &&& v.pend[l.pending[0]].z == l.toks.len()
-        &&& v.pend[l.pending[0]].drafts.len() == 0
+        &&& v.pend[l.pending[0]].z + v.pend[l.pending[0]].drafts.len() + 1 <= l.rho
     }
 }
 
@@ -125,10 +157,11 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     &&& v.leases[r.lease].c <= r.a
     // A continuation's input is the deferred position (D24), so z <= L̂_h.
     &&& r.a < r.z <= lhat(v.leases[r.lease])
-    // D16: drafts follow the whole planned input and fit the reservation (D18, I16).
-    &&& r.drafts.len() > 0 ==> r.z == lhat(v.leases[r.lease])
+    // D16: drafts follow the whole known input, or, for a continuation, the deferred position,
+    // and fit the reservation (D18, I16).
+    &&& r.drafts.len() > 0 ==> r.z == v.leases[r.lease].toks.len() || r.z == lhat(v.leases[r.lease])
+    &&& r.drafts.len() <= v.cfg.lam
     &&& r.z + r.drafts.len() <= v.leases[r.lease].rho
-    &&& r.z < lhat(v.leases[r.lease]) ==> v.leases[r.lease].rho == lhat(v.leases[r.lease]) + v.cfg.mu
 }
 
 /// `Valid(S)`.
@@ -169,12 +202,8 @@ pub proof fn lemma_lease_frame(v: MgrV, v2: MgrV, log: Log, log2: Log, h: u64)
                 slot_of(v.b, v.leases[h].table, j),
             ),
         forall|i: int|
-            0 <= i < v.leases[h].pending.len() ==> v2.pend.contains_key(#[trigger] v.leases[h].pending[i]) && v2.pend[v.leases[h].pending[i]].lease
-                == h,
-        v.leases[h].pending.len() == 2 ==> v2.pend[v.leases[h].pending[1]].a == v.pend[v.leases[h].pending[1]].a
-            && v2.pend[v.leases[h].pending[0]].z == v.pend[v.leases[h].pending[0]].z,
-        v.leases[h].dfr ==> v2.pend[v.leases[h].pending[0]].z == v.pend[v.leases[h].pending[0]].z
-            && v2.pend[v.leases[h].pending[0]].drafts.len() == v.pend[v.leases[h].pending[0]].drafts.len(),
+            0 <= i < v.leases[h].pending.len() ==> v2.pend.contains_key(#[trigger] v.leases[h].pending[i]) && v2.pend[v.leases[h].pending[i]]
+                == v.pend[v.leases[h].pending[i]],
         v2.cfg == v.cfg,
     ensures
         lease_ok(v2, log2, h),

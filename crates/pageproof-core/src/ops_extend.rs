@@ -54,6 +54,12 @@ pub open spec fn extend_busy(v: MgrV, l: LeaseV) -> bool {
         || v.pend[l.pending[0]].propose))
 }
 
+/// Busy for C2 and C2b: extend needs a queue with room whose oldest ticket has no drafts or
+/// proposal rows (D21); extend_deferred only a queue with room, so it may follow a verify (C2b).
+pub open spec fn grow_busy(v: MgrV, l: LeaseV, dfr: bool) -> bool {
+    if dfr { l.pending.len() > v.cfg.delta } else { extend_busy(v, l) }
+}
+
 /// The planned frontier of a lease (§3.2), as `ops_write::pfront`.
 pub open spec fn pfront_x(v: MgrV, l: LeaseV) -> nat {
     if l.pending.len() == 0 { l.c } else { v.pend[l.pending[l.pending.len() - 1]].z }
@@ -68,7 +74,7 @@ pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, d
     // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); every
     // input position must be computed or covered by a pending ticket, and none may be deferred.
     // extend_deferred needs a pending ticket whose bonus position it appends (D22).
-    let busy = extend_busy(v, l);
+    let busy = grow_busy(v, l, dfr);
     let ph = !l.dfr && pfront_x(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
     let arg = dfr || suffix.len() > 0;
     &&& !live ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
@@ -103,7 +109,7 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        !extend_busy(v, v.leases[h]),
+        !grow_busy(v, v.leases[h], dfr),
         !v.leases[h].dfr,
         pfront_x(v, v.leases[h]) == v.leases[h].toks.len(),
         dfr ==> suffix.len() == 0 && v.leases[h].pending.len() > 0,
@@ -130,21 +136,31 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
     assert(lease_ok(v, log, h));
     assert(l2.dfr == dfr);
     assert(lhat(l2) == l.toks.len() + (if dfr { 1nat } else { suffix.len() }));
-    // With δ <= 1 and room in the queue, at most one ticket is pending; it has no drafts and ends
-    // at L, so c <= L.
+    // With δ <= 1 and room in the queue, at most one ticket is pending and it ends at L, so c <= L.
+    // extend needs it without drafts; extend_deferred keeps its drafts, which fit the new reach.
     assert(l.pending.len() <= 1);
+    assert(l2.pending == l.pending);
     if l.pending.len() == 1 {
         assert(v.pend.contains_key(l.pending[0]));
         assert(pend_ok(v, l.pending[0]));
         assert(v.pend[l.pending[0]].z == l.toks.len());
-        assert(v.pend[l.pending[0]].drafts.len() == 0);
+        assert(v.pend[l.pending[0]].drafts.len() <= v.cfg.lam);
+        if !dfr {
+            assert(v.pend[l.pending[0]].drafts.len() == 0);
+        }
+        assert(pfront(v2, l2) == l.toks.len());
+        assert(sdr(v2, l2) == v.pend[l.pending[0]].drafts.len());
+    } else {
+        assert(pfront(v2, l2) == l.c);
+        assert(sdr(v2, l2) == 0);
     }
     if dfr {
         // X_h becomes [Q_h[0]] (I17); δ = 1 because a ticket is pending with room in the queue.
         assert(v.cfg.delta <= 1);
         assert(v.cfg.delta == 1);
-        assert(l2.pending == l.pending);
+        assert(dlam(v.cfg) == v.cfg.lam);
     }
+    assert(l2.rho == lhat(l2) + v.cfg.mu);
     assert(l.c <= l.toks.len());
     assert(fresh.subrange(0, fresh.len() as int) =~= fresh);
     // Old table pages are referenced by h, fresh pages are free: disjoint.
@@ -449,8 +465,8 @@ impl Manager {
             reveal(pend_ok);
             assert(lease_ok(v, log, h.id));
         }
-        // Busy (D21): the queue is full, or its oldest ticket has drafts or proposal rows.
-        let (busy, pf) = if q == 0 {
+        // Busy (D21): the queue is full, or, for extend, its oldest ticket has drafts or proposal rows.
+        let (busy0, pf) = if q == 0 {
             (false, l_c)
         } else {
             let t0 = self.leases.get(&h.id).unwrap().pending[0];
@@ -463,8 +479,10 @@ impl Manager {
             let rl = self.pend.get(&tl).unwrap();
             (q > self.cfg.delta || r0.drafts.len() > 0 || r0.propose, rl.z)
         };
+        let busy = if dfr { q > self.cfg.delta } else { busy0 };
         proof {
-            assert(busy == extend_busy(v, v.leases[h.id]));
+            assert(busy0 == extend_busy(v, v.leases[h.id]));
+            assert(busy == grow_busy(v, v.leases[h.id], dfr));
             assert(pf as nat == pfront_x(v, v.leases[h.id]));
         }
         if busy {

@@ -91,6 +91,9 @@ pub ghost struct PendV {
     pub drafts: Seq<Token>,
     /// The drafter classes also write proposal rows (D20).
     pub propose: bool,
+    /// The drafts are a continuation's deferred drafts, placeholders until its completion
+    /// reports the accepted ones (D24).
+    pub ddr: bool,
 }
 
 /// Configuration fixed at create and shared by every paged class (I10).

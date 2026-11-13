@@ -58,6 +58,7 @@ pub struct PendC {
     pub z: usize,
     pub drafts: Vec<Token>,
     pub propose: bool,
+    pub ddr: bool,
 }
 
 pub struct Manager {
@@ -87,7 +88,7 @@ pub open spec fn lease_view(l: LeaseC) -> LeaseV {
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {
-    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@, propose: r.propose }
+    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@, propose: r.propose, ddr: r.ddr }
 }
 
 impl Manager {
@@ -293,7 +294,7 @@ impl Manager {
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
-                || cfg.delta > 1) ==> r is Err,
+                || cfg.delta > 1 || !cfg_room(cfg@)) ==> r is Err,
     {
         Self::create_own(p, b, ns, false, cfg)
     }
@@ -306,9 +307,13 @@ impl Manager {
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
-                || cfg.delta > 1) ==> r is Err,
+                || cfg.delta > 1 || !cfg_room(cfg@)) ==> r is Err,
     {
         if p == 0 || b == 0 || ns.len() > u32::MAX as usize || cfg.mu > MAX_SLOTS as usize || cfg.delta > 1 {
+            return Err(Error::ConfigError);
+        }
+        // D18: μ covers a ticket's drafts plus δ more tickets' drafts.
+        if cfg.lam > cfg.mu || (cfg.delta == 1 && cfg.lam > cfg.mu - cfg.lam) {
             return Err(Error::ConfigError);
         }
         proof {

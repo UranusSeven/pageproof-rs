@@ -1023,3 +1023,158 @@ fn extend_deferred_needs_capacity() {
     co.finish_write(t1, done(t1)).unwrap();
     co.release(h).unwrap();
 }
+
+// ---- v0.6 ZOS with speculative decoding: continuations behind a verify (D24) ----
+// §7: B = 4, λ = 2, one drafter class, δ = 1, μ = 3λ = 6.
+
+fn spec_coord() -> Coordinator {
+    Coordinator::create(8, 64, &[16], &[16], &[], 4, 2, 1, NS).unwrap()
+}
+
+fn comp(t: pageproof_core::types::Ticket, n: usize, x: Option<u32>, drafts: Vec<u32>) -> CoordCompletion {
+    CoordCompletion { ticket: t, accepted: n, token: x, drafts, stop: false }
+}
+
+/// A lease with `L = 7`, `c_h = 6`, `ρ_h = 13`.
+fn lease_l7(co: &mut Coordinator) -> Handle {
+    let (h, _, _) = co.attach(&toks(7, 40)).unwrap();
+    let (t, _) = co.begin_write(h, 6, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t, done(t)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach, iv.mu), (7, 6, 13, 6));
+    h
+}
+
+#[test]
+fn continuation_behind_a_verify() {
+    let mut co = spec_coord();
+    let h = lease_l7(&mut co);
+    // Verify t1: target slots 6-8, drafter slots 6-10; p_h = 7, s_h = 2.
+    let (t1, p1) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+    assert_eq!((p1.write_slots[0].len(), p1.write_slots[1].len()), (3, 5));
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.planned, iv.slack), (7, 2));
+    // extend_deferred behind the verify: L̂ = 8, ρ = 14.
+    co.extend_deferred(h).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.deferred, iv.reach), (7, true, 14));
+    // The continuation t2: lo = 7, s = 2, ℓ = 1, k = 2; target 7-11, drafter 7-13; no allocation.
+    let free = co.arena().free_units.clone();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+    assert_eq!((p2.lo, p2.slack, p2.num_inputs, p2.num_drafts), (7, 2, 1, 2));
+    assert_eq!(p2.producer, Some(t1));
+    assert_eq!(p2.input_ids, vec![0, 0, 0]);
+    assert_eq!(p2.positions, vec![7, 8, 9]);
+    assert_eq!((p2.write_slots[0].len(), p2.write_slots[1].len()), (5, 7));
+    for (q, s) in p2.write_slots[1].iter().enumerate() {
+        assert_eq!(*s, co.slot_of(1, h, 7 + q).unwrap());
+    }
+    // μ = 3λ is tight: the last proposal row is at ρ − 1 = 13.
+    assert!(co.slot_of(1, h, 13).is_ok() && co.slot_of(1, h, 14).is_err());
+    assert_eq!(co.arena().free_units, free);
+    // extend behind the verify is Busy (C2 checks Busy first).
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::Busy));
+    // t1 accepts one draft and samples x1: T' = T ++ [d1, x1], c = 8; block 1 is published.
+    assert_eq!(co.finish_write(t1, comp(t1, 1, None, vec![])).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.finish_write(t1, comp(t1, 1, Some(201), vec![])).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.deferred, iv.pending), (9, 8, false, Some(t2)));
+    // t2 is the oldest; it starts exactly at 8.
+    assert_eq!(iv.planned, 9);
+    // extend_deferred makes t2 the producer: L̂ = 10, ρ = 16, no new page.
+    let lv = co.extend_deferred(h).unwrap();
+    assert_eq!(lv.tables[0].len(), 4);
+    assert_eq!(co.inspect(h).unwrap().reach, 16);
+    // A continuation's completion must report exactly its accepted drafts.
+    assert_eq!(co.finish_write(t2, comp(t2, 2, Some(202), vec![])).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.finish_write(t2, comp(t2, 2, Some(202), vec![301])).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.finish_write(t2, comp(t2, 2, Some(202), vec![301, 302])).unwrap(), 11);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.pending), (12, 11, None));
+    let snap = co.release(h).unwrap();
+    assert_eq!(&snap[7..], &[101, 201, 301, 302, 202]);
+}
+
+#[test]
+fn verify_blocks_are_published_after_the_producer_completes() {
+    // Block 1 (positions 4-7) is published by t1's completion and hit by a new lease.
+    let mut co = spec_coord();
+    let h = lease_l7(&mut co);
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+    co.finish_write(t1, comp(t1, 1, Some(201), vec![])).unwrap();
+    let mut prefix = toks(7, 40);
+    prefix.extend_from_slice(&[101, 201]);
+    let (h2, cached, _) = co.attach(&prefix).unwrap();
+    assert_eq!(cached, 8);
+    co.finish_write(t2, comp(t2, 0, None, vec![])).unwrap();
+    co.release(h2).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn continuation_starts_after_every_acceptance_count() {
+    // The device runs t1 with n1 = 0, 1 or 2: t2's window starts at 7 + n1.
+    for n1 in 0..=2usize {
+        let mut co = spec_coord();
+        let h = lease_l7(&mut co);
+        let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+        co.extend_deferred(h).unwrap();
+        let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+        co.finish_write(t1, comp(t1, n1, Some(201), vec![])).unwrap();
+        let iv = co.inspect(h).unwrap();
+        assert_eq!(iv.computed, 7 + n1);
+        assert_eq!(iv.planned, 8 + n1);
+        // The window [7 + n1, 7 + n1 + 3) lies inside the listed target slots.
+        for i in 0..3 {
+            assert_eq!(p2.write_slots[0][n1 + i], co.slot_of(0, h, 7 + n1 + i).unwrap());
+        }
+        co.finish_write(t2, comp(t2, 2, None, vec![301, 302])).unwrap();
+        let iv = co.inspect(h).unwrap();
+        assert_eq!((iv.len, iv.computed), (8 + n1 + 2, 8 + n1 + 2));
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn deferred_drafts_need_a_continuation_and_a_proposal() {
+    let mut co = spec_coord();
+    let h = lease_l7(&mut co);
+    // Deferred outside a continuation.
+    assert_eq!(co.begin_write(h, 1, Drafts::Deferred(1), false).err(), Some(Error::InvalidArgument));
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), false).unwrap();
+    // No remaining input before extend_deferred (p_h = L̂_h).
+    assert_eq!(co.begin_write(h, 1, Drafts::Deferred(2), false).err(), Some(Error::InvalidArgument));
+    co.extend_deferred(h).unwrap();
+    // The producer has no propose: there are no device drafts.
+    assert_eq!(co.begin_write(h, 1, Drafts::Deferred(2), false).err(), Some(Error::InvalidArgument));
+    // More than λ deferred drafts.
+    assert_eq!(co.begin_write(h, 1, Drafts::Deferred(3), false).err(), Some(Error::InvalidArgument));
+    // Known([]) is a plain continuation, with the producer's drafts as slack.
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!((p2.lo, p2.slack, p2.num_drafts), (7, 2, 0));
+    assert_eq!(p2.write_slots[0].len(), 3);
+    co.finish_write(t1, comp(t1, 2, Some(201), vec![])).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (10, 10));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn continuation_without_extend_deferred_finishes_with_a_known_token() {
+    // If extend_deferred fails, the caller waits for t1, appends its token with extend, and
+    // plans the next verify with host-known drafts (C2b).
+    let mut co = spec_coord();
+    let h = lease_l7(&mut co);
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+    // t1 does not head X_h, so its token is ignored.
+    co.finish_write(t1, comp(t1, 2, Some(201), vec![])).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (9, 9, 13));
+    co.extend(h, &[201]).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![103, 104]), true).unwrap();
+    co.finish_write(t2, done_n(t2, 1)).unwrap();
+    co.release(h).unwrap();
+}
