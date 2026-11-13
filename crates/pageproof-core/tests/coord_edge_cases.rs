@@ -220,9 +220,11 @@ fn reclaim_idle_keyed_slab_for_state() {
 }
 
 #[test]
-fn reclaim_revokes_keys() {
-    // Paged-only: reclaim moves an idle keyed slab from one paged class to another; afterwards the
-    // revoked blocks can no longer be hit. Class 0: 1 page/slab; class 1: 4 pages/slab.
+fn release_leaves_idle_keyed_slabs_reclaimable() {
+    // Paged-only: after release, idle keyed slabs count as reclaimable while their blocks remain
+    // hits. (Without a state class no paged slab is ever reclaimed: every paged class grows in
+    // lockstep, so none is ever short while another has an idle slab to spare.) Class 0: 1
+    // page/slab; class 1: 4 pages/slab.
     let mut co = Coordinator::create(3, 64, &[64, 16], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 5);
     // Lease A (2 blocks): class 0 takes 2 slabs, class 1 takes 1 slab. FS = 0.
@@ -239,7 +241,7 @@ fn reclaim_revokes_keys() {
 }
 
 #[test]
-fn reclaim_paged_slab_for_other_paged_class() {
+fn second_paged_class_takes_the_free_slab() {
     // Two paged classes over 3 slabs: class 0 unit 16 (4/slab), class 1 unit 64 (1/slab).
     let mut co = Coordinator::create(3, 64, &[16, 64], &[], &[], 4, 0, 0, NS).unwrap();
     // A 1-block lease takes one slab per class; then release: both slabs idle, one free slab.
@@ -1442,4 +1444,304 @@ fn create_rejects_a_configuration_without_room_for_one_lease() {
     assert_eq!(Coordinator::create(1, 64, &[64], &[], &[64], 4, 0, 0, NS).err(), Some(Error::ConfigError));
     // With a second slab the same classes fit.
     assert!(Coordinator::create(2, 64, &[64], &[], &[64], 4, 0, 0, NS).is_ok());
+}
+
+// ---- gaps from the coverage review of PR 7 ----
+
+#[test]
+fn drafter_slab_is_reclaimed_for_a_target_class() {
+    // §7: drafter and target classes compete for slabs under one `Cap`. Every class has one unit
+    // per slab, λ = 1, so μ = 2. A paged slab can change hands only after a state class has taken
+    // slabs from the target class, which leaves the drafter class with more slabs than the target.
+    let mut co = Coordinator::create(11, 64, &[64], &[64], &[64], 4, 1, 0, NS).unwrap();
+    let ha = co.attach(&toks(18, 60)).unwrap().0;
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), count_owner(&co, 2)), (5, 5, 1));
+    co.release(ha).unwrap();
+    // Three short leases need three state slots: the state class takes two idle target slabs.
+    let hs: Vec<Handle> = (0..3).map(|i| co.attach(&toks(2, 61 + i)).unwrap().0).collect();
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), count_owner(&co, 2)), (3, 5, 3));
+    for h in hs {
+        co.release(h).unwrap();
+    }
+    assert_eq!(free_slabs(&co), 0);
+    // A 4-block lease: the target class is one slab short; the drafter class gives up an idle slab.
+    let before = owners(&co);
+    let (hd, _, vd) = co.attach(&toks(14, 64)).unwrap();
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), count_owner(&co, 2)), (4, 4, 3));
+    let moved: Vec<usize> = (0..11).filter(|&s| before[s] != owners(&co)[s]).collect();
+    assert_eq!(moved.len(), 1);
+    assert_eq!((before[moved[0]], owners(&co)[moved[0]]), (2, 1), "a drafter slab became a target slab");
+    check_disjoint(&co, &[64, 64, 64], &[1, 1, 1], &[&vd], 2);
+    co.release(hd).unwrap();
+}
+
+#[test]
+fn prefix_cached_in_the_target_class_only() {
+    // §7: target prefix cached, drafter class not: k* stops at the first block missing in any
+    // paged class. Target pages are 16 B (4 per slab), drafter pages 32 B (2 per slab).
+    let mut co = Coordinator::create(6, 64, &[16], &[32], &[], 4, 1, 0, NS).unwrap();
+    let t = toks(9, 70);
+    let (ha, _, va) = co.attach(&t).unwrap();
+    compute_all(&mut co, ha);
+    co.release(ha).unwrap();
+    let (tgt0, drf0) = (va.tables[0][0], va.tables[1][0]);
+    let (_hx1, _, v1) = co.attach(&toks(4, 71)).unwrap();
+    let (hx2, _, v2) = co.attach(&toks(8, 72)).unwrap();
+    // Precondition (free-page order): the drafter page of block 0 is reused, the target's is not.
+    assert!(!v1.tables[0].contains(&tgt0) && !v2.tables[0].contains(&tgt0), "target block 0 kept");
+    assert!(v1.tables[1].contains(&drf0) || v2.tables[1].contains(&drf0), "drafter block 0 reused");
+    co.release(hx2).unwrap();
+    let (hc, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, 0);
+    co.release(hc).unwrap();
+}
+
+#[test]
+fn mu_is_twelve_with_a_drafter_and_zos() {
+    // §7: B = 64, λ = 4, a drafter class, δ = 1: μ = 12; tables cover ceil((L + 12)/64) blocks.
+    // 4 pages of 64 tokens per slab and class; 8 slabs give Fits(m) for m <= 16 blocks.
+    let mut co = Coordinator::create(8, 1024, &[256], &[256], &[], 64, 4, 1, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(52, 73)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.mu, iv.reach, v.tables[0].len(), v.tables[1].len()), (12, 64, 1, 1));
+    co.release(h).unwrap();
+    let (h, _, v) = co.attach(&toks(53, 74)).unwrap();
+    assert_eq!((v.tables[0].len(), v.tables[1].len()), (2, 2));
+    co.release(h).unwrap();
+    // Fits(16) holds and Fits(17) does not, so L + 12 <= 1024 fits and L = 1013 does not,
+    // although its ceil(1013/64) = 16 blocks alone would.
+    assert!(co.attach(&toks(1012, 75)).is_ok_and(|(h, _, _)| co.release(h).is_ok()));
+    assert_eq!(co.attach(&toks(1013, 76)).err(), Some(Error::RequestTooLarge));
+}
+
+#[test]
+fn drafts_at_lambda_zero_are_rejected() {
+    // §7: with λ = 0, begin_write with non-empty drafts or with propose is InvalidArgument.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(5, 77)).unwrap();
+    let (t, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t, done(t)).unwrap();
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![1]), false).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![]), true).err(), Some(Error::InvalidArgument));
+    let (t, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn rejected_drafts_equal_to_a_cached_block_are_not_published() {
+    // §7: rejected drafts that would complete a block equal to a cached block: no hit, no
+    // publication. A publishes blocks 0 and 1; B feeds block 1's tokens as drafts and rejects them.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 3, 0, NS).unwrap();
+    let t = toks(9, 78);
+    let (ha, _, va) = co.attach(&t).unwrap();
+    compute_all(&mut co, ha);
+    let (hb, cached, vb) = co.attach(&t[..5]).unwrap();
+    assert_eq!(cached, 4);
+    assert_ne!(vb.tables[0][1], va.tables[0][1]);
+    let (tb, _) = co.begin_write(hb, 1, Drafts::Known(t[5..8].to_vec()), false).unwrap();
+    co.finish_write(tb, done_n(tb, 0)).unwrap();
+    assert_eq!(co.inspect(hb).unwrap().len, 5);
+    co.release(ha).unwrap();
+    // If B's page held a key for block 1, it would be the active candidate and be preferred.
+    let (hc, cached, vc) = co.attach(&t).unwrap();
+    assert_eq!(cached, 8);
+    assert_eq!(vc.tables[0][1], va.tables[0][1], "block 1 comes from A's page, not B's");
+    co.release(hb).unwrap();
+    co.release(hc).unwrap();
+}
+
+#[test]
+fn bonus_token_extend_without_capacity() {
+    // §7: extend with the bonus token after n = λ accepted drafts: the demand is
+    // ceil((L' + μ)/B) - m_h; on NoCapacity the lease keeps its accepted drafts and c_h = L_h.
+    // B = 4, λ = 2, μ = 2, one page per slab, two slabs.
+    let mut co = Coordinator::create(2, 64, &[64], &[], &[], 4, 2, 0, NS).unwrap();
+    let base = toks(2, 79);
+    let (h, _, _) = co.attach(&base).unwrap();
+    let h2 = co.attach(&toks(1, 80)).unwrap().0;
+    assert_eq!(free_slabs(&co), 0);
+    let (t, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t, done(t)).unwrap();
+    // Verify the last token with λ = 2 drafts, both accepted: L = ρ = 4, one page.
+    let (t, _) = co.begin_write(h, 1, Drafts::Known(vec![91, 92]), false).unwrap();
+    co.finish_write(t, done_n(t, 2)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach, iv.lease.tables[0].len()), (4, 4, 4, 1));
+    // The bonus token needs ρ' = 7, a second page, and no slab is free.
+    let before = iv.lease.tables.clone();
+    assert_eq!(co.extend(h, &[93]).err(), Some(Error::NoCapacity));
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (4, 4, 4));
+    assert_eq!(iv.lease.tables, before);
+    co.release(h2).unwrap();
+    co.extend(h, &[93]).unwrap();
+    assert_eq!(&co.release(h).unwrap()[2..], &[91, 92, 93]);
+}
+
+#[test]
+fn walkthrough_block_two_and_the_ignored_bonus() {
+    // §7 walk-through: after finish_write(t2, n = 2, x2) with extend_deferred, c_h = 11 and block
+    // 2 (positions 8-11) is not published until a later ticket writes position 11.
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    co.finish_write(t1, comp(t1, 1, Some(201), vec![])).unwrap();
+    co.extend_deferred(h).unwrap();
+    co.finish_write(t2, comp(t2, 2, Some(202), vec![301, 302])).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (12, 11));
+    let mut probe = toks(7, 40);
+    probe.extend_from_slice(&[101, 201, 301, 302, 202, 1]);
+    let (hp, cached, _) = co.attach(&probe).unwrap();
+    assert_eq!(cached, 8, "block 2 is not published");
+    co.release(hp).unwrap();
+    co.release(h).unwrap();
+
+    // Without extend_deferred, t2 is not in X_h: x2 is ignored and the caller appends it.
+    let mut co = spec_coord();
+    let (h, t1, t2) = verify_and_continuation(&mut co);
+    co.finish_write(t1, comp(t1, 1, Some(201), vec![])).unwrap();
+    co.finish_write(t2, comp(t2, 2, Some(202), vec![301, 302])).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.deferred), (11, 11, false));
+    co.extend(h, &[202]).unwrap();
+    assert_eq!(&co.release(h).unwrap()[7..], &[101, 201, 301, 302, 202]);
+}
+
+#[test]
+fn hybrid_continuation_behind_a_real_verify() {
+    // §7: hybrid lease, t2 a continuation of verify t1 (k = 2): both plans name the one slot σ;
+    // no second state slot is ever taken.
+    let mut co = Coordinator::create(8, 64, &[16], &[16], &[64], 4, 2, 1, NS).unwrap();
+    let (h, _, lv) = co.attach(&toks(7, 81)).unwrap();
+    let (t0, _) = co.begin_write(h, 6, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t0, done(t0)).unwrap();
+    let free = co.arena().free_units[2];
+    let (t1, p1) = co.begin_write(h, 1, Drafts::Known(vec![11, 12]), true).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+    assert_eq!(p1.state_slots, lv.slots);
+    assert_eq!(p2.state_slots, lv.slots);
+    assert!(!p1.init && !p2.init);
+    assert_eq!((p1.num_drafts, p2.num_drafts, p2.producer), (2, 2, Some(t1)));
+    co.finish_write(t1, comp(t1, 1, Some(21), vec![])).unwrap();
+    co.finish_write(t2, comp(t2, 2, None, vec![31, 32])).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.lease.slots.clone()), (11, 11, lv.slots.clone()));
+    assert_eq!(co.arena().free_units[2], free);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_behind_a_propose_only_ticket_is_busy() {
+    // §7: a pending ticket with propose and no drafts makes extend Busy (C2 checks Busy first),
+    // while extend_deferred is allowed (C2b) and a Deferred continuation may follow.
+    let mut co = spec_coord();
+    let h = lease_l7(&mut co);
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![]), true).unwrap();
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::Busy));
+    co.extend_deferred(h).unwrap();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+    assert_eq!((p2.slack, p2.num_drafts), (0, 2));
+    co.finish_write(t1, tok(t1, 21)).unwrap();
+    co.finish_write(t2, comp(t2, 1, None, vec![31])).unwrap();
+    assert_eq!(&co.release(h).unwrap()[7..], &[21, 31]);
+}
+
+#[test]
+fn drafter_class_windows_lie_inside_the_listed_slots() {
+    // §7: for n1 = 0, 1, 2, the continuation's drafter window (ℓ + k inputs plus λ proposal rows)
+    // starts at index n1 of its listed drafter slots and ends at most at ρ_h = 14.
+    for n1 in 0..=2usize {
+        let mut co = spec_coord();
+        let h = lease_l7(&mut co);
+        let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![101, 102]), true).unwrap();
+        co.extend_deferred(h).unwrap();
+        let (t2, p2) = co.begin_write(h, 1, Drafts::Deferred(2), true).unwrap();
+        let width = p2.num_inputs + p2.num_drafts + 2;
+        assert_eq!(p2.write_slots[1].len(), 7);
+        assert!(n1 + width <= p2.write_slots[1].len() && 7 + n1 + width <= 14);
+        co.finish_write(t1, comp(t1, n1, Some(201), vec![])).unwrap();
+        // The tables do not change, so the listed slots still name the window's positions.
+        for i in 0..width {
+            assert_eq!(p2.write_slots[1][n1 + i], co.slot_of(1, h, 7 + n1 + i).unwrap(), "n1 = {n1}, i = {i}");
+        }
+        co.finish_write(t2, comp(t2, 0, None, vec![])).unwrap();
+        co.release(h).unwrap();
+    }
+}
+
+
+#[test]
+fn several_candidates_prefer_the_active_one() {
+    // §7: several candidates for one key: prefer an active candidate, so a servable request is
+    // not wrongly rejected. A and B attach the same prompt before either publishes, so block 0 is
+    // published twice, on different pages. One page per slab, four slabs.
+    let mut co = Coordinator::create(4, 64, &[64], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = toks(9, 82);
+    let (ha, _, va) = co.attach(&t[..5]).unwrap();
+    let (hb, cb, vb) = co.attach(&t[..5]).unwrap();
+    assert_eq!(cb, 0);
+    compute_all(&mut co, ha);
+    compute_all(&mut co, hb);
+    assert_ne!(va.tables[0][0], vb.tables[0][0]);
+    co.release(ha).unwrap();
+    // C needs 3 pages. Hitting B's active page takes 2 free units; reactivating A's cached page
+    // would take 3, and only 2 are free.
+    assert_eq!(co.arena().free_units, vec![2]);
+    let (hc, cc, vc) = co.attach(&t).unwrap();
+    assert_eq!(cc, 4);
+    assert_eq!(vc.tables[0][0], vb.tables[0][0]);
+    co.release(hb).unwrap();
+    co.release(hc).unwrap();
+}
+
+#[test]
+fn fragmented_paged_units_do_not_make_a_state_slot() {
+    // §7 (D12): state class full, FS = ∅, and the paged class's free units are spread over partly
+    // used slabs: NoCapacity, even though the free paged bytes exceed a state unit. Paged unit
+    // 4 B (16 per slab), state unit 32 B (2 per slab), four slabs.
+    let mut co = Coordinator::create(4, 64, &[4], &[], &[32], 4, 0, 0, NS).unwrap();
+    let ha = co.attach(&toks(32, 83)).unwrap().0;
+    let hb = co.attach(&toks(32, 84)).unwrap().0;
+    let hc = co.attach(&toks(32, 85)).unwrap().0;
+    let hd = co.attach(&toks(32, 86)).unwrap().0;
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), free_slabs(&co)), (2, 2, 0));
+    co.release(ha).unwrap();
+    co.release(hc).unwrap();
+    let he = co.attach(&toks(4, 87)).unwrap().0;
+    let hf = co.attach(&toks(4, 88)).unwrap().0;
+    let a = co.arena();
+    // 14 free paged units (56 B > 32 B), none of them an idle slab; no free state slot.
+    assert_eq!((a.free_units.clone(), a.reclaimable.clone()), (vec![14, 0], vec![0, 0]));
+    let before = co.arena();
+    assert_eq!(co.attach(&toks(4, 89)).err(), Some(Error::NoCapacity));
+    assert_eq!(co.arena().owner, before.owner);
+    for h in [hb, hd, he, hf] {
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn a_free_slab_is_used_before_a_reclaimable_one() {
+    // §7: FS non-empty and a reclaimable slab exists: the free slab is used, nothing is
+    // reclaimed. One unit per slab.
+    let mut co = Coordinator::create(5, 64, &[64], &[], &[64], 4, 0, 0, NS).unwrap();
+    let hx = co.attach(&toks(12, 90)).unwrap().0;
+    compute_all(&mut co, hx);
+    co.release(hx).unwrap();
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), free_slabs(&co)), (3, 1, 1));
+    let hy = co.attach(&toks(4, 91)).unwrap().0;
+    // The paged class has idle keyed slabs to give, but the state class takes the free slab.
+    assert!(co.arena().reclaimable[0] >= 1);
+    let hz = co.attach(&toks(4, 92)).unwrap().0;
+    assert_eq!((count_owner(&co, 0), count_owner(&co, 1), free_slabs(&co)), (3, 2, 0));
+    // With FS empty, the paged class's one remaining idle slab cannot go: the next lease needs its
+    // page too, so NoCapacity, atomically.
+    let before = co.arena();
+    assert_eq!(co.attach(&toks(4, 93)).err(), Some(Error::NoCapacity));
+    assert_eq!(co.arena().owner, before.owner);
+    for h in [hy, hz] {
+        co.release(h).unwrap();
+    }
 }
