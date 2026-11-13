@@ -44,6 +44,8 @@ pub struct LeaseC {
     pub c: usize,
     /// `Q_h`: pending ticket ids in issue order.
     pub pending: Vec<u64>,
+    /// `ρ_h`.
+    pub rho: usize,
     /// Chain head: key of the last published complete block, or `Seed(ns)`.
     pub head: Digest,
 }
@@ -59,6 +61,8 @@ pub struct Manager {
     pub(crate) p: usize,
     pub(crate) b: usize,
     pub(crate) ns: Vec<u8>,
+    /// `μ` (0 for a v0.2.1 manager).
+    pub(crate) mu: usize,
     pub(crate) seed: Digest,
     pub(crate) leases: HashMap<u64, LeaseC>,
     pub(crate) pend: HashMap<u64, PendC>,
@@ -75,7 +79,7 @@ pub struct Manager {
 }
 
 pub open spec fn lease_view(l: LeaseC) -> LeaseV {
-    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@ }
+    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@, rho: l.rho as nat }
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {
@@ -107,6 +111,7 @@ impl Manager {
         &&& v.p == self.p as nat
         &&& v.b == self.b as nat
         &&& v.ns == self.ns@
+        &&& v.mu == self.mu as nat
         &&& self.seed == v.seed()
         &&& v.refs == self.refs@
         &&& v.keys == self.keys@
@@ -224,16 +229,17 @@ impl Manager {
 
 /// The abstract initial state (every unit owned: the v0.2.1 configuration).
 pub open spec fn initial(id: u64, p: nat, b: nat, ns: Seq<u8>) -> MgrV {
-    initial_own(id, p, b, ns, true)
+    initial_own(id, p, b, ns, true, 0)
 }
 
-/// The abstract initial state with every unit owned (`o`) or unowned (`!o`).
-pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool) -> MgrV {
+/// The abstract initial state with every unit owned (`o`) or unowned (`!o`), and margin `mu`.
+pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool, mu: nat) -> MgrV {
     MgrV {
         id,
         p,
         b,
         ns,
+        mu,
         leases: Map::empty(),
         pend: Map::empty(),
         refs: Seq::new(p, |i: int| 0u64),
@@ -259,32 +265,33 @@ impl Manager {
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
     {
-        Self::create_own(p, b, ns, true)
+        Self::create_own(p, b, ns, true, 0)
     }
 
-    /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs).
-    pub fn create_empty(p: usize, b: usize, ns: &[u8]) -> (r: Result<Manager, Error>)
+    /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs), with
+    /// reservation margin `mu` (D18).
+    pub fn create_empty(p: usize, b: usize, ns: &[u8], mu: usize) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, mu as nat)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
     {
-        Self::create_own(p, b, ns, false)
+        Self::create_own(p, b, ns, false, mu)
     }
 
-    fn create_own(p: usize, b: usize, ns: &[u8], o: bool) -> (r: Result<Manager, Error>)
+    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, mu: usize) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, mu as nat)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
     {
-        if p == 0 || b == 0 || ns.len() > u32::MAX as usize {
+        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || mu > MAX_SLOTS as usize {
             return Err(Error::ConfigError);
         }
         proof {
@@ -315,7 +322,7 @@ impl Manager {
         let seed = hash_seed(ns, Tracked(&mut log));
         let refs: Vec<u64> = vec![0u64; p];
         let keys: Vec<Option<Digest>> = vec![None; p];
-        let ghost v = initial_own(id, p as nat, b as nat, ns@, o);
+        let ghost v = initial_own(id, p as nat, b as nat, ns@, o, mu as nat);
         assert(refs@ =~= v.refs);
         assert(keys@ =~= v.keys);
         let own: Vec<bool> = vec![o; p];
@@ -327,6 +334,7 @@ impl Manager {
             p,
             b,
             ns: nsv,
+            mu,
             seed,
             leases: HashMap::new(),
             pend: HashMap::new(),

@@ -75,6 +75,8 @@ pub ghost struct LeaseV {
     pub table: Seq<PageId>,
     pub c: nat,
     pub pending: Seq<u64>,
+    /// `ρ_h`: the reach, the number of token positions the page table covers (D18).
+    pub rho: nat,
 }
 
 /// `Pending[t]`: lease, original frontier `a`, interval end `z`.
@@ -91,6 +93,8 @@ pub ghost struct MgrV {
     pub p: nat,
     pub b: nat,
     pub ns: Seq<u8>,
+    /// `μ`: the reservation margin, positions reserved past the input (D18; 0 in v0.2.1).
+    pub mu: nat,
     pub leases: Map<u64, LeaseV>,
     pub pend: Map<u64, PendV>,
     pub refs: Seq<u64>,
@@ -140,7 +144,7 @@ impl MgrV {
 
     /// I10: configuration is fixed for the manager's lifetime.
     pub open spec fn same_config(self, o: MgrV) -> bool {
-        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns
+        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns && self.mu == o.mu
     }
 }
 

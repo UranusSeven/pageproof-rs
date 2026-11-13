@@ -336,7 +336,7 @@ impl Coordinator {
             coord_released(o@, self@, h),
     {
         assert forall|c: int| 0 <= c < o.np() implies (#[trigger] self.pv(c)).own == o.pv(c).own && self.pv(c).p == o.pv(c).p
-            && self.pv(c).b == o.pv(c).b && self.pv(c).ns == o.pv(c).ns && self.pv(c).leases == o.pv(c).leases.remove(h)
+            && self.pv(c).b == o.pv(c).b && self.pv(c).ns == o.pv(c).ns && self.pv(c).mu == o.pv(c).mu && self.pv(c).leases == o.pv(c).leases.remove(h)
             && self.pv(c).pend == o.pv(c).pend && self.pv(c).next_handle == o.pv(c).next_handle && self.pv(c).next_ticket
             == o.pv(c).next_ticket by {
             assert(self.paged@[c].valid());
@@ -348,6 +348,7 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).mu == 0
             } by {
                 assert(o.paged@[i].valid());
                 assert(self.pv(i).p == o.pv(i).p);
@@ -493,6 +494,7 @@ impl Coordinator {
                     &&& self.pv(c).p == mid.pv(c).p
                     &&& self.pv(c).b == mid.pv(c).b
                     &&& self.pv(c).ns == mid.pv(c).ns
+                    &&& self.pv(c).mu == mid.pv(c).mu
                     &&& self.pv(c).pend == mid.pv(c).pend
                     &&& self.pv(c).next_handle == mid.pv(c).next_handle
                     &&& self.pv(c).next_ticket == mid.pv(c).next_ticket
@@ -501,6 +503,7 @@ impl Coordinator {
                         LeaseV {
                             toks: mid.pv(c).leases[h].toks + suffix,
                             table: self.pv(c).leases[h].table,
+                            rho: self.pv(c).leases[h].rho,
                             ..mid.pv(c).leases[h]
                         },
                     )
@@ -515,6 +518,7 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).mu == 0
             } by {
                 assert(mid.paged@[i].valid());
                 assert(self.paged@[0].valid());
@@ -879,12 +883,13 @@ impl Coordinator {
             &&& fin.pv(c).p == mid.pv(c).p
             &&& fin.pv(c).b == mid.pv(c).b
             &&& fin.pv(c).ns == mid.pv(c).ns
+            &&& fin.pv(c).mu == mid.pv(c).mu
             &&& fin.pv(c).pend == mid.pv(c).pend
             &&& fin.pv(c).next_handle == mid.pv(c).next_handle
             &&& fin.pv(c).next_ticket == mid.pv(c).next_ticket
             &&& fin.pv(c).leases == mid.pv(c).leases.insert(
                 h,
-                LeaseV { toks: mid.pv(c).leases[h].toks + suffix, table: fin.pv(c).leases[h].table, ..mid.pv(c).leases[h] },
+                LeaseV { toks: mid.pv(c).leases[h].toks + suffix, table: fin.pv(c).leases[h].table, rho: fin.pv(c).leases[h].rho, ..mid.pv(c).leases[h] },
             )
         } by {
             let fresh = tables@[c]@.subrange(mid.pv(c).leases[h].table.len() as int, tables@[c]@.len() as int);
@@ -1142,6 +1147,7 @@ impl Coordinator {
                     &&& self.pv(c).p == o.pv(c).p
                     &&& self.pv(c).b == o.pv(c).b
                     &&& self.pv(c).ns == o.pv(c).ns
+                    &&& self.pv(c).mu == o.pv(c).mu
                     &&& self.pv(c).next_handle == o.pv(c).next_handle
                     &&& self.pv(c).leases.dom() == o.pv(c).leases.dom()
                     &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> self.pv(c).leases[h2]
@@ -1174,6 +1180,7 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).mu == 0
             } by {
                 assert(o.paged@[i].valid());
             }
@@ -1508,6 +1515,7 @@ impl Coordinator {
             &&& fin.pv(c).p == o.pv(c).p
             &&& fin.pv(c).b == o.pv(c).b
             &&& fin.pv(c).ns == o.pv(c).ns
+            &&& fin.pv(c).mu == o.pv(c).mu
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
@@ -1771,6 +1779,7 @@ impl Coordinator {
             &&& fin.pv(c).p == o.pv(c).p
             &&& fin.pv(c).b == o.pv(c).b
             &&& fin.pv(c).ns == o.pv(c).ns
+            &&& fin.pv(c).mu == o.pv(c).mu
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]

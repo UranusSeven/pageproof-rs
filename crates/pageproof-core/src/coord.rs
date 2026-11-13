@@ -563,6 +563,7 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).mu == 0
             }
         &&& forall|j: int|
             0 <= j < self.nst() ==> {
@@ -1061,6 +1062,7 @@ impl Coordinator {
             &&& self.pv(i).p == self.cunits(i)
             &&& self.pv(i).b == self.b as nat
             &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).mu == 0
         } by {
             assert(o.paged@[i].valid());
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
@@ -1357,7 +1359,7 @@ impl Coordinator {
                 forall|k: int|
                     0 <= k < i ==> {
                         &&& #[trigger] paged@[k].valid()
-                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, 0)
                         &&& paged@[k]@.ns == ns@
                     },
             decreases pu@.len() - i,
@@ -1372,14 +1374,14 @@ impl Coordinator {
                 assert((nslab as nat) * (per@[i as int] as nat) >= 1) by (nonlinear_arith)
                     requires nslab >= 1, per@[i as int] >= 1;
             }
-            match Manager::create_empty(units, b, ns) {
+            match Manager::create_empty(units, b, ns, 0) {
                 Ok(m) => {
                     let ghost p0 = paged@;
                     paged.push(m);
                     proof {
                         assert forall|k: int| 0 <= k < i + 1 implies {
                             &&& #[trigger] paged@[k].valid()
-                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, 0)
                             &&& paged@[k]@.ns == ns@
                         } by {
                             if k < i {
@@ -1473,6 +1475,7 @@ impl Coordinator {
                     &&& co.pv(k).p == co.cunits(k)
                     &&& co.pv(k).b == co.b as nat
                     &&& co.pv(k).ns == co.pv(0).ns
+                    &&& co.pv(k).mu == 0
                 } by {
                     assert(co.paged@ == pg0);
                     assert(pg0[k].valid());

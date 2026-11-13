@@ -18,6 +18,7 @@ pub open spec fn cfg_ok(v: MgrV, log: Log) -> bool {
     &&& v.p >= 1
     &&& v.b >= 1
     &&& v.p * v.b <= max_slots()
+    &&& v.mu <= max_slots()
     &&& ns_ok(v.ns)
     &&& v.refs.len() == v.p
     &&& v.keys.len() == v.p
@@ -44,8 +45,11 @@ pub open spec fn blk_ok(v: MgrV, log: Log, l: LeaseV, i: nat) -> bool {
 pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     let l = v.leases[h];
     &&& h < v.next_handle
-    &&& 1 <= l.toks.len() <= v.p * v.b
-    &&& blocks_for(l.toks.len(), v.b, l.table.len())
+    &&& 1 <= l.toks.len() <= l.rho
+    &&& l.rho <= l.toks.len() + v.mu
+    &&& l.rho <= v.p * v.b
+    &&& l.toks.len() <= v.p * v.b
+    &&& blocks_for(l.rho, v.b, l.table.len())
     &&& l.table.no_duplicates()
     &&& forall|i: int| 0 <= i < l.table.len() ==> (#[trigger] l.table[i] as nat) < v.p
     &&& l.c <= l.toks.len()
@@ -474,7 +478,7 @@ pub proof fn lemma_counts_bounded(v: MgrV, log: Log)
         assert(lease_ok(v, log, h));
         let t = v.leases[h].table;
         assert(t.len() >= 1) by {
-            assert(blocks_for(v.leases[h].toks.len(), v.b, t.len()));
+            assert(blocks_for(v.leases[h].rho, v.b, t.len()));
         }
         assert((t[t.len() - 1] as nat) < v.p);
     }

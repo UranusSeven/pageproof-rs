@@ -325,11 +325,11 @@ impl Coordinator {
         mid.lemma_view();
         assert(mid.paged@[0].valid());
         mid.paged@[0].lemma_handles_lt();
-        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty() };
+        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty(), rho: toks.len() + mid.pv(0).mu };
         assert forall|c: int| 0 <= c < mid.np() implies (#[trigger] self.pv(c)).leases.dom() == mid.pv(0).leases.dom().insert(h)
             && self.pv(c).pend == mid.pv(0).pend && self.pv(c).next_handle == (h + 1) as u64 && self.pv(c).next_ticket
             == mid.pv(0).next_ticket && self.pv(c).p == mid.pv(c).p && self.pv(c).b == mid.pv(c).b && self.pv(c).ns == mid.pv(c).ns
-            && self.pv(c).own == mid.pv(c).own by {
+            && self.pv(c).mu == mid.pv(c).mu && self.pv(c).own == mid.pv(c).own by {
             assert(self.paged@[c].valid());
             assert(mid.paged@[c] == mid.paged@[c]);
             assert(self.pv(c).leases.dom() =~= mid.pv(c).leases.dom().insert(h));
@@ -342,6 +342,7 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).mu == 0
             } by {
                 assert(mid.paged@[i].valid());
                 assert(self.pv(i).p == mid.pv(i).p);
@@ -933,6 +934,7 @@ impl Coordinator {
             &&& self.pv(i).p == self.cunits(i)
             &&& self.pv(i).b == self.b as nat
             &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).mu == 0
         } by {
             assert(o.paged@[i].valid());
             assert(self.pv(i) == o.pv(i));
