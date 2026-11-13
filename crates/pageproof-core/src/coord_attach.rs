@@ -325,11 +325,11 @@ impl Coordinator {
         mid.lemma_view();
         assert(mid.paged@[0].valid());
         mid.paged@[0].lemma_handles_lt();
-        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty(), rho: toks.len() + mid.pv(0).mu };
+        let l = LeaseV { toks, table: tabs[0], c: k * (mid.b as nat), pending: Seq::empty(), rho: toks.len() + mid.pv(0).cfg.mu };
         assert forall|c: int| 0 <= c < mid.np() implies (#[trigger] self.pv(c)).leases.dom() == mid.pv(0).leases.dom().insert(h)
             && self.pv(c).pend == mid.pv(0).pend && self.pv(c).next_handle == (h + 1) as u64 && self.pv(c).next_ticket
             == mid.pv(0).next_ticket && self.pv(c).p == mid.pv(c).p && self.pv(c).b == mid.pv(c).b && self.pv(c).ns == mid.pv(c).ns
-            && self.pv(c).mu == mid.pv(c).mu && self.pv(c).own == mid.pv(c).own by {
+            && self.pv(c).cfg == mid.pv(c).cfg && self.pv(c).own == mid.pv(c).own by {
             assert(self.paged@[c].valid());
             assert(mid.paged@[c] == mid.paged@[c]);
             assert(self.pv(c).leases.dom() =~= mid.pv(c).leases.dom().insert(h));
@@ -342,11 +342,13 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).mu == 0
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             } by {
                 assert(mid.paged@[i].valid());
                 assert(self.pv(i).p == mid.pv(i).p);
                 assert(self.pv(0).ns == mid.pv(0).ns);
+                assert(self.pv(0).cfg == mid.pv(0).cfg);
             }
             assert forall|j: int| 0 <= j < self.nst() implies {
                 &&& #[trigger] self.state@[j].valid()
@@ -380,6 +382,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
                 &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
                 &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+                &&& self.pv(i).leases[h2].rho == self.pv(0).leases[h2].rho
             } by {
                 assert(self.pv(i) == attached(mid.pv(i), toks, tabs[i], k));
                 assert(self.pv(0) == attached(mid.pv(0), toks, tabs[0], k));
@@ -934,7 +937,8 @@ impl Coordinator {
             &&& self.pv(i).p == self.cunits(i)
             &&& self.pv(i).b == self.b as nat
             &&& self.pv(i).ns == self.pv(0).ns
-            &&& self.pv(i).mu == 0
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
         } by {
             assert(o.paged@[i].valid());
             assert(self.pv(i) == o.pv(i));
@@ -952,6 +956,7 @@ impl Coordinator {
             &&& self.pv(i).leases[h].toks == self.pv(0).leases[h].toks
             &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
+            &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
         } by {
             assert(self.pv(i) == o.pv(i));
             assert(o.pv(i).leases.contains_key(h));

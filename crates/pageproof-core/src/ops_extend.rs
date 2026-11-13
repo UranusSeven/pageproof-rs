@@ -17,7 +17,7 @@ broadcast use vstd::std_specs::hash::group_hash_axioms;
 pub open spec fn extended(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>) -> MgrV {
     let l = v.leases[h];
     MgrV {
-        leases: v.leases.insert(h, LeaseV { toks: l.toks + suffix, table: l.table + fresh, rho: l.toks.len() + suffix.len() + v.mu, ..l }),
+        leases: v.leases.insert(h, LeaseV { toks: l.toks + suffix, table: l.table + fresh, rho: l.toks.len() + suffix.len() + v.cfg.mu, ..l }),
         refs: inc_seq(v.refs, fresh, fresh.len() as int),
         keys: revoke(v.keys, fresh),
         holders: Seq::new(
@@ -33,7 +33,7 @@ pub open spec fn extend_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>,
     let live = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
     let l2 = l.toks.len() + suffix.len();
-    let d = cdiv(l2 + v.mu, v.b) - l.table.len();
+    let d = cdiv(l2 + v.cfg.mu, v.b) - l.table.len();
     &&& !live ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
     &&& (live && l.pending.len() > 0) ==> r == Err::<PageTableView, Error>(Error::Busy)
     &&& (live && l.pending.len() == 0 && l.c != l.toks.len()) ==> r == Err::<PageTableView, Error>(
@@ -43,16 +43,16 @@ pub open spec fn extend_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>,
         PageTableView,
         Error,
     >(Error::InvalidArgument)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.mu > v.p * v.b) ==> r
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu > v.p * v.b) ==> r
         == Err::<PageTableView, Error>(Error::RequestTooLarge)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.mu <= v.p * v.b) ==> (
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b) ==> (
     r is Ok <==> v.free_set().len() >= d)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.mu <= v.p * v.b && v.free_set().len()
+    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && l2 + v.cfg.mu <= v.p * v.b && v.free_set().len()
         < d) ==> r == Err::<PageTableView, Error>(Error::NoCapacity)
     &&& r matches Ok(view) ==> {
         let fresh = view.pages@.subrange(l.table.len() as int, view.pages@.len() as int);
         &&& live
-        &&& view.pages@.len() == cdiv(l2 + v.mu, v.b)
+        &&& view.pages@.len() == cdiv(l2 + v.cfg.mu, v.b)
         &&& view.pages@.subrange(0, l.table.len() as int) == l.table
         &&& fresh.len() == d
         &&& fresh.no_duplicates()
@@ -70,8 +70,8 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
         v.leases[h].pending.len() == 0,
         v.leases[h].c == v.leases[h].toks.len(),
         suffix.len() > 0,
-        v.leases[h].toks.len() + suffix.len() + v.mu <= v.p * v.b,
-        blocks_for(v.leases[h].toks.len() + suffix.len() + v.mu, v.b, v.leases[h].table.len() + fresh.len()),
+        v.leases[h].toks.len() + suffix.len() + v.cfg.mu <= v.p * v.b,
+        blocks_for(v.leases[h].toks.len() + suffix.len() + v.cfg.mu, v.b, v.leases[h].table.len() + fresh.len()),
         fresh.no_duplicates(),
         forall|j: int| 0 <= j < fresh.len() ==> v.is_free(#[trigger] fresh[j]),
     ensures

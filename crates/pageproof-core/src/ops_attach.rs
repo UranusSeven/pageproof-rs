@@ -35,9 +35,9 @@ pub open spec fn attach_choice(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, ks
 /// `k*` may be shorter than this class's own run).
 pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> bool {
     &&& 1 <= toks.len()
-    &&& toks.len() + v.mu <= v.p * v.b
+    &&& toks.len() + v.cfg.mu <= v.p * v.b
     // The table covers the reach L + μ (D18); k* is capped by the input's own blocks.
-    &&& blocks_for(toks.len() + v.mu, v.b, table.len())
+    &&& blocks_for(toks.len() + v.cfg.mu, v.b, table.len())
     &&& kstar + 1 <= cdiv(toks.len(), v.b)
     &&& kstar + 1 <= table.len()
     &&& table.no_duplicates()
@@ -57,7 +57,7 @@ pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, 
 pub open spec fn attached(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> MgrV {
     let h = v.next_handle;
     MgrV {
-        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: Seq::empty(), rho: toks.len() + v.mu }),
+        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: Seq::empty(), rho: toks.len() + v.cfg.mu }),
         refs: inc_seq(v.refs, table, table.len() as int),
         keys: revoke(v.keys, table.subrange(kstar as int, table.len() as int)),
         holders: Seq::new(
@@ -77,10 +77,10 @@ pub open spec fn attach_result(
     r: Result<(Handle, usize, PageTableView), Error>,
 ) -> bool {
     let m = cdiv(toks.len(), v.b);
-    let mr = cdiv(toks.len() + v.mu, v.b);
-    let ok_in = 1 <= toks.len() && toks.len() + v.mu <= v.p * v.b;
+    let mr = cdiv(toks.len() + v.cfg.mu, v.b);
+    let ok_in = 1 <= toks.len() && toks.len() + v.cfg.mu <= v.p * v.b;
     &&& toks.len() == 0 ==> r == Err::<(Handle, usize, PageTableView), Error>(Error::InvalidArgument)
-    &&& (toks.len() > 0 && toks.len() + v.mu > v.p * v.b) ==> r == Err::<(Handle, usize, PageTableView), Error>(
+    &&& (toks.len() > 0 && toks.len() + v.cfg.mu > v.p * v.b) ==> r == Err::<(Handle, usize, PageTableView), Error>(
         Error::RequestTooLarge,
     )
     &&& (ok_in && v.next_handle == u64::MAX) ==> r == Err::<(Handle, usize, PageTableView), Error>(
@@ -132,11 +132,11 @@ pub proof fn lemma_attach_capacity_iff(
     requires
         attach_result(v, v2, toks, r),
         1 <= toks.len(),
-        toks.len() + v.mu <= v.p * v.b,
+        toks.len() + v.cfg.mu <= v.p * v.b,
         v.next_handle < u64::MAX,
         is_kstar(v, toks, cdiv(toks.len(), v.b), k),
     ensures
-        r is Ok <==> v.free_set().len() >= cdiv(toks.len() + v.mu, v.b) - count_active(v, toks, k),
+        r is Ok <==> v.free_set().len() >= cdiv(toks.len() + v.cfg.mu, v.b) - count_active(v, toks, k),
         r is Err ==> r == Err::<(Handle, usize, PageTableView), Error>(Error::NoCapacity),
         r matches Ok((h, cached, view)) ==> cached as nat == k * v.b,
 {
@@ -145,7 +145,7 @@ pub proof fn lemma_attach_capacity_iff(
         let (h, cached, view) = r->Ok_0;
         lemma_kstar_unique(v, toks, m, cached as nat / v.b, k);
     } else {
-        let mr = cdiv(toks.len() + v.mu, v.b);
+        let mr = cdiv(toks.len() + v.cfg.mu, v.b);
         let k2 = choose|k2: nat| is_kstar(v, toks, m, k2) && v.free_set().len() < mr - count_active(v, toks, k2);
         lemma_kstar_unique(v, toks, m, k2, k);
     }
@@ -982,11 +982,11 @@ impl Manager {
         requires
             old(self).valid(),
             1 <= toks@.len(),
-            toks@.len() + old(self)@.mu <= old(self)@.p * old(self)@.b,
+            toks@.len() + old(self)@.cfg.mu <= old(self)@.p * old(self)@.b,
             old(self)@.next_handle < u64::MAX,
             probe_ok(old(self)@, old(self).den_log(), toks@, pr),
             pr.hits@.len() + 1 <= cdiv(toks@.len(), old(self)@.b),
-            old(self)@.free_set().len() >= cdiv(toks@.len() + old(self)@.mu, old(self)@.b) - count_active(
+            old(self)@.free_set().len() >= cdiv(toks@.len() + old(self)@.cfg.mu, old(self)@.b) - count_active(
                 old(self)@,
                 toks@,
                 pr.hits@.len() as nat,
@@ -996,7 +996,7 @@ impl Manager {
             final(self).den_log() == old(self).den_log(),
             r.0 == (Handle { mgr: old(self)@.id, id: old(self)@.next_handle }),
             r.1 as nat == pr.hits@.len() * old(self)@.b,
-            r.2.pages@.len() == cdiv(toks@.len() + old(self)@.mu, old(self)@.b),
+            r.2.pages@.len() == cdiv(toks@.len() + old(self)@.cfg.mu, old(self)@.b),
             attach_choice_k(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
             final(self)@ == attached(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
     {

@@ -86,6 +86,23 @@ pub ghost struct PendV {
     pub z: nat,
 }
 
+/// Configuration fixed at create and shared by every paged class (I10).
+pub ghost struct PCfg {
+    /// `μ`: the reservation margin, positions reserved past the planned input (D18).
+    pub mu: nat,
+    /// `λ`: the maximum number of drafts per ticket (D16).
+    pub lam: nat,
+    /// `δ`: the ZOS depth (D21).
+    pub delta: nat,
+    /// Paged classes `[0, ntarget)` are target classes, the rest drafter classes (D20).
+    pub ntarget: nat,
+}
+
+/// The configuration of a v0.2.1 manager: no reservation, no drafts, no ZOS.
+pub open spec fn v021_cfg() -> PCfg {
+    PCfg { mu: 0, lam: 0, delta: 0, ntarget: 1 }
+}
+
 /// The abstract manager state. `F` is derived (`free_set`), `Index` is derived from `keys`
 /// (`in_index`), `den` is derived from the E8 log (`spec::den`).
 pub ghost struct MgrV {
@@ -93,8 +110,8 @@ pub ghost struct MgrV {
     pub p: nat,
     pub b: nat,
     pub ns: Seq<u8>,
-    /// `μ`: the reservation margin, positions reserved past the input (D18; 0 in v0.2.1).
-    pub mu: nat,
+    /// Configuration shared by every paged class of a coordinator (I10).
+    pub cfg: PCfg,
     pub leases: Map<u64, LeaseV>,
     pub pend: Map<u64, PendV>,
     pub refs: Seq<u64>,
@@ -144,7 +161,7 @@ impl MgrV {
 
     /// I10: configuration is fixed for the manager's lifetime.
     pub open spec fn same_config(self, o: MgrV) -> bool {
-        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns && self.mu == o.mu
+        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns && self.cfg == o.cfg
     }
 }
 

@@ -31,6 +31,17 @@ pub open spec fn psum(per: Seq<usize>, k: int, m: nat) -> nat
     }
 }
 
+/// The configuration every paged class of a coordinator shares (§3.1, D18, D20, D21):
+/// `μ = (δ + 1)·λ`, plus `λ` when there are drafter classes `[ntarget, np)`.
+pub open spec fn cfg_rel(c: PCfg, np: nat) -> bool {
+    &&& 1 <= c.ntarget <= np
+    &&& c.lam <= max_slots()
+    &&& c.delta <= 1
+    &&& c.mu == (if c.delta == 1 { c.lam + c.lam } else { c.lam }) + (if c.ntarget < np { c.lam } else { 0 })
+    // Stage B2a: no reservation yet.
+    &&& c.lam == 0
+}
+
 /// `Fits(m)` of §3.1: a lease of `m` blocks fits in an otherwise empty arena.
 pub open spec fn fits(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m: nat) -> bool {
     psum(per, np as int, m) + nstate <= nslab
@@ -563,7 +574,8 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).mu == 0
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             }
         &&& forall|j: int|
             0 <= j < self.nst() ==> {
@@ -599,6 +611,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h].toks == self.pv(0).leases[h].toks
                 &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
                 &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
+                &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
             }
         &&& forall|h: u64|
             #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].toks.len(), self.b as nat))
@@ -1062,7 +1075,8 @@ impl Coordinator {
             &&& self.pv(i).p == self.cunits(i)
             &&& self.pv(i).b == self.b as nat
             &&& self.pv(i).ns == self.pv(0).ns
-            &&& self.pv(i).mu == 0
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
         } by {
             assert(o.paged@[i].valid());
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
@@ -1136,6 +1150,7 @@ impl Coordinator {
             &&& self.pv(i).leases[h].toks == self.pv(0).leases[h].toks
             &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
+            &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
         } by {
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
             assert(self.pv(0) == (MgrV { own: self.pv(0).own, keys: self.pv(0).keys, ..o.pv(0) }));
@@ -1333,6 +1348,8 @@ impl Coordinator {
             Some(id) => id,
             None => return Err(Error::IdentifierExhausted),
         };
+        // Every paged class shares one configuration (I10).
+        let ghost cfg0 = PCfg { mu: 0, lam: 0, delta: 0, ntarget: pu@.len() };
         // Paged classes.
         let mut paged: Vec<Manager> = Vec::new();
         let mut i: usize = 0;
@@ -1345,6 +1362,7 @@ impl Coordinator {
         while i < pu.len()
             invariant
                 cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@),
+                cfg0 == (PCfg { mu: 0, lam: 0, delta: 0, ntarget: pu@.len() }),
                 0 <= i <= pu@.len(),
                 per@.len() == ncls,
                 ncls == pu@.len() + su@.len(),
@@ -1359,7 +1377,7 @@ impl Coordinator {
                 forall|k: int|
                     0 <= k < i ==> {
                         &&& #[trigger] paged@[k].valid()
-                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, 0)
+                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0)
                         &&& paged@[k]@.ns == ns@
                     },
             decreases pu@.len() - i,
@@ -1374,14 +1392,14 @@ impl Coordinator {
                 assert((nslab as nat) * (per@[i as int] as nat) >= 1) by (nonlinear_arith)
                     requires nslab >= 1, per@[i as int] >= 1;
             }
-            match Manager::create_empty(units, b, ns, 0) {
+            match Manager::create_empty(units, b, ns, 0, Ghost(cfg0)) {
                 Ok(m) => {
                     let ghost p0 = paged@;
                     paged.push(m);
                     proof {
                         assert forall|k: int| 0 <= k < i + 1 implies {
                             &&& #[trigger] paged@[k].valid()
-                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, 0)
+                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0)
                             &&& paged@[k]@.ns == ns@
                         } by {
                             if k < i {
@@ -1475,7 +1493,8 @@ impl Coordinator {
                     &&& co.pv(k).p == co.cunits(k)
                     &&& co.pv(k).b == co.b as nat
                     &&& co.pv(k).ns == co.pv(0).ns
-                    &&& co.pv(k).mu == 0
+                    &&& co.pv(k).cfg == co.pv(0).cfg
+                    &&& cfg_rel(co.pv(k).cfg, co.np())
                 } by {
                     assert(co.paged@ == pg0);
                     assert(pg0[k].valid());

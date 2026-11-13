@@ -336,7 +336,7 @@ impl Coordinator {
             coord_released(o@, self@, h),
     {
         assert forall|c: int| 0 <= c < o.np() implies (#[trigger] self.pv(c)).own == o.pv(c).own && self.pv(c).p == o.pv(c).p
-            && self.pv(c).b == o.pv(c).b && self.pv(c).ns == o.pv(c).ns && self.pv(c).mu == o.pv(c).mu && self.pv(c).leases == o.pv(c).leases.remove(h)
+            && self.pv(c).b == o.pv(c).b && self.pv(c).ns == o.pv(c).ns && self.pv(c).cfg == o.pv(c).cfg && self.pv(c).leases == o.pv(c).leases.remove(h)
             && self.pv(c).pend == o.pv(c).pend && self.pv(c).next_handle == o.pv(c).next_handle && self.pv(c).next_ticket
             == o.pv(c).next_ticket by {
             assert(self.paged@[c].valid());
@@ -348,11 +348,13 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).mu == 0
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             } by {
                 assert(o.paged@[i].valid());
                 assert(self.pv(i).p == o.pv(i).p);
                 assert(self.pv(0).ns == o.pv(0).ns);
+                assert(self.pv(0).cfg == o.pv(0).cfg);
             }
             assert forall|j: int| 0 <= j < self.nst() implies {
                 &&& #[trigger] self.state@[j].valid()
@@ -387,6 +389,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
                 &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
                 &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+                &&& self.pv(i).leases[h2].rho == self.pv(0).leases[h2].rho
             } by {
                 assert(o.pv(i).leases.contains_key(h2));
             }
@@ -494,7 +497,7 @@ impl Coordinator {
                     &&& self.pv(c).p == mid.pv(c).p
                     &&& self.pv(c).b == mid.pv(c).b
                     &&& self.pv(c).ns == mid.pv(c).ns
-                    &&& self.pv(c).mu == mid.pv(c).mu
+                    &&& self.pv(c).cfg == mid.pv(c).cfg
                     &&& self.pv(c).pend == mid.pv(c).pend
                     &&& self.pv(c).next_handle == mid.pv(c).next_handle
                     &&& self.pv(c).next_ticket == mid.pv(c).next_ticket
@@ -503,7 +506,7 @@ impl Coordinator {
                         LeaseV {
                             toks: mid.pv(c).leases[h].toks + suffix,
                             table: self.pv(c).leases[h].table,
-                            rho: self.pv(c).leases[h].rho,
+                            rho: mid.pv(c).leases[h].toks.len() + suffix.len() + mid.pv(c).cfg.mu,
                             ..mid.pv(c).leases[h]
                         },
                     )
@@ -518,7 +521,8 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).mu == 0
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             } by {
                 assert(mid.paged@[i].valid());
                 assert(self.paged@[0].valid());
@@ -555,11 +559,15 @@ impl Coordinator {
                 &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
                 &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
                 &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+                &&& self.pv(i).leases[h2].rho == self.pv(0).leases[h2].rho
             } by {
                 assert(self.paged@[i].valid());
                 assert(mid.pv(i).leases.contains_key(h2));
                 assert(mid.paged@[i] == mid.paged@[i]);
                 assert(mid.pv(i).leases.contains_key(h));
+                // Every class shares the configuration, so they agree on the new reach.
+                assert(mid.pv(i).cfg == mid.pv(0).cfg);
+                assert(mid.pv(i).leases[h].toks == mid.pv(0).leases[h].toks);
             }
             assert forall|h2: u64| #[trigger] self.pv(0).leases.contains_key(h2) implies self.fits_m(
                 cdiv(self.pv(0).leases[h2].toks.len(), self.b as nat),
@@ -883,13 +891,13 @@ impl Coordinator {
             &&& fin.pv(c).p == mid.pv(c).p
             &&& fin.pv(c).b == mid.pv(c).b
             &&& fin.pv(c).ns == mid.pv(c).ns
-            &&& fin.pv(c).mu == mid.pv(c).mu
+            &&& fin.pv(c).cfg == mid.pv(c).cfg
             &&& fin.pv(c).pend == mid.pv(c).pend
             &&& fin.pv(c).next_handle == mid.pv(c).next_handle
             &&& fin.pv(c).next_ticket == mid.pv(c).next_ticket
             &&& fin.pv(c).leases == mid.pv(c).leases.insert(
                 h,
-                LeaseV { toks: mid.pv(c).leases[h].toks + suffix, table: fin.pv(c).leases[h].table, rho: fin.pv(c).leases[h].rho, ..mid.pv(c).leases[h] },
+                LeaseV { toks: mid.pv(c).leases[h].toks + suffix, table: fin.pv(c).leases[h].table, rho: mid.pv(c).leases[h].toks.len() + suffix.len() + mid.pv(c).cfg.mu, ..mid.pv(c).leases[h] },
             )
         } by {
             let fresh = tables@[c]@.subrange(mid.pv(c).leases[h].table.len() as int, tables@[c]@.len() as int);
@@ -973,19 +981,8 @@ pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan) -> bool {
     &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.positions@[q] as int == a + q
     &&& plan.write_slots@.len() == o.np
     &&& plan.page_tables@.len() == o.np
-    &&& forall|c: int|
-        0 <= c < o.np ==> {
-            let lc = o.paged[c].leases[h];
-            &&& (#[trigger] plan.write_slots@[c])@.len() == n
-            &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
-            &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
-            &&& forall|q1: int, q2: int|
-                0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
-            &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
-            &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
-            // §9.0 (b) per class.
-            &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
-        }
+    // Per paged class (`cplan_class`): write slots, page mapping, and §9.0 (b).
+    &&& forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, plan, c)
     &&& plan.state_slots@ == o.slots[h]
     &&& plan.init == (a == 0)
     &&& forall|j: int|
@@ -1099,19 +1096,6 @@ pub proof fn lemma_cplan_ok(o: CoordV, h: u64, n: nat, plan: CoordPlan)
     let l = o.leases()[h];
     let a = l.c;
     let z = l.c + n;
-    assert forall|c: int| 0 <= c < o.np implies {
-        let lc = o.paged[c].leases[h];
-        &&& (#[trigger] plan.write_slots@[c])@.len() == n
-        &&& forall|q: int| 0 <= q < n ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
-        &&& forall|q: int| 0 <= q < n ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
-        &&& forall|q1: int, q2: int|
-            0 <= q1 < n && 0 <= q2 < n && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
-        &&& forall|q: int| 0 <= q < n ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
-        &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(z, o.b) as int)
-        &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
-    } by {
-        assert(cplan_class(o, h, n, plan, c));
-    }
     assert forall|j: int| 0 <= j < o.nst() implies {
         &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
         &&& a > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, a as int))
@@ -1147,7 +1131,7 @@ impl Coordinator {
                     &&& self.pv(c).p == o.pv(c).p
                     &&& self.pv(c).b == o.pv(c).b
                     &&& self.pv(c).ns == o.pv(c).ns
-                    &&& self.pv(c).mu == o.pv(c).mu
+                    &&& self.pv(c).cfg == o.pv(c).cfg
                     &&& self.pv(c).next_handle == o.pv(c).next_handle
                     &&& self.pv(c).leases.dom() == o.pv(c).leases.dom()
                     &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> self.pv(c).leases[h2]
@@ -1155,6 +1139,7 @@ impl Coordinator {
                     &&& self.pv(c).leases[h].toks == o.pv(c).leases[h].toks
                     &&& self.pv(c).leases[h].c == self.pv(0).leases[h].c
                     &&& self.pv(c).leases[h].pending == self.pv(0).leases[h].pending
+                    &&& self.pv(c).leases[h].rho == self.pv(0).leases[h].rho
                     &&& self.pv(c).pend == self.pv(0).pend
                     &&& self.pv(c).next_ticket == self.pv(0).next_ticket
                 },
@@ -1180,7 +1165,8 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
-                &&& self.pv(i).mu == 0
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             } by {
                 assert(o.paged@[i].valid());
             }
@@ -1215,6 +1201,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h2].toks == self.pv(0).leases[h2].toks
                 &&& self.pv(i).leases[h2].c == self.pv(0).leases[h2].c
                 &&& self.pv(i).leases[h2].pending == self.pv(0).leases[h2].pending
+                &&& self.pv(i).leases[h2].rho == self.pv(0).leases[h2].rho
             } by {
                 assert(self.paged@[i].valid());
                 assert(o.pv(i).leases.contains_key(h2));
@@ -1515,13 +1502,14 @@ impl Coordinator {
             &&& fin.pv(c).p == o.pv(c).p
             &&& fin.pv(c).b == o.pv(c).b
             &&& fin.pv(c).ns == o.pv(c).ns
-            &&& fin.pv(c).mu == o.pv(c).mu
+            &&& fin.pv(c).cfg == o.pv(c).cfg
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
             &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
             &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
             &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
+            &&& fin.pv(c).leases[h].rho == fin.pv(0).leases[h].rho
             &&& fin.pv(c).pend == fin.pv(0).pend
             &&& fin.pv(c).next_ticket == fin.pv(0).next_ticket
         } by {
@@ -1779,13 +1767,14 @@ impl Coordinator {
             &&& fin.pv(c).p == o.pv(c).p
             &&& fin.pv(c).b == o.pv(c).b
             &&& fin.pv(c).ns == o.pv(c).ns
-            &&& fin.pv(c).mu == o.pv(c).mu
+            &&& fin.pv(c).cfg == o.pv(c).cfg
             &&& fin.pv(c).next_handle == o.pv(c).next_handle
             &&& fin.pv(c).leases.dom() == o.pv(c).leases.dom()
             &&& forall|h2: u64| #[trigger] o.pv(c).leases.contains_key(h2) && h2 != h ==> fin.pv(c).leases[h2] == o.pv(c).leases[h2]
             &&& fin.pv(c).leases[h].toks == o.pv(c).leases[h].toks
             &&& fin.pv(c).leases[h].c == fin.pv(0).leases[h].c
             &&& fin.pv(c).leases[h].pending == fin.pv(0).leases[h].pending
+            &&& fin.pv(c).leases[h].rho == fin.pv(0).leases[h].rho
             &&& fin.pv(c).pend == fin.pv(0).pend
             &&& fin.pv(c).next_ticket == fin.pv(0).next_ticket
         } by {

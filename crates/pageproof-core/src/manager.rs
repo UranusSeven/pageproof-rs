@@ -111,7 +111,7 @@ impl Manager {
         &&& v.p == self.p as nat
         &&& v.b == self.b as nat
         &&& v.ns == self.ns@
-        &&& v.mu == self.mu as nat
+        &&& v.cfg.mu == self.mu as nat
         &&& self.seed == v.seed()
         &&& v.refs == self.refs@
         &&& v.keys == self.keys@
@@ -229,17 +229,18 @@ impl Manager {
 
 /// The abstract initial state (every unit owned: the v0.2.1 configuration).
 pub open spec fn initial(id: u64, p: nat, b: nat, ns: Seq<u8>) -> MgrV {
-    initial_own(id, p, b, ns, true, 0)
+    initial_own(id, p, b, ns, true, v021_cfg())
 }
 
-/// The abstract initial state with every unit owned (`o`) or unowned (`!o`), and margin `mu`.
-pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool, mu: nat) -> MgrV {
+/// The abstract initial state with every unit owned (`o`) or unowned (`!o`), and configuration
+/// `cfg`.
+pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool, cfg: PCfg) -> MgrV {
     MgrV {
         id,
         p,
         b,
         ns,
-        mu,
+        cfg,
         leases: Map::empty(),
         pend: Map::empty(),
         refs: Seq::new(p, |i: int| 0u64),
@@ -265,28 +266,32 @@ impl Manager {
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
     {
-        Self::create_own(p, b, ns, true, 0)
+        Self::create_own(p, b, ns, true, 0, Ghost(v021_cfg()))
     }
 
     /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs), with
     /// reservation margin `mu` (D18).
-    pub fn create_empty(p: usize, b: usize, ns: &[u8], mu: usize) -> (r: Result<Manager, Error>)
+    pub fn create_empty(p: usize, b: usize, ns: &[u8], mu: usize, cfg: Ghost<PCfg>) -> (r: Result<Manager, Error>)
+        requires
+            cfg@.mu == mu as nat,
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, mu as nat)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
     {
-        Self::create_own(p, b, ns, false, mu)
+        Self::create_own(p, b, ns, false, mu, cfg)
     }
 
-    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, mu: usize) -> (r: Result<Manager, Error>)
+    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, mu: usize, cfg: Ghost<PCfg>) -> (r: Result<Manager, Error>)
+        requires
+            cfg@.mu == mu as nat,
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, mu as nat)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || mu as nat > max_slots()) ==> r is Err,
@@ -322,7 +327,7 @@ impl Manager {
         let seed = hash_seed(ns, Tracked(&mut log));
         let refs: Vec<u64> = vec![0u64; p];
         let keys: Vec<Option<Digest>> = vec![None; p];
-        let ghost v = initial_own(id, p as nat, b as nat, ns@, o, mu as nat);
+        let ghost v = initial_own(id, p as nat, b as nat, ns@, o, cfg@);
         assert(refs@ =~= v.refs);
         assert(keys@ =~= v.keys);
         let own: Vec<bool> = vec![o; p];

@@ -18,7 +18,7 @@ pub open spec fn cfg_ok(v: MgrV, log: Log) -> bool {
     &&& v.p >= 1
     &&& v.b >= 1
     &&& v.p * v.b <= max_slots()
-    &&& v.mu <= max_slots()
+    &&& v.cfg.mu <= max_slots()
     &&& ns_ok(v.ns)
     &&& v.refs.len() == v.p
     &&& v.keys.len() == v.p
@@ -46,7 +46,7 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     let l = v.leases[h];
     &&& h < v.next_handle
     &&& 1 <= l.toks.len() <= l.rho
-    &&& l.rho <= l.toks.len() + v.mu
+    &&& l.rho <= l.toks.len() + v.cfg.mu
     &&& l.rho <= v.p * v.b
     &&& l.toks.len() <= v.p * v.b
     &&& blocks_for(l.rho, v.b, l.table.len())
