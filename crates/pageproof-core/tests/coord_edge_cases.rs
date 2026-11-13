@@ -1400,23 +1400,37 @@ fn attach_while_another_lease_has_two_tickets_pending() {
 }
 
 #[test]
-fn extend_deferred_behind_a_verify_may_need_two_pages() {
-    // §7: with 1 + λ > B the demand of extend_deferred is at most ceil((1 + δλ)/B) pages.
+fn extend_deferred_after_an_accepted_verify_needs_two_pages() {
+    // §7: with 1 + λ > B, extend_deferred's demand can reach ceil((1 + δλ)/B) pages. That needs
+    // L̂ to grow by δ·λ between two reach updates, which happens when a verify accepts all its
+    // drafts. B = 4, λ = 4, δ = 1, μ = 8 (sequence from the review of PR 7).
     let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 4, 1, NS).unwrap();
-    let (h, _, _) = co.attach(&toks(4, 58)).unwrap();
+    let (h, _, _) = co.attach(&[1, 2]).unwrap();
     compute_all(&mut co, h);
-    co.extend(h, &[1]).unwrap();
-    let before = co.inspect(h).unwrap();
-    assert_eq!(before.reach, 5 + 8);
-    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![2, 3, 4, 5]), false).unwrap();
-    let lv = co.extend_deferred(h).unwrap();
-    let grown = lv.tables[0].len() - before.lease.tables[0].len();
-    assert!(grown <= (1 + 4 + 3) / 4);
-    assert_eq!(co.inspect(h).unwrap().reach, 6 + 8);
+    co.extend(h, &[3]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.reach, iv.lease.tables[0].len()), (11, 3));
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![4, 5, 6, 7]), false).unwrap();
+    co.extend_deferred(h).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.reach, iv.lease.tables[0].len()), (12, 3));
     let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
-    co.finish_write(t1, comp(t1, 4, Some(6), vec![])).unwrap();
-    co.finish_write(t2, done(t2)).unwrap();
-    assert_eq!(co.inspect(h).unwrap().computed, 10);
+    // t1 accepts all four drafts: L̂ grows from 4 to 8 while the reach stays 12.
+    co.finish_write(t1, comp(t1, 4, Some(8), vec![])).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.reach, iv.lease.tables[0].len()), (8, 12, 3));
+    let before = iv.lease.tables[0].clone();
+    // L̂' = 9 and ρ' = 17 need 5 pages: two new ones, the bound ceil((1 + δλ)/B) = 2.
+    let lv = co.extend_deferred(h).unwrap();
+    assert_eq!(lv.tables[0].len() - before.len(), 2);
+    assert_eq!(&lv.tables[0][..before.len()], &before[..]);
+    assert_eq!(co.inspect(h).unwrap().reach, 17);
+    let (t3, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    // t2 computes the bonus 8 at position 7 and binds 9; t3 computes position 8.
+    co.finish_write(t2, tok(t2, 9)).unwrap();
+    co.finish_write(t3, done(t3)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (9, 9));
     co.release(h).unwrap();
 }
 
