@@ -1294,3 +1294,128 @@ fn stop_on_a_hybrid_lease() {
     co.release(h).unwrap();
     assert!(co.arena().free_units[2] > free[2]);
 }
+
+// ---- remaining §7 rows for v0.5 and v0.6 ----
+
+#[test]
+fn extend_deferred_without_a_unit_is_no_capacity() {
+    // §7: the deferred position starts a new block and no unit can be had: NoCapacity, state
+    // unchanged; the caller waits for t and then uses extend.
+    let mut co = Coordinator::create(1, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(12, 50)).unwrap();
+    let (h2, _, _) = co.attach(&toks(4, 51)).unwrap();
+    let (t, _) = co.begin_write(h, 12, Drafts::Known(vec![]), false).unwrap();
+    let before = co.inspect(h).unwrap();
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::NoCapacity));
+    let after = co.inspect(h).unwrap();
+    assert_eq!((after.len, after.reach, after.deferred), (before.len, before.reach, false));
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h2).unwrap();
+    co.extend(h, &[1]).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn eos_at_step_n_while_step_n_plus_1_is_pending() {
+    // §7: finish_write(n) appends the EOS; finish_write(n+1) ignores its token and sets c = L.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(3, 52)).unwrap();
+    let (t1, _) = co.begin_write(h, 3, Drafts::Known(vec![]), false).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    let eos = 2;
+    co.finish_write(t1, tok(t1, eos)).unwrap();
+    // The EOS completes block 0 (positions 0-3) when step n+1 completes.
+    co.finish_write(t2, tok(t2, 77)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.pending), (4, 4, None));
+    let snap = co.release(h).unwrap();
+    assert_eq!(snap[3], eos);
+    // Block 0 is published under the real EOS token.
+    let mut longer = snap.clone();
+    longer.push(5);
+    let (h2, cached, _) = co.attach(&longer).unwrap();
+    assert_eq!(cached, 4);
+    co.release(h2).unwrap();
+}
+
+#[test]
+fn golden_token_behind_a_pending_step() {
+    // §7: extend(h, [g]) succeeds with X_h empty, p_h = L_h and room in the queue.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(5, 53)).unwrap();
+    let (t1, _) = co.begin_write(h, 5, Drafts::Known(vec![]), false).unwrap();
+    co.extend(h, &[42]).unwrap();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!((p2.input_ids.clone(), p2.producer), (vec![42], None));
+    co.finish_write(t1, done(t1)).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    assert_eq!(co.inspect(h).unwrap().computed, 6);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn deferred_last_position_of_a_block() {
+    // §7: a block whose last position is deferred is published only after the producer's
+    // completion appended the token and the frontier passed it.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let base = toks(3, 54);
+    let (h, _, _) = co.attach(&base).unwrap();
+    let (t1, _) = co.begin_write(h, 3, Drafts::Known(vec![]), false).unwrap();
+    co.extend_deferred(h).unwrap();
+    let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t1, tok(t1, 9)).unwrap();
+    let mut probe = base.clone();
+    probe.extend_from_slice(&[9, 1]);
+    // Block 0 is not yet published: c = 3.
+    let (hp, cached, _) = co.attach(&probe).unwrap();
+    assert_eq!(cached, 0);
+    co.release(hp).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    let (hp, cached, _) = co.attach(&probe).unwrap();
+    assert_eq!(cached, 4);
+    co.release(hp).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn attach_while_another_lease_has_two_tickets_pending() {
+    // §7: the pending tickets' units are referenced by their lease, so their slabs are not
+    // reclaimable; the other attach takes free slabs or fails with NoCapacity.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(8, 55)).unwrap();
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    let owner = co.arena().owner.clone();
+    let (h2, _, _) = co.attach(&toks(4, 56)).unwrap();
+    // 8 pages in all, 3 held: a 6-page request cannot reclaim the pending lease's slab.
+    assert_eq!(co.attach(&toks(24, 57)).err(), Some(Error::NoCapacity));
+    let v2 = co.inspect(h).unwrap();
+    assert_eq!(v2.lease.tables, v.tables);
+    assert_eq!(co.arena().owner[v.tables[0][0] / 4], owner[v.tables[0][0] / 4]);
+    co.finish_write(t1, done(t1)).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h2).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_deferred_behind_a_verify_may_need_two_pages() {
+    // §7: with 1 + λ > B the demand of extend_deferred is at most ceil((1 + δλ)/B) pages.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 4, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(4, 58)).unwrap();
+    compute_all(&mut co, h);
+    co.extend(h, &[1]).unwrap();
+    let before = co.inspect(h).unwrap();
+    assert_eq!(before.reach, 5 + 8);
+    let (t1, _) = co.begin_write(h, 1, Drafts::Known(vec![2, 3, 4, 5]), false).unwrap();
+    let lv = co.extend_deferred(h).unwrap();
+    let grown = lv.tables[0].len() - before.lease.tables[0].len();
+    assert!(grown <= (1 + 4 + 3) / 4);
+    assert_eq!(co.inspect(h).unwrap().reach, 6 + 8);
+    let (t2, _) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t1, comp(t1, 4, Some(6), vec![])).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    assert_eq!(co.inspect(h).unwrap().computed, 10);
+    co.release(h).unwrap();
+}
