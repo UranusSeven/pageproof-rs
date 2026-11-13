@@ -6,7 +6,7 @@ on:
 
 jobs:
   clippy:
-    runs-on: macos-15-arm64
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Verus and Rust toolchains
