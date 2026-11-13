@@ -83,7 +83,8 @@ pub open spec fn plan_ok_d(v: MgrV, h: u64, n: nat, drafts: Seq<Token>, ext: nat
     &&& plan.ticket == Ticket { mgr: v.id, id: v.next_ticket }
     &&& plan.handle == Handle { mgr: v.id, id: h }
     &&& plan.block_size as nat == v.b
-    &&& plan.input_ids@ == l.toks.subrange(a as int, z as int) + drafts
+    // A continuation's input is the deferred position: placeholders, resolved on the device (D24).
+    &&& plan.input_ids@ == if z <= l.toks.len() { l.toks.subrange(a as int, z as int) + drafts } else { Seq::new(n + k, |q: int| 0u32) }
     &&& plan.positions@.len() == n + k
     &&& forall|q: int| 0 <= q < n + k ==> #[trigger] plan.positions@[q] as int == a + q
     &&& plan.write_slots@.len() == w - a
@@ -120,8 +121,8 @@ pub open spec fn begin_result(v: MgrV, v2: MgrV, h: Handle, n: usize, r: Result<
 /// range `[p, p + n + k + ext)` inside the reach.
 pub open spec fn begin_args_ok(l: LeaseV, p: nat, n: nat, k: nat, ext: nat, propose: bool) -> bool {
     &&& 0 < n
-    &&& p + n <= l.toks.len()
-    &&& (k > 0 || ext > 0 || propose) ==> p + n == l.toks.len()
+    &&& p + n <= lhat(l)
+    &&& (k > 0 || ext > 0 || propose) ==> p + n == lhat(l)
     &&& p + n + k + ext <= l.rho
 }
 
@@ -404,14 +405,17 @@ impl Manager {
         };
         let mut l = self.leases.remove(&h.id).unwrap();
         let len = l.toks.len();
+        // L̂_h: the deferred position counts (D22).
+        let lh = if l.dfr { len + 1 } else { len };
         let k = drafts.len();
         proof {
             assert(a as nat == pfront(v, v.leases[h.id]));
-            assert(a <= len);
+            assert(lh as nat == lhat(v.leases[h.id]));
+            assert(a <= lh);
             assert(l.rho as nat <= v.p * v.b);
             assert(v.p * v.b <= max_slots());
         }
-        if n == 0 || n > len - a || ((k > 0 || ext > 0 || propose) && a + n != len) || k > l.rho - a - n || ext > l.rho - a - n - k {
+        if n == 0 || n > lh - a || ((k > 0 || ext > 0 || propose) && a + n != lh) || k > l.rho - a - n || ext > l.rho - a - n - k {
             self.leases.insert(h.id, l);
             proof {
                 assert(self.leases@ =~= old(self).leases@);
@@ -439,9 +443,14 @@ impl Manager {
             lemma_cdiv_le(w as nat, v.b, l.table@.len());
         }
         let ghost lv = v.leases[h.id];
-        // Inputs: the input interval, then the drafts.
-        let mut input_ids = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.toks.as_slice(), a, z));
-        input_ids.extend_from_slice(drafts);
+        // Inputs: the input interval, then the drafts; a continuation gets placeholders (D24).
+        let input_ids = if z <= len {
+            let mut ids = vstd::slice::slice_to_vec(vstd::slice::slice_subrange(l.toks.as_slice(), a, z));
+            ids.extend_from_slice(drafts);
+            ids
+        } else {
+            vec![0u32; n + k]
+        };
         let mut positions: Vec<usize> = Vec::new();
         let mut write_slots: Vec<usize> = Vec::new();
         let mut j = a;
@@ -525,7 +534,11 @@ impl Manager {
             assert(a as nat == pfront(v, lw));
             assert(z as nat == pfront(v, lw) + n);
             assert(w as nat == pfront(v, lw) + n + drafts@.len() + ext);
-            assert(plan.input_ids@ == lw.toks.subrange(a as int, z as int) + drafts@);
+            if z <= len {
+                assert(plan.input_ids@ == lw.toks.subrange(a as int, z as int) + drafts@);
+            } else {
+                assert(plan.input_ids@ =~= Seq::new((n + k) as nat, |q: int| 0u32));
+            }
             assert(positions@.len() == zk - a);
             assert(plan.write_slots@.len() == w - a);
             assert forall|q: int| 0 <= q < w - a implies (#[trigger] plan.write_slots@[q] as nat) < v.p * v.b by {
@@ -561,7 +574,7 @@ impl Manager {
         ensures
             r.0 as nat == self@.leases[h].pending.len(),
             r.1 as nat == pfront(self@, self@.leases[h]),
-            r.1 as nat <= self@.leases[h].toks.len(),
+            r.1 as nat <= lhat(self@.leases[h]),
     {
         proof {
             self.lemma_valid();
@@ -677,12 +690,16 @@ pub open spec fn fin_untouched(v: MgrV, v2: MgrV, t: u64) -> bool {
 
 pub open spec fn finish_result(v: MgrV, v2: MgrV, log2: Log, t: Ticket, c: Completion, r: Result<usize, Error>) -> bool {
     let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
+    // A ticket heading X_h needs its token bound first (D22, `bind_deferred`).
+    let dfr = v.leases[v.pend[t.id].lease].dfr;
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
-    &&& live ==> r is Ok
+    &&& (live && dfr) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && !dfr) ==> r is Ok
     &&& r matches Ok(z) ==> {
         let pr = v.pend[t.id];
         let l = v.leases[pr.lease];
         &&& live
+        &&& !dfr
         &&& z as nat == pr.z
         &&& finish_rel(v, v2, t.id)
         // §9.0 (c): every slot of [a, z) now carries its causal prefix ...
@@ -785,6 +802,7 @@ pub proof fn lemma_finish_inv(v: MgrV, log: Log, log2: Log, t: u64, v2: MgrV)
         log.submap_of(log2),
         v.pend.contains_key(t),
         v.leases[v.pend[t].lease].pending[0] == t,
+        !v.leases[v.pend[t].lease].dfr,
         finish_rel(v, v2, t),
         v.pend[t].z / v.b > 0 ==> chain_logged(
             log2,
@@ -987,6 +1005,9 @@ impl Manager {
         if t.mgr != self.id || completion.ticket.mgr != t.mgr || completion.ticket.id != t.id
             || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
+        }
+        if self.ticket_dfr(t.id) {
+            return Err(Error::InvalidArgument);
         }
         let ghost v = self@;
         let ghost log0 = self.den_log();
@@ -1221,6 +1242,7 @@ pub proof fn lemma_commit_inv(v: MgrV, log: Log, t: u64, n: nat)
         inv(v, log),
         v.pend.contains_key(t),
         v.leases[v.pend[t].lease].pending[0] == t,
+        !v.leases[v.pend[t].lease].dfr,
         n <= v.pend[t].drafts.len(),
     ensures
         inv(committed(v, t, n), log),
@@ -1311,6 +1333,7 @@ impl Manager {
             old(self).valid(),
             old(self)@.pend.contains_key(t),
             old(self)@.leases[old(self)@.pend[t].lease].pending[0] == t,
+            !old(self)@.leases[old(self)@.pend[t].lease].dfr,
             n <= old(self)@.pend[t].drafts.len(),
         ensures
             final(self).valid(),
@@ -1390,10 +1413,11 @@ pub open spec fn finish_n_result(
     r: Result<usize, Error>,
 ) -> bool {
     let live = t.mgr == v.id && v.pend.contains_key(t.id) && c.ticket == t && v.leases[v.pend[t.id].lease].pending[0] == t.id;
+    let dfr = v.leases[v.pend[t.id].lease].dfr;
     &&& !live ==> r is Err && r->Err_0 == Error::InvalidTicket
-    &&& (live && n > v.pend[t.id].drafts.len()) ==> r is Err && r->Err_0 == Error::InvalidArgument
-    &&& (live && n <= v.pend[t.id].drafts.len()) ==> r is Ok
-    &&& r is Ok ==> live && n <= v.pend[t.id].drafts.len() && finish_result(committed(v, t.id, n as nat), v2, log2, t, c, r)
+    &&& (live && (dfr || n > v.pend[t.id].drafts.len())) ==> r is Err && r->Err_0 == Error::InvalidArgument
+    &&& (live && !dfr && n <= v.pend[t.id].drafts.len()) ==> r is Ok
+    &&& r is Ok ==> live && !dfr && n <= v.pend[t.id].drafts.len() && finish_result(committed(v, t.id, n as nat), v2, log2, t, c, r)
 }
 
 impl Manager {
@@ -1416,7 +1440,7 @@ impl Manager {
             || !self.pend.contains_key(&t.id) || !self.is_head(t.id) {
             return Err(Error::InvalidTicket);
         }
-        if n > self.pend.get(&t.id).unwrap().drafts.len() {
+        if self.ticket_dfr(t.id) || n > self.pend.get(&t.id).unwrap().drafts.len() {
             return Err(Error::InvalidArgument);
         }
         self.commit_drafts(t.id, n);
@@ -1482,6 +1506,184 @@ pub proof fn lemma_pending_disjoint(v: MgrV, log: Log, t1: u64, t2: u64)
             lemma_div_bounds(j2 as nat, v.b);
             lemma_write_slot_page(v, l1.table, j1, x2 as int, j2 % (v.b as int));
             assert(l2.table.contains(x2));
+        }
+    }
+}
+
+
+/// D22: the deferred token `x` of lease `h` is bound: `T'_h = T_h ++ [x]` and `X_h` empties.
+/// `L̂_h`, the frontier, the tables and the queue are unchanged.
+pub open spec fn bound(v: MgrV, h: u64, x: Token) -> MgrV {
+    let l = v.leases[h];
+    MgrV { leases: v.leases.insert(h, LeaseV { toks: l.toks.push(x), dfr: false, ..l }), ..v }
+}
+
+/// `Valid` is preserved by binding the deferred token.
+pub proof fn lemma_bind_inv(v: MgrV, log: Log, h: u64, x: Token)
+    requires
+        inv(v, log),
+        v.leases.contains_key(h),
+        v.leases[h].dfr,
+    ensures
+        inv(bound(v, h, x), log),
+{
+    reveal(lease_ok);
+    reveal(page_ok);
+    reveal(pend_ok);
+    let v2 = bound(v, h, x);
+    let l = v.leases[h];
+    let l2 = v2.leases[h];
+    assert(lease_ok(v, log, h));
+    assert(v.pend.contains_key(l.pending[0]));
+    assert(pend_ok(v, l.pending[0]));
+    assert(lhat(l2) == lhat(l));
+    assert(l2.toks.len() == l.toks.len() + 1);
+    // The input only grows: every prefix of the old input is unchanged.
+    assert forall|j: int| 0 <= j <= l.toks.len() implies #[trigger] l2.toks.subrange(0, j) == l.toks.subrange(0, j) by {
+        assert(l2.toks.subrange(0, j) =~= l.toks.subrange(0, j));
+    }
+    assert forall|j: int| 0 <= j < l2.c implies (v2.vmap)(#[trigger] slot_of(v2.b, l2.table, j)) == l2.toks.subrange(
+        0,
+        j + 1,
+    ) by {
+        assert(l2.toks.subrange(0, j + 1) == l.toks.subrange(0, j + 1));
+    }
+    assert forall|i: nat| i < l2.table.len() implies #[trigger] blk_ok(v2, log, l2, i) by {
+        assert(blk_ok(v, log, l, i));
+        if (i + 1) * v.b <= l.c {
+            assert(l2.toks.subrange(0, ((i + 1) * v.b) as int) == l.toks.subrange(0, ((i + 1) * v.b) as int));
+            lemma_chain_key_prefix(v.seed(), l.toks, l2.toks, v.b, i);
+            lemma_chain_logged_prefix(log, v.ns, l.toks, l2.toks, v.b, i);
+        }
+    }
+    assert(lease_ok(v2, log, h));
+    assert forall|h2: u64| #[trigger] v2.leases.contains_key(h2) implies lease_ok(v2, log, h2) by {
+        if h2 != h {
+            assert(lease_ok(v, log, h2));
+            lemma_lease_frame(v, v2, log, log, h2);
+        }
+    }
+    assert forall|y: PageId| (y as nat) < v2.p implies #[trigger] page_ok(v2, log, y) by {
+        assert(page_ok(v, log, y));
+        assert(hold_ok(v, y));
+        assert forall|h2: u64| #[trigger] v2.holders[y as int].contains(h2) <==> (v2.leases.contains_key(h2)
+            && v2.leases[h2].table.contains(y)) by {
+        }
+        if v.keys[y as int] is Some {
+            lemma_pub_frame(v, v2, log, log, y);
+        }
+    }
+    assert forall|t2: u64| #[trigger] v2.pend.contains_key(t2) implies pend_ok(v2, t2) by {
+        assert(pend_ok(v, t2));
+        if v.pend[t2].lease != h {
+            lemma_pend_frame(v, v2, t2);
+        }
+    }
+    assert(v2.leases.dom() =~= v.leases.dom());
+    lemma_last_frame(v, v2);
+}
+
+impl Manager {
+    /// `X_h` of the lease of pending ticket `t` is non-empty.
+    pub fn ticket_dfr(&self, t: u64) -> (r: bool)
+        requires
+            self.valid(),
+            self@.pend.contains_key(t),
+        ensures
+            r == self@.leases[self@.pend[t].lease].dfr,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(pend_ok);
+            assert(pend_ok(self@, t));
+        }
+        let hid = self.pend.get(&t).unwrap().lease;
+        self.leases.get(&hid).unwrap().dfr
+    }
+
+    /// `Q_h[0]` of a live lease with a pending ticket.
+    pub fn queue_head(&self, h: u64) -> (r: u64)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+            self@.leases[h].pending.len() > 0,
+        ensures
+            r == self@.leases[h].pending[0],
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.leases.get(&h).unwrap().pending[0]
+    }
+
+    /// `X_h` of live lease `h` is non-empty.
+    pub fn lease_dfr(&self, h: u64) -> (r: bool)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r == self@.leases[h].dfr,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.leases.get(&h).unwrap().dfr
+    }
+
+    /// D22: bind the deferred token `x` of lease `h`. Not public: the first step of the
+    /// coordinator's `finish_write` for a ticket heading `X_h`.
+    pub(crate) fn bind_deferred(&mut self, h: u64, x: Token)
+        requires
+            old(self).valid(),
+            old(self)@.leases.contains_key(h),
+            old(self)@.leases[h].dfr,
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            final(self)@ == bound(old(self)@, h, x),
+            final(self).id == old(self).id,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        let ghost v = self@;
+        let ghost log = self.den_log();
+        proof {
+            reveal(lease_ok);
+            assert(lease_ok(v, log, h));
+            assert(Self::head_ok(v, self.leases@[h]));
+            lemma_bind_inv(v, log, h, x);
+        }
+        let mut l = self.leases.remove(&h).unwrap();
+        l.toks.push(x);
+        l.dfr = false;
+        self.leases.insert(h, l);
+        let ghost v2 = bound(v, h, x);
+        self.g = Ghost(v2);
+        proof {
+            let lv = v.leases[h];
+            assert(self.leases@.dom() =~= v2.leases.dom());
+            assert forall|h2: u64| #[trigger] self.leases@.contains_key(h2) implies lease_view(self.leases@[h2])
+                == v2.leases[h2] && Self::head_ok(v2, self.leases@[h2]) by {
+                if h2 != h {
+                    assert(Self::head_ok(v, self.leases@[h2]));
+                } else {
+                    let lc = self.leases@[h2];
+                    assert(lc.toks@ =~= lv.toks.push(x));
+                    assert(lease_view(lc) == v2.leases[h2]);
+                    let q = lc.c as nat / v.b;
+                    if q > 0 {
+                        lemma_div_bounds(lc.c as nat, v.b);
+                        lemma_mul_succ((q - 1) as nat, v.b);
+                        assert(lc.toks@.subrange(0, (q * v.b) as int) =~= lv.toks.subrange(0, (q * v.b) as int));
+                        lemma_chain_key_prefix(v.seed(), lv.toks, lc.toks@, v.b, (q - 1) as nat);
+                    }
+                }
+            }
         }
     }
 }

@@ -912,3 +912,114 @@ fn zos_release_with_pending_tickets_is_busy() {
     co.finish_write(t2, done(t2)).unwrap();
     co.release(h).unwrap();
 }
+
+// ---- v0.5 deferred tail: extend_deferred and continuations (D22, D24 with s = 0, k = 0) ----
+
+fn tok(t: pageproof_core::types::Ticket, x: u32) -> CoordCompletion {
+    CoordCompletion { ticket: t, accepted: 0, token: Some(x), drafts: vec![], stop: false }
+}
+
+#[test]
+fn deferred_decode_loop() {
+    // §7: the next decode step is planned before the previous step's token reaches the host.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[8], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(5, 30)).unwrap();
+    let (t1, _) = co.begin_write(h, 5, Drafts::Known(vec![]), false).unwrap();
+    co.extend_deferred(h).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.deferred, iv.reach), (5, true, 6));
+    // The continuation reads the deferred position; its inputs are placeholders.
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(p2.producer, Some(t1));
+    assert_eq!((p2.input_ids.clone(), p2.positions.clone()), (vec![0], vec![5]));
+    assert!(!p2.init);
+    assert_eq!(p2.write_slots[0], vec![co.slot_of(0, h, 5).unwrap()]);
+    // The producer heads X_h: its completion must carry the token.
+    assert_eq!(co.finish_write(t1, done(t1)).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.finish_write(t1, tok(t1, 77)).unwrap(), 5);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.deferred), (6, 5, false));
+    // Steady state: one step in flight, the next planned behind it.
+    co.extend_deferred(h).unwrap();
+    let (t3, p3) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!((p3.producer, p3.positions.clone()), (Some(t2), vec![6]));
+    assert_eq!(co.finish_write(t2, tok(t2, 78)).unwrap(), 6);
+    // t3 does not head X_h: its token is the caller's, not the lease's.
+    assert_eq!(co.finish_write(t3, tok(t3, 79)).unwrap(), 7);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.pending, iv.deferred), (7, 7, None, false));
+    assert_eq!(&co.release(h).unwrap()[5..], &[77, 78]);
+}
+
+#[test]
+fn extend_deferred_phase_errors() {
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(8, 31)).unwrap();
+    // No pending ticket: nothing to defer.
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::InvalidPhase));
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    // The newest ticket does not end at L.
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::InvalidPhase));
+    let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    // A full queue is Busy.
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::Busy));
+    co.finish_write(t1, done(t1)).unwrap();
+    co.extend_deferred(h).unwrap();
+    // X_h is full; extend needs every input known.
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::InvalidPhase));
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    // Known inputs past p_h are gone: only the one-token continuation fits.
+    assert_eq!(co.begin_write(h, 2, Drafts::Known(vec![]), false).err(), Some(Error::InvalidArgument));
+    assert_eq!(co.begin_write(h, 1, Drafts::Known(vec![5]), false).err(), Some(Error::Busy));
+    assert_eq!(co.release(h).err(), Some(Error::Busy));
+    co.finish_write(t2, tok(t2, 9)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.deferred, iv.pending), (9, 8, false, None));
+    // The bound token at position 8 is known but not computed yet.
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    compute_all(&mut co, h);
+    co.extend(h, &[1]).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_deferred_with_delta_zero_never_succeeds() {
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 1, 0, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(4, 32)).unwrap();
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::InvalidPhase));
+    let (t, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::Busy));
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_deferred_allocates_across_a_block() {
+    // §3.5: extend_deferred's demand is ceil((L̂' + μ)/B) - m_h pages per paged class.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, v) = co.attach(&toks(4, 33)).unwrap();
+    assert_eq!(v.tables[0].len(), 1);
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    let lv = co.extend_deferred(h).unwrap();
+    assert_eq!(lv.tables[0].len(), 2);
+    assert_eq!(&lv.tables[0][..1], &v.tables[0][..]);
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(p2.write_slots[0], vec![lv.tables[0][1] * 4]);
+    co.finish_write(t1, tok(t1, 3)).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_deferred_needs_capacity() {
+    // One slab of four 16-byte pages; the lease fills it exactly, so the deferred position needs
+    // a fifth page.
+    let mut co = Coordinator::create(1, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(16, 34)).unwrap();
+    let (t1, _) = co.begin_write(h, 16, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.extend_deferred(h).err(), Some(Error::RequestTooLarge));
+    let iv = co.inspect(h).unwrap();
+    assert!(!iv.deferred);
+    co.finish_write(t1, done(t1)).unwrap();
+    co.release(h).unwrap();
+}

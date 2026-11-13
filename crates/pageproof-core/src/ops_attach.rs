@@ -57,7 +57,7 @@ pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, 
 pub open spec fn attached(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> MgrV {
     let h = v.next_handle;
     MgrV {
-        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: Seq::empty(), rho: toks.len() + v.cfg.mu }),
+        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: Seq::empty(), rho: toks.len() + v.cfg.mu, dfr: false }),
         refs: inc_seq(v.refs, table, table.len() as int),
         keys: revoke(v.keys, table.subrange(kstar as int, table.len() as int)),
         holders: Seq::new(
@@ -1093,7 +1093,7 @@ impl Manager {
         let h = self.next_handle;
         self.next_handle = h + 1;
         let tcopy = vstd::slice::slice_to_vec(table.as_slice());
-        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: Vec::new(), rho: nr, head };
+        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: Vec::new(), rho: nr, dfr: false, head };
         self.leases.insert(h, lease);
         let ghost v2 = attached(v, toks@, table@, kstar as nat);
         proof {

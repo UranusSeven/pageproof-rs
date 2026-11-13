@@ -684,6 +684,7 @@ impl Coordinator {
                 &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
                 &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
                 &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
+                &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
             }
         &&& forall|h: u64|
             #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].rho, self.b as nat))
@@ -1223,6 +1224,7 @@ impl Coordinator {
             &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
             &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
+            &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
         } by {
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
             assert(self.pv(0) == (MgrV { own: self.pv(0).own, keys: self.pv(0).keys, ..o.pv(0) }));

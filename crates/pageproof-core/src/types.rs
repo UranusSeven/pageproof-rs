@@ -77,6 +77,9 @@ pub ghost struct LeaseV {
     pub pending: Seq<u64>,
     /// `ρ_h`: the reach, the number of token positions the page table covers (D18).
     pub rho: nat,
+    /// `X_h` is non-empty (D22). With `δ <= 1` the deferred tail holds at most one ticket, and
+    /// then it is `Q_h[0]`, so `X_h = if dfr { [Q_h[0]] } else { [] }`.
+    pub dfr: bool,
 }
 
 /// `Pending[t]`: lease, original frontier `a`, interval end `z`.

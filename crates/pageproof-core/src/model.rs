@@ -41,13 +41,19 @@ pub open spec fn blk_ok(v: MgrV, log: Log, l: LeaseV, i: nat) -> bool {
     }
 }
 
-/// I1, I4, I5 (lease part), I5b, I9 (lease -> Pending direction).
+/// `L̂_h`: the planned input length, with the deferred position (§3.2).
+pub open spec fn lhat(l: LeaseV) -> nat {
+    l.toks.len() + if l.dfr { 1nat } else { 0nat }
+}
+
+/// I1, I4, I5 (lease part), I5b, I9 (lease -> Pending direction), I16, I17.
 #[verifier::opaque]
 pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     let l = v.leases[h];
     &&& h < v.next_handle
-    &&& 1 <= l.toks.len() <= l.rho
-    &&& l.rho <= l.toks.len() + v.cfg.mu
+    &&& 1 <= l.toks.len()
+    &&& lhat(l) <= l.rho
+    &&& l.rho <= lhat(l) + v.cfg.mu
     &&& l.rho <= v.p * v.b
     &&& l.toks.len() <= v.p * v.b
     &&& blocks_for(l.rho, v.b, l.table.len())
@@ -66,6 +72,13 @@ pub open spec fn lease_ok(v: MgrV, log: Log, h: u64) -> bool {
     &&& l.pending.no_duplicates()
     &&& forall|i: int| 0 <= i < l.pending.len() ==> v.pend.contains_key(#[trigger] l.pending[i]) && v.pend[l.pending[i]].lease == h
     &&& l.pending.len() == 2 ==> v.pend[l.pending[1]].a == v.pend[l.pending[0]].z
+    // I17: the deferred tail is the oldest ticket, it has no drafts, and it ends at L_h.
+    &&& l.dfr ==> {
+        &&& v.cfg.delta == 1
+        &&& l.pending.len() >= 1
+        &&& v.pend[l.pending[0]].z == l.toks.len()
+        &&& v.pend[l.pending[0]].drafts.len() == 0
+    }
 }
 
 /// I2 (exact reference count) via the ghost holder set.
@@ -110,11 +123,12 @@ pub open spec fn pend_ok(v: MgrV, t: u64) -> bool {
     // The oldest ticket starts at the frontier; a later one starts past it (§3.4).
     &&& v.leases[r.lease].pending[0] == t ==> r.a == v.leases[r.lease].c
     &&& v.leases[r.lease].c <= r.a
-    &&& r.a < r.z <= v.leases[r.lease].toks.len()
-    // D16: drafts follow the whole input and fit the reservation (D18, I16).
-    &&& r.drafts.len() > 0 ==> r.z == v.leases[r.lease].toks.len()
+    // A continuation's input is the deferred position (D24), so z <= L̂_h.
+    &&& r.a < r.z <= lhat(v.leases[r.lease])
+    // D16: drafts follow the whole planned input and fit the reservation (D18, I16).
+    &&& r.drafts.len() > 0 ==> r.z == lhat(v.leases[r.lease])
     &&& r.z + r.drafts.len() <= v.leases[r.lease].rho
-    &&& r.z < v.leases[r.lease].toks.len() ==> v.leases[r.lease].rho == v.leases[r.lease].toks.len() + v.cfg.mu
+    &&& r.z < lhat(v.leases[r.lease]) ==> v.leases[r.lease].rho == lhat(v.leases[r.lease]) + v.cfg.mu
 }
 
 /// `Valid(S)`.
@@ -159,6 +173,8 @@ pub proof fn lemma_lease_frame(v: MgrV, v2: MgrV, log: Log, log2: Log, h: u64)
                 == h,
         v.leases[h].pending.len() == 2 ==> v2.pend[v.leases[h].pending[1]].a == v.pend[v.leases[h].pending[1]].a
             && v2.pend[v.leases[h].pending[0]].z == v.pend[v.leases[h].pending[0]].z,
+        v.leases[h].dfr ==> v2.pend[v.leases[h].pending[0]].z == v.pend[v.leases[h].pending[0]].z
+            && v2.pend[v.leases[h].pending[0]].drafts.len() == v.pend[v.leases[h].pending[0]].drafts.len(),
         v2.cfg == v.cfg,
     ensures
         lease_ok(v2, log2, h),
