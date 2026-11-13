@@ -681,3 +681,107 @@ fn stop_is_not_yet_supported() {
     co.finish_write(t, done(t)).unwrap();
     co.release(h).unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Contract v0.4.1/v0.6 §7: drafter classes and proposal rows (D20). B = 4; one target class
+// (units 16) and one drafter class (units 16), so μ = 2λ.
+// ---------------------------------------------------------------------------------------------
+
+fn drafter_coord(nslab: usize, lam: usize) -> Coordinator {
+    Coordinator::create(nslab, 64, &[16], &[16], &[], 4, lam, 0, NS).unwrap()
+}
+
+#[test]
+fn drafter_classes_need_drafts() {
+    // §7: Cx ≠ ∅ with λ = 0 is a ConfigError; so is a configuration with only drafter classes.
+    assert_eq!(Coordinator::create(4, 64, &[16], &[16], &[], 4, 0, 0, NS).err(), Some(Error::ConfigError));
+    assert_eq!(Coordinator::create(4, 64, &[], &[16], &[], 4, 2, 0, NS).err(), Some(Error::ConfigError));
+    // δ > 0 lands in stage F.
+    assert_eq!(Coordinator::create(4, 64, &[16], &[], &[], 4, 2, 1, NS).err(), Some(Error::ConfigError));
+}
+
+#[test]
+fn drafter_reservation_is_two_lambda() {
+    // §7: attach of L with λ = 4 and a drafter class: μ = 8, and every paged class (target and
+    // drafter) covers ceil((L + 8)/B) blocks.
+    let mut co = drafter_coord(8, 4);
+    let (h, _, v) = co.attach(&toks(5, 1)).unwrap();
+    assert_eq!((v.tables.len(), v.tables[0].len(), v.tables[1].len()), (2, 4, 4));
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.reach, iv.mu, iv.lam), (13, 8, 4));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn proposal_rows_widen_the_drafter_plan() {
+    // §7: a verify with k = 4 and `propose`: the target class writes [a, z + 4), the drafter class
+    // [a, z + 4 + λ). After n = 2, c' = z + 2 in every class; no slot at or past z + 2 is credited.
+    let mut co = drafter_coord(8, 4);
+    let (h, _, _) = co.attach(&toks(5, 2)).unwrap();
+    compute_all(&mut co, h);
+    co.extend(h, &[50]).unwrap();
+    let (t, plan) = co.begin_write(h, 1, Drafts::Known(vec![51, 52, 53, 54]), true).unwrap();
+    assert!(plan.propose);
+    assert_eq!(plan.input_ids.len(), 5);
+    assert_eq!(plan.write_slots[0].len(), 5);
+    assert_eq!(plan.write_slots[1].len(), 9);
+    for (q, s) in plan.write_slots[1].iter().enumerate() {
+        assert_eq!(*s, co.slot_of(1, h, 5 + q).unwrap());
+    }
+    assert_eq!(co.finish_write(t, done_n(t, 2)).unwrap(), 8);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (8, 8));
+    // The next verify, after the bonus token, starts at the bonus position z + 2 and may propose.
+    co.extend(h, &[55]).unwrap();
+    let (t2, p2) = co.begin_write(h, 1, Drafts::Known(vec![56]), true).unwrap();
+    assert_eq!(p2.positions[0], 8);
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn proposal_rows_end_at_the_reach() {
+    // §7: k = λ, all accepted, with `propose`: the proposal rows end at z + 2λ = ρ_h; no
+    // allocation.
+    let mut co = drafter_coord(8, 2);
+    let (h, _, _) = co.attach(&toks(3, 3)).unwrap();
+    compute_all(&mut co, h);
+    co.extend(h, &[60]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.reach), (4, 8));
+    let free = co.arena().free_units.clone();
+    let (t, plan) = co.begin_write(h, 1, Drafts::Known(vec![61, 62]), true).unwrap();
+    assert_eq!(plan.write_slots[1].len(), 5);
+    assert!(co.slot_of(1, h, 7).is_ok());
+    assert_eq!(co.arena().free_units, free);
+    co.finish_write(t, done_n(t, 2)).unwrap();
+    assert_eq!(co.arena().free_units, free);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn propose_requires_the_end_of_the_input() {
+    // §7: `propose` with c_h + n < L_h is InvalidArgument.
+    let mut co = drafter_coord(8, 2);
+    let (h, _, _) = co.attach(&toks(6, 4)).unwrap();
+    assert_eq!(co.begin_write(h, 3, Drafts::Known(vec![]), true).err(), Some(Error::InvalidArgument));
+    let (t, plan) = co.begin_write(h, 6, Drafts::Known(vec![]), true).unwrap();
+    assert_eq!((plan.write_slots[0].len(), plan.write_slots[1].len()), (6, 8));
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn drafter_and_target_pages_are_hit_together() {
+    // §7: the joint k* runs over target and drafter classes; both publish their blocks together.
+    let mut co = drafter_coord(8, 2);
+    let t = toks(9, 5);
+    let (h1, _, v1) = co.attach(&t).unwrap();
+    compute_all(&mut co, h1);
+    let (h2, cached, v2) = co.attach(&t).unwrap();
+    assert_eq!(cached, 8);
+    assert_eq!(&v2.tables[0][..2], &v1.tables[0][..2]);
+    assert_eq!(&v2.tables[1][..2], &v1.tables[1][..2]);
+    co.release(h1).unwrap();
+    co.release(h2).unwrap();
+}
