@@ -320,6 +320,38 @@ fn inc_suffix(refs: &mut Vec<u64>, tbl: &Vec<PageId>, k: usize)
 }
 
 impl Manager {
+    /// C2's gate on a live lease: `(Busy, p_h)` as in `extend_result`.
+    pub fn extend_gate(&self, h: u64) -> (r: (bool, usize))
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r.0 == extend_busy(self@, self@.leases[h]),
+            r.1 as nat == pfront_x(self@, self@.leases[h]),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(lease_ok);
+            assert(lease_ok(self@, self.den_log(), h));
+        }
+        let l = self.leases.get(&h).unwrap();
+        let q = l.pending.len();
+        if q == 0 {
+            (false, l.c)
+        } else {
+            let t0 = l.pending[0];
+            let tl = l.pending[q - 1];
+            proof {
+                assert(self@.pend.contains_key(t0));
+                assert(self@.pend.contains_key(tl));
+            }
+            let r0 = self.pend.get(&t0).unwrap();
+            let rl = self.pend.get(&tl).unwrap();
+            (q > self.cfg.delta || r0.drafts.len() > 0 || r0.propose, rl.z)
+        }
+    }
+
     /// C2. `extend(h, suffix)`.
     pub fn extend(&mut self, h: Handle, suffix: &[Token]) -> (r: Result<PageTableView, Error>)
         requires

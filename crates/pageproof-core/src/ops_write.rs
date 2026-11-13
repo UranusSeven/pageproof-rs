@@ -553,6 +553,37 @@ impl Manager {
 
 
 impl Manager {
+    /// `(|Q_h|, p_h)` of a live lease (§3.2).
+    pub fn queue_info(&self, h: u64) -> (r: (usize, usize))
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r.0 as nat == self@.leases[h].pending.len(),
+            r.1 as nat == pfront(self@, self@.leases[h]),
+            r.1 as nat <= self@.leases[h].toks.len(),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(lease_ok);
+            reveal(pend_ok);
+            assert(lease_ok(self@, self.den_log(), h));
+        }
+        let l = self.leases.get(&h).unwrap();
+        let q = l.pending.len();
+        if q == 0 {
+            (0, l.c)
+        } else {
+            let last = l.pending[q - 1];
+            proof {
+                assert(self@.pend.contains_key(last));
+                assert(pend_ok(self@, last));
+            }
+            (q, self.pend.get(&last).unwrap().z)
+        }
+    }
+
     /// Ticket `t` is the oldest ticket of its lease's queue (D21).
     pub fn is_head(&self, t: u64) -> (r: bool)
         requires

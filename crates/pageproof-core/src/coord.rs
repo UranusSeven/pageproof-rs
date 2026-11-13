@@ -44,14 +44,14 @@ pub open spec fn cfg_rel(c: PCfg, np: nat) -> bool {
 pub open spec fn create_early_ok(pu: Seq<usize>, du: Seq<usize>, lambda: nat, delta: nat) -> bool {
     &&& pu.len() >= 1
     &&& du.len() > 0 ==> lambda > 0
-    &&& delta == 0
+    &&& delta <= 1
     &&& lambda <= max_slots()
-    &&& create_mu(lambda, du.len()) <= max_slots()
+    &&& create_mu(lambda, delta, du.len()) <= max_slots()
 }
 
-/// `μ` of a configuration with `nd` drafter classes and δ = 0 (D18).
-pub open spec fn create_mu(lambda: nat, nd: nat) -> nat {
-    if nd > 0 { lambda + lambda } else { lambda }
+/// `μ = (δ + 1)·λ`, plus `λ` with drafter classes (D18).
+pub open spec fn create_mu(lambda: nat, delta: nat, nd: nat) -> nat {
+    lambda + (if delta == 1 { lambda } else { 0 }) + (if nd > 0 { lambda } else { 0 })
 }
 
 /// `n_c = S / u_c` for every class.
@@ -1301,7 +1301,7 @@ impl Coordinator {
     /// drafter paged classes `du`, then state classes `su`. The reservation margin is
     /// `μ = (δ + 1)·λ`, plus `λ` with drafter classes (D18). Every slab starts free.
     ///
-    /// This stage supports `δ = 0` only; `δ > 0` returns ConfigError.
+    /// `δ ∈ {0, 1}` (D21); `δ >= 2` returns ConfigError (§1.1).
     pub fn create(
         nslab: usize,
         sbytes: usize,
@@ -1317,7 +1317,7 @@ impl Coordinator {
             r matches Ok(co) ==> {
                 &&& co.inv()
                 &&& co@.lam() == lambda
-                &&& co@.mu() == create_mu(lambda as nat, du@.len())
+                &&& co@.mu() == create_mu(lambda as nat, delta as nat, du@.len())
                 &&& co@.ntarget() == pu@.len()
                 &&& co@.delta() == delta
                 &&& co@.fits_m(cdiv(1 + co@.mu(), b as nat))
@@ -1337,31 +1337,35 @@ impl Coordinator {
             !cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@ + du@, su@, ns@) ==> r == Err::<Coordinator, Error>(
                 Error::ConfigError,
             ),
-            // C0: no target class, drafter classes without drafts, δ > 0 (stage F), or an unrepresentable μ.
-            (pu@.len() == 0 || (du@.len() > 0 && lambda == 0) || delta > 0 || lambda as nat > max_slots()
-                || create_mu(lambda as nat, du@.len()) > max_slots()) ==> r == Err::<Coordinator, Error>(Error::ConfigError),
+            // C0: no target class, drafter classes without drafts, δ >= 2, or an unrepresentable μ.
+            (pu@.len() == 0 || (du@.len() > 0 && lambda == 0) || delta > 1 || lambda as nat > max_slots()
+                || create_mu(lambda as nat, delta as nat, du@.len()) > max_slots()) ==> r == Err::<Coordinator, Error>(Error::ConfigError),
             // C0: not even a one-token lease (with its reservation) could attach.
             r is Ok ==> fits(per_of(sbytes as nat, pu@ + du@ + su@), pu@.len() + du@.len(), su@.len(), nslab as nat,
-                cdiv(1 + create_mu(lambda as nat, du@.len()), b as nat)),
+                cdiv(1 + create_mu(lambda as nat, delta as nat, du@.len()), b as nat)),
     {
-        // C0: drafter classes need λ >= 1; δ > 0 is stage F.
-        if pu.len() == 0 || pu.len() >= 0x1_0000 || du.len() >= 0x1_0000 || (du.len() > 0 && lambda == 0) || delta > 0
+        // C0: drafter classes need λ >= 1; δ <= 1 (§1.1).
+        if pu.len() == 0 || pu.len() >= 0x1_0000 || du.len() >= 0x1_0000 || (du.len() > 0 && lambda == 0) || delta > 1
             || lambda > MAX_SLOTS as usize {
             return Err(Error::ConfigError);
         }
-        let mu_d = if du.len() > 0 { lambda } else { 0 };
-        if mu_d > MAX_SLOTS as usize - lambda {
+        // μ = (δ + 1)·λ, plus λ with drafter classes (D18).
+        let mu_z = if delta == 1 { lambda } else { 0 };
+        if mu_z > MAX_SLOTS as usize - lambda {
             return Err(Error::ConfigError);
         }
-        // μ = λ, plus λ with drafter classes (D18).
-        let mu = lambda + mu_d;
+        let mu_d = if du.len() > 0 { lambda } else { 0 };
+        if mu_d > MAX_SLOTS as usize - lambda - mu_z {
+            return Err(Error::ConfigError);
+        }
+        let mu = lambda + mu_z + mu_d;
         // Target classes, then drafter classes: one list of paged classes (D20).
         let ntarget = pu.len();
         let mut pall: Vec<usize> = vstd::slice::slice_to_vec(pu);
         pall.extend_from_slice(du);
         proof {
             assert(pall@ =~= pu@ + du@);
-            assert(mu as nat == create_mu(lambda as nat, du@.len()));
+            assert(mu as nat == create_mu(lambda as nat, delta as nat, du@.len()));
             assert(create_early_ok(pu@, du@, lambda as nat, delta as nat));
         }
         if nslab == 0 || sbytes == 0 || b == 0 || pall.len() == 0 || pall.len() >= 0x1_0000 || su.len() >= 0x1_0000
@@ -1464,7 +1468,7 @@ impl Coordinator {
             None => return Err(Error::IdentifierExhausted),
         };
         // Every paged class shares one configuration (I10): μ = λ with no drafters and δ = 0.
-        let cfg0 = PCfgC { mu, lam: lambda, delta: 0, ntarget };
+        let cfg0 = PCfgC { mu, lam: lambda, delta, ntarget };
         // Paged classes.
         let mut paged: Vec<Manager> = Vec::new();
         let mut i: usize = 0;
@@ -1479,12 +1483,12 @@ impl Coordinator {
                 pall@ == pu@ + du@,
                 create_early_ok(pu@, du@, lambda as nat, delta as nat),
                 cfg_accepts(nslab as nat, sbytes as nat, b as nat, pall@, su@, ns@),
-                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: 0, ntarget: ntarget as nat }),
+                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
                 lambda as nat <= max_slots(),
                 mu as nat <= max_slots(),
-                mu as nat == lambda as nat + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
+                mu as nat == (if delta == 1 { lambda as nat + lambda as nat } else { lambda as nat }) + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
                 1 <= ntarget <= pall@.len(),
-                delta == 0,
+                delta <= 1,
                 0 <= i <= pall@.len(),
                 per@.len() == ncls,
                 ncls == pall@.len() + su@.len(),
@@ -1554,11 +1558,11 @@ impl Coordinator {
             invariant
                 pall@ == pu@ + du@,
                 create_early_ok(pu@, du@, lambda as nat, delta as nat),
-                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: 0, ntarget: ntarget as nat }),
+                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
                 mu as nat <= max_slots(),
-                mu as nat == lambda as nat + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
+                mu as nat == (if delta == 1 { lambda as nat + lambda as nat } else { lambda as nat }) + (if ntarget < pall@.len() { lambda as nat } else { 0 }),
                 1 <= ntarget <= pall@.len(),
-                delta == 0,
+                delta <= 1,
                 lambda as nat <= max_slots(),
                 paged@ == pg0,
                 0 <= j <= su@.len(),
@@ -1633,6 +1637,10 @@ impl Coordinator {
                     assert(pg0[0].valid());
                     assert(pg0[k]@.ns == ns@);
                     assert(pg0[0]@.ns == ns@);
+                    assert(pg0[k]@.cfg == cfg0@);
+                    assert(pg0[0]@.cfg == cfg0@);
+                    assert(co.np() == pall@.len());
+                    assert(cfg_rel(cfg0@, co.np()));
                 }
                 assert forall|k: int| 0 <= k < co.nst() implies {
                     &&& #[trigger] co.state@[k].valid()

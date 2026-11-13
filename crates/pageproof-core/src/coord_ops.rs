@@ -88,14 +88,18 @@ pub open spec fn coord_extend_result(o: CoordV, n: CoordV, h: Handle, suffix: Se
     // The tables grow from the old reach ρ_h to the new reach L' + μ (D18).
     let m2 = o.reach_blocks(l2);
     let d = (m2 - cdiv(l.rho, o.b)) as nat;
-    let ok = live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && o.fits_m(m2);
+    // D21: pending tickets may stay if the queue has room and its head has no drafts or proposal
+    // rows; every input position is computed or covered by a pending ticket.
+    let busy = extend_busy(o.paged[0], l);
+    let ph = pfront_x(o.paged[0], l) == l.toks.len();
+    let ok = live && !busy && ph && suffix.len() > 0 && o.fits_m(m2);
     &&& !live ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
-    &&& (live && l.pending.len() > 0) ==> r == Err::<LeaseView, Error>(Error::Busy)
-    &&& (live && l.pending.len() == 0 && l.c != l.toks.len()) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
+    &&& (live && busy) ==> r == Err::<LeaseView, Error>(Error::Busy)
+    &&& (live && !busy && !ph) ==> r == Err::<LeaseView, Error>(Error::InvalidPhase)
+    &&& (live && !busy && ph && suffix.len() == 0) ==> r == Err::<LeaseView, Error>(
         Error::InvalidArgument,
     )
-    &&& (live && l.pending.len() == 0 && l.c == l.toks.len() && suffix.len() > 0 && !o.fits_m(m2)) ==> r == Err::<
+    &&& (live && !busy && ph && suffix.len() > 0 && !o.fits_m(m2)) ==> r == Err::<
         LeaseView,
         Error,
     >(Error::RequestTooLarge)
@@ -109,8 +113,8 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
     requires
         h.mgr == o.id,
         o.leases().contains_key(h.id),
-        o.leases()[h.id].pending.len() == 0,
-        o.leases()[h.id].c == o.leases()[h.id].toks.len(),
+        !extend_busy(o.paged[0], o.leases()[h.id]),
+        pfront_x(o.paged[0], o.leases()[h.id]) == o.leases()[h.id].toks.len(),
         suffix.len() > 0,
         o.fits_m(o.reach_blocks(o.leases()[h.id].toks.len() + suffix.len())),
         o.cap(
@@ -655,17 +659,20 @@ impl Coordinator {
     {
         let ghost o = *self;
         let ghost ov = o@;
-        match self.lease_live(h) {
-            None => return Err(Error::InvalidHandle),
-            Some(true) => return Err(Error::Busy),
-            Some(false) => {},
+        if self.lease_live(h).is_none() {
+            return Err(Error::InvalidHandle);
         }
         proof {
             o.lemma_view();
             assert(self.paged@[0].valid());
+            assert(ov.paged[0] == o.pv(0));
         }
-        let (len, c0, _) = self.paged[0].lease_info(h.id);
-        if c0 != len {
+        let (busy, pf) = self.paged[0].extend_gate(h.id);
+        if busy {
+            return Err(Error::Busy);
+        }
+        let (len, _c0, _) = self.paged[0].lease_info(h.id);
+        if pf != len {
             return Err(Error::InvalidPhase);
         }
         if suffix.len() == 0 {
@@ -764,6 +771,11 @@ impl Coordinator {
                 assert(mid.paged@[c2] == mid.paged@[c2]);
                 assert(mid@.cfree(c2) >= d@[c2]);
             }
+            // The slab plan changes only ownership and keys of paged classes.
+            assert(mid@.paged[0] == (MgrV { own: mid@.paged[0].own, keys: mid@.paged[0].keys, ..pre@.paged[0] }));
+            assert(mid.pv(0).pend == pre.pv(0).pend);
+            assert(mid.pv(0).cfg == pre.pv(0).cfg);
+            assert(pre.pv(0) == o.pv(0));
         }
         let mut tables: Vec<Vec<PageId>> = Vec::new();
         let ghost lv0 = mid.pv(0).leases[h.id];
@@ -772,8 +784,8 @@ impl Coordinator {
             invariant
                 mid.valid(),
                 mid.pv(0).leases.contains_key(h.id),
-                mid.pv(0).leases[h.id].pending.len() == 0,
-                mid.pv(0).leases[h.id].c == len,
+                !extend_busy(mid.pv(0), mid.pv(0).leases[h.id]),
+                pfront_x(mid.pv(0), mid.pv(0).leases[h.id]) == len,
                 mid.pv(0).leases[h.id].toks.len() == len,
                 l2 == len + suffix@.len(),
                 nr2 == l2 + mu,
@@ -820,6 +832,9 @@ impl Coordinator {
                 assert(mid.pv(c as int).leases[h.id].pending == mid.pv(0).leases[h.id].pending);
                 assert(mid.pv(c as int).leases[h.id].rho == mid.pv(0).leases[h.id].rho);
                 assert(mid.pv(c as int).cfg == mid.pv(0).cfg);
+                assert(mid.pv(c as int).pend == mid.pv(0).pend);
+                assert(extend_busy(mid.pv(c as int), mid.pv(c as int).leases[h.id]) == extend_busy(mid.pv(0), mid.pv(0).leases[h.id]));
+                assert(pfront_x(mid.pv(c as int), mid.pv(c as int).leases[h.id]) == pfront_x(mid.pv(0), mid.pv(0).leases[h.id]));
                 assert(mid.unit@[c as int] >= 1);
                 lemma_fits_bound(mid.per@, mid.np(), mid.nst(), mid.nslab as nat, m2 as nat, c as int);
                 lemma_cdiv_props(nr2 as nat, b as nat);
@@ -1050,11 +1065,11 @@ pub open spec fn drafts_seq(d: Drafts) -> Seq<Token> {
     }
 }
 
-/// C3 plan correctness across classes.
+/// C3 plan correctness across classes: inputs `T_h[p_h : p_h + n] ++ D` from the planned frontier.
 pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: bool, plan: CoordPlan) -> bool {
     let l = o.leases()[h];
-    let a = l.c;
-    let z = l.c + n;
+    let a = pfront(o.paged[0], l);
+    let z = a + n;
     let k = d.len();
     &&& plan.ticket == Ticket { mgr: o.id, id: o.next_ticket() }
     &&& plan.handle == Handle { mgr: o.id, id: h }
@@ -1070,10 +1085,12 @@ pub open spec fn cplan_ok(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: boo
     &&& forall|c: int| 0 <= c < o.np ==> #[trigger] cplan_class(o, h, n, d, propose, plan, c)
     &&& plan.state_slots@ == o.slots[h]
     &&& plan.init == (a == 0)
+    // The slot holds the state after the computed prefix; once the earlier tickets in Q_h have run,
+    // it holds the state after T_h[0:a] (E13).
     &&& forall|j: int|
         0 <= j < o.nst() ==> {
             &&& o.state[j].holder[(#[trigger] plan.state_slots@[j]) as int] == Some(h)
-            &&& a > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, a as int))
+            &&& l.c > 0 ==> o.state[j].w[plan.state_slots@[j] as int] == Some(l.toks.subrange(0, l.c as int))
         }
 }
 
@@ -1092,18 +1109,19 @@ pub open spec fn paged_step(o: CoordV, n: CoordV) -> bool {
     &&& n.slots == o.slots
 }
 
-/// Arguments C3 accepts on a live lease with no ticket in flight (δ = 0): known drafts,
-/// `0 < n <= L - c`, `k <= λ`, drafts only after the whole input, and `propose` only with drafter
-/// classes and after the whole input.
+/// Arguments C3 accepts on a live lease whose queue can take the ticket: known drafts (a
+/// continuation's deferred drafts land in stage H), `0 < n <= L - p_h`, `k <= λ`, drafts only after
+/// the whole input, and `propose` only with drafter classes and after the whole input.
 pub open spec fn coord_begin_ok(o: CoordV, h: u64, n: nat, d: Drafts, propose: bool) -> bool {
     let l = o.leases()[h];
+    let p = pfront(o.paged[0], l);
     let k = drafts_seq(d).len();
     &&& drafts_known(d)
     &&& 0 < n
-    &&& l.c + n <= l.toks.len()
+    &&& p + n <= l.toks.len()
     &&& k <= o.lam()
-    &&& k > 0 ==> l.c + n == l.toks.len()
-    &&& propose ==> o.ntarget() < o.np && l.c + n == l.toks.len()
+    &&& k > 0 ==> p + n == l.toks.len()
+    &&& propose ==> o.ntarget() < o.np && p + n == l.toks.len()
 }
 
 /// Success relation of C3: the plan, and every paged class's ticket record.
@@ -1125,12 +1143,14 @@ pub open spec fn coord_begin_result(
 ) -> bool {
     let live = h.mgr == o.id && o.leases().contains_key(h.id);
     let l = o.leases()[h.id];
+    // D21: the queue is full, or host-known drafts would follow a pending ticket.
+    let busy = l.pending.len() > o.delta() || (l.pending.len() > 0 && drafts_known(d) && drafts_seq(d).len() > 0);
     let ok = coord_begin_ok(o, h.id, k as nat, d, propose);
     &&& !live ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidHandle)
-    &&& (live && l.pending.len() > 0) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
-    &&& (live && l.pending.len() == 0 && !ok) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidArgument)
-    &&& (live && l.pending.len() == 0 && ok) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
-    &&& (live && l.pending.len() == 0 && ok && o.next_ticket() == u64::MAX) ==> r == Err::<(Ticket, CoordPlan), Error>(
+    &&& (live && busy) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::Busy)
+    &&& (live && !busy && !ok) ==> r == Err::<(Ticket, CoordPlan), Error>(Error::InvalidArgument)
+    &&& (live && !busy && ok) ==> (r is Ok <==> o.next_ticket() < u64::MAX)
+    &&& (live && !busy && ok && o.next_ticket() == u64::MAX) ==> r == Err::<(Ticket, CoordPlan), Error>(
         Error::IdentifierExhausted,
     )
     &&& r is Err ==> n == o
@@ -1190,8 +1210,8 @@ pub open spec fn coord_finish_result(o: CoordV, n: CoordV, t: Ticket, comp: Coor
 pub open spec fn cplan_class(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: bool, plan: CoordPlan, c: int) -> bool {
     let l = o.leases()[h];
     let lc = o.paged[c].leases[h];
-    let a = lc.c;
-    let w = lc.c + n + d.len() + o.ext_of(c, propose);
+    let a = pfront(o.paged[c], lc);
+    let w = a + n + d.len() + o.ext_of(c, propose);
     &&& plan.write_slots@[c]@.len() == w - a
     &&& forall|q: int| 0 <= q < w - a ==> #[trigger] plan.write_slots@[c]@[q] as int == slot_of(o.b, lc.table, a + q)
     &&& forall|q: int| 0 <= q < w - a ==> (#[trigger] plan.write_slots@[c]@[q] as nat) < o.paged[c].p * o.b
@@ -1199,7 +1219,8 @@ pub open spec fn cplan_class(o: CoordV, h: u64, n: nat, d: Seq<Token>, propose: 
         0 <= q1 < w - a && 0 <= q2 < w - a && q1 != q2 ==> #[trigger] plan.write_slots@[c]@[q1] != #[trigger] plan.write_slots@[c]@[q2]
     &&& forall|q: int| 0 <= q < w - a ==> write_page_ok(o.paged[c], h, #[trigger] lc.table[(a + q) / (o.b as int)])
     &&& plan.page_tables@[c]@ == lc.table.subrange(0, cdiv(w, o.b) as int)
-    &&& forall|j: int| 0 <= j < a ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
+    // §9.0 (b): the computed prefix is valid KV; the rest of `[0, a)` once earlier tickets complete.
+    &&& forall|j: int| 0 <= j < lc.c ==> (o.paged[c].vmap)(#[trigger] slot_of(o.b, lc.table, j)) == l.toks.subrange(0, j + 1)
 }
 
 impl Coordinator {
@@ -1371,33 +1392,43 @@ impl Coordinator {
         let ghost ov = o@;
         let ghost dseq = drafts_seq(drafts);
         let ghost dknown = drafts_known(drafts);
-        match self.lease_live(h) {
-            None => return Err(Error::InvalidHandle),
-            Some(true) => return Err(Error::Busy),
-            Some(false) => {},
+        if self.lease_live(h).is_none() {
+            return Err(Error::InvalidHandle);
         }
-        // Behind no pending ticket, drafts are the host's (D21); a continuation is not yet supported.
+        proof {
+            o.lemma_view();
+            assert(self.paged@[0].valid());
+            assert(ov.paged[0] == o.pv(0));
+        }
+        let (q, pf) = self.paged[0].queue_info(h.id);
+        let cfg = self.cfg_exec();
+        // D21: at most δ + 1 tickets in flight.
+        if q > cfg.delta {
+            return Err(Error::Busy);
+        }
+        // A continuation's deferred drafts are not yet supported (stage H).
         let dv: Vec<Token> = match drafts {
             Drafts::Known(v) => v,
             Drafts::Deferred(_) => return Err(Error::InvalidArgument),
         };
         proof {
             assert(dknown && dv@ == dseq);
-            o.lemma_view();
-            assert(self.paged@[0].valid());
         }
-        let (len, a, _) = self.paged[0].lease_info(h.id);
-        let cfg = self.cfg_exec();
+        // Host-known drafts need an empty queue (D21).
+        if q > 0 && dv.len() > 0 {
+            return Err(Error::Busy);
+        }
+        let (len, _c0, _) = self.paged[0].lease_info(h.id);
         let k = dv.len();
         proof {
             reveal(lease_ok);
             assert(lease_ok(self.pv(0), self.paged@[0].den_log(), h.id));
-            assert(ov.paged[0] == o.pv(0));
         }
-        if n == 0 || n > len - a || k > cfg.lam || (k > 0 && a + n != len) || (propose && (cfg.ntarget >= self.npaged
-            || a + n != len)) {
+        if n == 0 || n > len - pf || k > cfg.lam || (k > 0 && pf + n != len) || (propose && (cfg.ntarget >= self.npaged
+            || pf + n != len)) {
             return Err(Error::InvalidArgument);
         }
+        let ghost a: usize = pf;
         let tid = self.paged[0].next_ticket_exec();
         if tid == u64::MAX {
             return Err(Error::IdentifierExhausted);
@@ -1413,8 +1444,10 @@ impl Coordinator {
                 ov == o@,
                 ov.paged[0] == o.pv(0),
                 o.pv(0).leases.contains_key(h.id),
-                o.pv(0).leases[h.id].pending.len() == 0,
-                o.pv(0).leases[h.id].c == a,
+                q as nat == o.pv(0).leases[h.id].pending.len(),
+                q as nat <= o.pv(0).cfg.delta,
+                q > 0 ==> k == 0,
+                a as nat == pfront(o.pv(0), o.pv(0).leases[h.id]),
                 o.pv(0).leases[h.id].toks.len() == len,
                 0 < n <= len - a,
                 k == dv@.len(),
@@ -1478,15 +1511,24 @@ impl Coordinator {
                 assert(o.pv(c as int).leases[h.id].rho == o.pv(0).leases[h.id].rho);
                 assert(o.pv(c as int).next_ticket == tid);
                 assert(o.pv(c as int).cfg == o.pv(0).cfg);
+                assert(o.pv(c as int).pend == o.pv(0).pend);
+                assert(pfront(o.pv(c as int), o.pv(c as int).leases[h.id]) == a);
                 assert(cfg_rel(o.pv(0).cfg, o.np()));
                 assert(ext as nat == ov.ext_of(c as int, propose));
                 reveal(lease_ok);
                 assert(lease_ok(o.pv(0), o.paged@[0].den_log(), h.id));
-                // The reservation covers the drafts and the proposal rows (D18, I16).
+                // The reservation covers the drafts and the proposal rows (D18, I16): with input
+                // left, the reach is whole, by I16 for an empty queue and by the newest ticket's
+                // record otherwise.
                 assert(a < len);
+                if q > 0 {
+                    reveal(pend_ok);
+                    let tl = o.pv(0).leases[h.id].pending[q - 1];
+                    assert(o.pv(0).pend.contains_key(tl));
+                    assert(pend_ok(o.pv(0), tl));
+                }
                 assert(o.pv(0).leases[h.id].rho == len + o.pv(0).cfg.mu);
                 assert(k + ext <= o.pv(0).cfg.mu);
-                assert(pfront(o.pv(c as int), o.pv(c as int).leases[h.id]) == a);
                 assert(begin_args_ok(o.pv(c as int).leases[h.id], a as nat, n as nat, k as nat, ext as nat, propose));
             }
             let mid_c = self.paged[c].mgr_id();
@@ -1562,7 +1604,7 @@ impl Coordinator {
             write_slots: wslots,
             page_tables: ptabs,
             state_slots: sl,
-            init: a == 0,
+            init: pf == 0,
         };
         proof {
             Self::lemma_begin_post(&o, self, h.id, n as nat, dv@, propose, tid, &plan);
@@ -1574,11 +1616,11 @@ impl Coordinator {
         requires
             o.valid(),
             o.pv(0).leases.contains_key(h),
-            o.pv(0).leases[h].pending.len() == 0,
+            o.pv(0).leases[h].pending.len() <= o.pv(0).cfg.delta,
             tid == o.pv(0).next_ticket,
             tid < u64::MAX,
             0 < n,
-            o.pv(0).leases[h].c + n <= o.pv(0).leases[h].toks.len(),
+            pfront(o.pv(0), o.pv(0).leases[h]) + n <= o.pv(0).leases[h].toks.len(),
             fin.npaged == o.npaged,
             fin.paged@.len() == o.paged@.len(),
             fin.state@ == o.state@,
@@ -1598,12 +1640,15 @@ impl Coordinator {
             plan.num_drafts as nat == d.len(),
             plan.propose == propose,
             plan.state_slots@ == o.slots@[h]@,
-            plan.init == (o.pv(0).leases[h].c == 0),
+            plan.init == (pfront(o.pv(0), o.pv(0).leases[h]) == 0),
             plan.write_slots@.len() == o.np(),
             plan.page_tables@.len() == o.np(),
-            plan.input_ids@ == o.pv(0).leases[h].toks.subrange(o.pv(0).leases[h].c as int, (o.pv(0).leases[h].c + n) as int) + d,
+            plan.input_ids@ == o.pv(0).leases[h].toks.subrange(
+                pfront(o.pv(0), o.pv(0).leases[h]) as int,
+                (pfront(o.pv(0), o.pv(0).leases[h]) + n) as int,
+            ) + d,
             plan.positions@.len() == n + d.len(),
-            forall|q: int| 0 <= q < n + d.len() ==> #[trigger] plan.positions@[q] as int == o.pv(0).leases[h].c + q,
+            forall|q: int| 0 <= q < n + d.len() ==> #[trigger] plan.positions@[q] as int == pfront(o.pv(0), o.pv(0).leases[h]) + q,
             forall|c2: int|
                 0 <= c2 < o.np() ==> {
                     let pl = ExecutionPlan {
@@ -1652,7 +1697,9 @@ impl Coordinator {
             assert(o.pv(c).leases[h].toks == o.pv(0).leases[h].toks);
             assert(o.pv(c).leases[h].c == o.pv(0).leases[h].c);
             assert(o.pv(c).leases[h].rho == o.pv(0).leases[h].rho);
+            assert(o.pv(c).leases[h].pending == o.pv(0).leases[h].pending);
             assert(o.pv(c).pend == o.pv(0).pend);
+            assert(pfront(o.pv(c), o.pv(c).leases[h]) == pfront(o.pv(0), o.pv(0).leases[h]));
             assert(o.pv(c).next_ticket == o.pv(0).next_ticket);
             assert(fin.pv(c).leases.dom() =~= o.pv(c).leases.dom());
             assert(fin.pv(0).leases.dom() =~= o.pv(0).leases.dom());
@@ -1681,7 +1728,7 @@ impl Coordinator {
         assert forall|c2: int| 0 <= c2 < ov.np implies #[trigger] cplan_class(ov, h, n, d, propose, *plan, c2) by {
             assert(ov.paged[c2] == o.pv(c2));
             assert(o.pv(c2).leases[h].pending == o.pv(0).leases[h].pending);
-            assert(pfront(o.pv(c2), o.pv(c2).leases[h]) == o.pv(c2).leases[h].c);
+            assert(o.pv(c2).pend == o.pv(0).pend);
             assert(o.paged@[c2].valid());
             assert(o.pv(c2).b == o.b as nat);
             assert(o.pv(c2).leases.contains_key(h));

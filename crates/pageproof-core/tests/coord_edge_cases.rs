@@ -696,8 +696,8 @@ fn drafter_classes_need_drafts() {
     // §7: Cx ≠ ∅ with λ = 0 is a ConfigError; so is a configuration with only drafter classes.
     assert_eq!(Coordinator::create(4, 64, &[16], &[16], &[], 4, 0, 0, NS).err(), Some(Error::ConfigError));
     assert_eq!(Coordinator::create(4, 64, &[], &[16], &[], 4, 2, 0, NS).err(), Some(Error::ConfigError));
-    // δ > 0 lands in stage F.
-    assert_eq!(Coordinator::create(4, 64, &[16], &[], &[], 4, 2, 1, NS).err(), Some(Error::ConfigError));
+    // δ is capped at 1.
+    assert_eq!(Coordinator::create(4, 64, &[16], &[], &[], 4, 2, 2, NS).err(), Some(Error::ConfigError));
 }
 
 #[test]
@@ -784,4 +784,131 @@ fn drafter_and_target_pages_are_hit_together() {
     assert_eq!(&v2.tables[1][..2], &v1.tables[1][..2]);
     co.release(h1).unwrap();
     co.release(h2).unwrap();
+}
+
+// ---- v0.5 ZOS: ticket queues of up to δ + 1 tickets (D21) ----
+
+/// One target class and one state class, `δ = 1`.
+fn zos_coord(nslab: usize, lam: usize) -> Coordinator {
+    Coordinator::create(nslab, 64, &[16], &[], &[8], 4, lam, 1, NS).unwrap()
+}
+
+#[test]
+fn zos_reach_is_two_lambda() {
+    // D18: μ = (δ + 1)·λ; δ > 1 is a ConfigError.
+    let mut co = zos_coord(8, 2);
+    let (h, _, _) = co.attach(&toks(5, 20)).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.mu, iv.delta, iv.reach), (4, 1, 9));
+    assert_eq!(Coordinator::create(8, 64, &[16], &[], &[], 4, 2, 2, NS).err(), Some(Error::ConfigError));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn zos_pipelined_chunks() {
+    // §7: two chunks in flight; the second plans from p_h, not c_h; finishes run in order.
+    let mut co = zos_coord(8, 1);
+    let (h, _, _) = co.attach(&toks(12, 21)).unwrap();
+    let (t1, p1) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    let (t2, p2) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(p1.positions, vec![0, 1, 2, 3]);
+    assert_eq!(p2.positions, vec![4, 5, 6, 7]);
+    assert!(p1.init && !p2.init);
+    assert_eq!(p1.state_slots, p2.state_slots);
+    for (q, s) in p2.write_slots[0].iter().enumerate() {
+        assert_eq!(*s, co.slot_of(0, h, 4 + q).unwrap());
+    }
+    // A third ticket overflows the queue.
+    assert_eq!(co.begin_write(h, 4, Drafts::Known(vec![]), false).err(), Some(Error::Busy));
+    // Out of order: only the oldest ticket can finish.
+    assert_eq!(co.finish_write(t2, done(t2)).err(), Some(Error::InvalidTicket));
+    assert_eq!(co.inspect(h).unwrap().pending, Some(t1));
+    assert_eq!(co.finish_write(t1, done(t1)).unwrap(), 4);
+    assert_eq!(co.inspect(h).unwrap().computed, 4);
+    let (t3, p3) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(p3.positions, vec![8, 9, 10, 11]);
+    assert_eq!(co.finish_write(t2, done(t2)).unwrap(), 8);
+    assert_eq!(co.finish_write(t3, done(t3)).unwrap(), 12);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.computed, iv.pending), (12, None));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn zos_drafts_need_an_empty_queue() {
+    // D21: host-known drafts behind a pending ticket are Busy; without drafts the chunk queues.
+    let mut co = zos_coord(8, 2);
+    let (h, _, _) = co.attach(&toks(8, 22)).unwrap();
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.begin_write(h, 4, Drafts::Known(vec![7]), false).err(), Some(Error::Busy));
+    let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t1, done(t1)).unwrap();
+    co.finish_write(t2, done(t2)).unwrap();
+    // With an empty queue drafts are accepted again.
+    co.extend(h, &[9]).unwrap();
+    let (t3, p3) = co.begin_write(h, 1, Drafts::Known(vec![10, 11]), false).unwrap();
+    assert_eq!(p3.num_drafts, 2);
+    co.finish_write(t3, done_n(t3, 1)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn zos_extend_with_a_pending_ticket() {
+    // D21: extend is allowed while a k = 0 ticket covering the whole input is pending.
+    let mut co = zos_coord(8, 1);
+    let (h, _, _) = co.attach(&toks(8, 23)).unwrap();
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    // Positions [4, 8) are neither computed nor planned.
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    // A full queue is Busy for extend too.
+    assert_eq!(co.extend(h, &[1]).err(), Some(Error::Busy));
+    co.finish_write(t1, done(t1)).unwrap();
+    co.extend(h, &[1, 2]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (10, 4, 12));
+    let (t3, p3) = co.begin_write(h, 2, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(p3.positions, vec![8, 9]);
+    co.finish_write(t2, done(t2)).unwrap();
+    co.finish_write(t3, done(t3)).unwrap();
+    assert_eq!(co.inspect(h).unwrap().computed, 10);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn zos_extend_behind_a_verify_is_busy() {
+    // D21: a pending ticket with drafts makes extend Busy.
+    let mut co = zos_coord(8, 2);
+    let (h, _, _) = co.attach(&toks(4, 24)).unwrap();
+    compute_all(&mut co, h);
+    co.extend(h, &[5]).unwrap();
+    let (t, _) = co.begin_write(h, 1, Drafts::Known(vec![6]), false).unwrap();
+    assert_eq!(co.extend(h, &[7]).err(), Some(Error::Busy));
+    co.finish_write(t, done(t)).unwrap();
+    co.extend(h, &[7]).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn delta_zero_rejects_a_second_ticket() {
+    // §7: with δ = 0 the queue holds one ticket.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 1, 0, NS).unwrap();
+    let (h, _, _) = co.attach(&toks(8, 25)).unwrap();
+    let (t, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.begin_write(h, 4, Drafts::Known(vec![]), false).err(), Some(Error::Busy));
+    co.finish_write(t, done(t)).unwrap();
+    co.release(h).unwrap();
+}
+
+#[test]
+fn zos_release_with_pending_tickets_is_busy() {
+    let mut co = zos_coord(8, 1);
+    let (h, _, _) = co.attach(&toks(8, 26)).unwrap();
+    let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!(co.release(h).err(), Some(Error::Busy));
+    co.finish_write(t1, done(t1)).unwrap();
+    assert_eq!(co.release(h).err(), Some(Error::Busy));
+    co.finish_write(t2, done(t2)).unwrap();
+    co.release(h).unwrap();
 }
