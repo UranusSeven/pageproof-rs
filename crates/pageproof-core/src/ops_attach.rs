@@ -27,15 +27,18 @@ pub open spec fn revoke(keys: Seq<Option<Digest>>, fresh: Seq<PageId>) -> Seq<Op
 /// Legal page-table choice for `attach` (C1 success postconditions on the table), at an exact
 /// `k*` of this class.
 pub open spec fn attach_choice(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> bool {
-    &&& is_kstar(v, toks, table.len(), kstar)
+    &&& is_kstar(v, toks, cdiv(toks.len(), v.b), kstar)
     &&& attach_choice_k(v, toks, table, kstar)
 }
 
 /// Legal page-table choice for a given hit prefix `k` (no maximality: the coordinator's joint
 /// `k*` may be shorter than this class's own run).
 pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> bool {
-    &&& 1 <= toks.len() <= v.p * v.b
-    &&& blocks_for(toks.len(), v.b, table.len())
+    &&& 1 <= toks.len()
+    &&& toks.len() + v.cfg.mu <= v.p * v.b
+    // The table covers the reach L + μ (D18); k* is capped by the input's own blocks.
+    &&& blocks_for(toks.len() + v.cfg.mu, v.b, table.len())
+    &&& kstar + 1 <= cdiv(toks.len(), v.b)
     &&& kstar + 1 <= table.len()
     &&& table.no_duplicates()
     &&& forall|i: int| 0 <= i < table.len() ==> (#[trigger] table[i] as nat) < v.p
@@ -54,7 +57,7 @@ pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, 
 pub open spec fn attached(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, kstar: nat) -> MgrV {
     let h = v.next_handle;
     MgrV {
-        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: None }),
+        leases: v.leases.insert(h, LeaseV { toks, table, c: kstar * v.b, pending: Seq::empty(), rho: toks.len() + v.cfg.mu, dfr: false, stopped: false }),
         refs: inc_seq(v.refs, table, table.len() as int),
         keys: revoke(v.keys, table.subrange(kstar as int, table.len() as int)),
         holders: Seq::new(
@@ -74,9 +77,10 @@ pub open spec fn attach_result(
     r: Result<(Handle, usize, PageTableView), Error>,
 ) -> bool {
     let m = cdiv(toks.len(), v.b);
-    let ok_in = 1 <= toks.len() <= v.p * v.b;
+    let mr = cdiv(toks.len() + v.cfg.mu, v.b);
+    let ok_in = 1 <= toks.len() && toks.len() + v.cfg.mu <= v.p * v.b;
     &&& toks.len() == 0 ==> r == Err::<(Handle, usize, PageTableView), Error>(Error::InvalidArgument)
-    &&& (toks.len() > 0 && toks.len() > v.p * v.b) ==> r == Err::<(Handle, usize, PageTableView), Error>(
+    &&& (toks.len() > 0 && toks.len() + v.cfg.mu > v.p * v.b) ==> r == Err::<(Handle, usize, PageTableView), Error>(
         Error::RequestTooLarge,
     )
     &&& (ok_in && v.next_handle == u64::MAX) ==> r == Err::<(Handle, usize, PageTableView), Error>(
@@ -86,15 +90,15 @@ pub open spec fn attach_result(
         Error::NoCapacity,
     ))
     &&& r == Err::<(Handle, usize, PageTableView), Error>(Error::NoCapacity) ==> exists|k: nat|
-        is_kstar(v, toks, m, k) && v.free_set().len() < m - count_active(v, toks, k)
+        is_kstar(v, toks, m, k) && v.free_set().len() < mr - count_active(v, toks, k)
     &&& r matches Ok((h, cached, view)) ==> {
         let kstar = cached as nat / v.b;
         &&& ok_in
         &&& h == Handle { mgr: v.id, id: v.next_handle }
         &&& cached as nat == kstar * v.b
-        &&& view.pages@.len() == m
+        &&& view.pages@.len() == mr
         &&& is_kstar(v, toks, m, kstar)
-        &&& v.free_set().len() >= m - count_active(v, toks, kstar)
+        &&& v.free_set().len() >= mr - count_active(v, toks, kstar)
         &&& attach_choice(v, toks, view.pages@, kstar)
         &&& v2 == attached(v, toks, view.pages@, kstar)
     }
@@ -127,11 +131,12 @@ pub proof fn lemma_attach_capacity_iff(
 )
     requires
         attach_result(v, v2, toks, r),
-        1 <= toks.len() <= v.p * v.b,
+        1 <= toks.len(),
+        toks.len() + v.cfg.mu <= v.p * v.b,
         v.next_handle < u64::MAX,
         is_kstar(v, toks, cdiv(toks.len(), v.b), k),
     ensures
-        r is Ok <==> v.free_set().len() >= cdiv(toks.len(), v.b) - count_active(v, toks, k),
+        r is Ok <==> v.free_set().len() >= cdiv(toks.len() + v.cfg.mu, v.b) - count_active(v, toks, k),
         r is Err ==> r == Err::<(Handle, usize, PageTableView), Error>(Error::NoCapacity),
         r matches Ok((h, cached, view)) ==> cached as nat == k * v.b,
 {
@@ -140,7 +145,8 @@ pub proof fn lemma_attach_capacity_iff(
         let (h, cached, view) = r->Ok_0;
         lemma_kstar_unique(v, toks, m, cached as nat / v.b, k);
     } else {
-        let k2 = choose|k2: nat| is_kstar(v, toks, m, k2) && v.free_set().len() < m - count_active(v, toks, k2);
+        let mr = cdiv(toks.len() + v.cfg.mu, v.b);
+        let k2 = choose|k2: nat| is_kstar(v, toks, m, k2) && v.free_set().len() < mr - count_active(v, toks, k2);
         lemma_kstar_unique(v, toks, m, k2, k);
     }
 }
@@ -290,6 +296,8 @@ pub proof fn lemma_attach_inv(v: MgrV, log: Log, toks: Seq<Token>, table: Seq<Pa
     }
     assert(table.subrange(0, m as int) =~= table);
     lemma_mul_mono(kstar, (m - 1) as nat, v.b);
+    lemma_cdiv_props(toks.len(), v.b);
+    lemma_mul_mono(kstar, (cdiv(toks.len(), v.b) - 1) as nat, v.b);
     // The new lease.
     assert forall|j: int| 0 <= j < l.c implies (v2.vmap)(#[trigger] slot_of(v2.b, l.table, j)) == l.toks.subrange(
         0,
@@ -801,12 +809,18 @@ fn inc_pages(refs: &mut Vec<u64>, tbl: &Vec<PageId>)
         proof {
             let post = tbl@.subrange(0, i + 1);
             assert(post =~= pre.push(x));
+            assert(r0[tbl@[i as int] as int] < u64::MAX);
             assert forall|y: int| 0 <= y < r0.len() implies refs@[y] == inc_seq(r0, tbl@, i + 1)[y] by {
                 vstd::seq_lib::lemma_seq_contains_after_push(pre, x, y as PageId);
+                assert(tbl@.subrange(0, i + 1) == post);
                 if y == x as int {
                     assert(post[i as int] == x);
+                    assert(post.contains(x));
+                    assert(refs@[y] == r0[y] + 1);
                 } else {
                     assert(before[y] == inc_seq(r0, tbl@, i as int)[y]);
+                    assert(refs@[y] == before[y]);
+                    assert(post.contains(y as PageId) == pre.contains(y as PageId));
                 }
             }
             assert(refs@ =~= inc_seq(r0, tbl@, i + 1));
@@ -967,11 +981,12 @@ impl Manager {
     pub fn attach_commit(&mut self, toks: &[Token], pr: Probe) -> (r: (Handle, usize, PageTableView))
         requires
             old(self).valid(),
-            1 <= toks@.len() <= old(self)@.p * old(self)@.b,
+            1 <= toks@.len(),
+            toks@.len() + old(self)@.cfg.mu <= old(self)@.p * old(self)@.b,
             old(self)@.next_handle < u64::MAX,
             probe_ok(old(self)@, old(self).den_log(), toks@, pr),
             pr.hits@.len() + 1 <= cdiv(toks@.len(), old(self)@.b),
-            old(self)@.free_set().len() >= cdiv(toks@.len(), old(self)@.b) - count_active(
+            old(self)@.free_set().len() >= cdiv(toks@.len() + old(self)@.cfg.mu, old(self)@.b) - count_active(
                 old(self)@,
                 toks@,
                 pr.hits@.len() as nat,
@@ -981,7 +996,7 @@ impl Manager {
             final(self).den_log() == old(self).den_log(),
             r.0 == (Handle { mgr: old(self)@.id, id: old(self)@.next_handle }),
             r.1 as nat == pr.hits@.len() * old(self)@.b,
-            r.2.pages@.len() == cdiv(toks@.len(), old(self)@.b),
+            r.2.pages@.len() == cdiv(toks@.len() + old(self)@.cfg.mu, old(self)@.b),
             attach_choice_k(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
             final(self)@ == attached(old(self)@, toks@, r.2.pages@, pr.hits@.len() as nat),
     {
@@ -1004,6 +1019,16 @@ impl Manager {
             lemma_cdiv_props(n as nat, b as nat);
             assert(m as nat == cdiv(n as nat, b as nat));
             assert(blocks_for(n as nat, b as nat, m as nat));
+        }
+        let _ = m;
+        // The table covers the reach `L + μ` (D18).
+        let nr = n + self.cfg.mu;
+        let mr = (nr + b - 1) / b;
+        proof {
+            lemma_cdiv_props(nr as nat, b as nat);
+            lemma_cdiv_mono(n as nat, nr as nat, b as nat);
+            assert(mr as nat == cdiv(nr as nat, b as nat));
+            assert(blocks_for(nr as nat, b as nat, mr as nat));
         }
         let hits = pr.hits;
         let head = pr.head;
@@ -1047,7 +1072,7 @@ impl Manager {
                 }
             }
         }
-        take_fresh(&mut self.free, &mut self.keys, &mut self.index, &mut table, m - kstar, Ghost(p as nat));
+        take_fresh(&mut self.free, &mut self.keys, &mut self.index, &mut table, mr - kstar, Ghost(p as nat));
         proof {
             lemma_free_of(p as nat, v.refs, v.own);
             assert forall|i: int| 0 <= i < table@.len() implies (#[trigger] table@[i] as nat) < v.p && v.refs[table@[i] as int]
@@ -1068,7 +1093,7 @@ impl Manager {
         let h = self.next_handle;
         self.next_handle = h + 1;
         let tcopy = vstd::slice::slice_to_vec(table.as_slice());
-        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: None, head };
+        let lease = LeaseC { toks: vstd::slice::slice_to_vec(toks), table: tcopy, c: kstar * b, pending: Vec::new(), rho: nr, dfr: false, stopped: false, head };
         self.leases.insert(h, lease);
         let ghost v2 = attached(v, toks@, table@, kstar as nat);
         proof {
@@ -1149,7 +1174,7 @@ impl Manager {
         }
         let b = self.b;
         let p = self.p;
-        if n > p * b {
+        if n > p * b || self.cfg.mu > p * b - n {
             return Err(Error::RequestTooLarge);
         }
         if self.next_handle == u64::MAX {
@@ -1164,6 +1189,12 @@ impl Manager {
             lemma_cdiv_props(n as nat, b as nat);
             assert(m as nat == cdiv(n as nat, b as nat));
         }
+        let mr = (n + self.cfg.mu + b - 1) / b;
+        proof {
+            lemma_cdiv_props((n + self.cfg.mu) as nat, b as nat);
+            lemma_cdiv_mono(n as nat, (n + self.cfg.mu) as nat, b as nat);
+            assert(mr as nat == cdiv((n + self.cfg.mu) as nat, b as nat));
+        }
         let pr = self.probe_prefix(toks, m - 1);
         let ghost kstar = pr.hits@.len();
         let u = count_hits_active(&pr.hits);
@@ -1171,9 +1202,9 @@ impl Manager {
             lemma_n_active_eq(v, toks@, pr.hits@, kstar as nat);
             assert(is_kstar(v, toks@, m as nat, kstar as nat));
         }
-        if self.free.len() < m - u {
+        if self.free.len() < mr - u {
             proof {
-                assert(is_kstar(v, toks@, m as nat, kstar as nat) && v.free_set().len() < m - count_active(
+                assert(is_kstar(v, toks@, m as nat, kstar as nat) && v.free_set().len() < mr - count_active(
                     v,
                     toks@,
                     kstar as nat,

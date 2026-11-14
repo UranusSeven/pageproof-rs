@@ -439,3 +439,32 @@ fn index_buckets_stay_bounded_under_churn() {
     }
     assert_eq!(m.free_count(), p);
 }
+
+#[test]
+fn reclaim_revokes_the_keys_of_its_range() {
+    // §3.5 rule 3, obligation 12: reclaiming a slab revokes every key in it. This checks it
+    // directly on one paged class, through the same `reclaim_range` and `grant_range` the
+    // coordinator's slab plan calls; `coord_edge_cases.rs::
+    // paged_only_reclaim_revokes_the_keys_of_its_slab` checks it through a coordinator. One page
+    // per slab.
+    let t = toks(12, 41);
+    for (revoked, cached) in [(1usize, 4usize), (0, 0)] {
+        let mut m = mgr(4, 4);
+        let (h, _, v) = m.attach(&t).unwrap();
+        compute_all(&mut m, h);
+        m.release(h).unwrap();
+        // Control: with every slab kept, both complete blocks are hits.
+        let (h, c, _) = m.attach(&t).unwrap();
+        assert_eq!(c, 8);
+        m.release(h).unwrap();
+        // Reclaim the slab of block `revoked` and give it straight back: unowned, then a fresh
+        // free page with no key.
+        let pg = v.pages[revoked];
+        assert!(m.range_idle(pg, 1));
+        m.reclaim_range(pg, 1);
+        m.grant_range(pg, 1);
+        let (h, c, _) = m.attach(&t).unwrap();
+        assert_eq!(c, cached, "block {revoked}'s key must be gone");
+        m.release(h).unwrap();
+    }
+}

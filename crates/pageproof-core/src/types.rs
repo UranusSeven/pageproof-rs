@@ -64,16 +64,37 @@ pub struct RequestView {
     pub block_size: usize,
 }
 
+/// A live lease's metadata in one read (C6, per class).
+pub struct LeaseMeta {
+    pub len: usize,
+    pub computed: usize,
+    pub reach: usize,
+    pub planned: usize,
+    pub slack: usize,
+    pub deferred: bool,
+    pub stopped: bool,
+    pub queue: Vec<u64>,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Abstract state (§3.2)
 // ---------------------------------------------------------------------------------------------
 
-/// `Req[h]`: input `T_h`, page table `M_h`, frontier `c_h`, optional pending ticket id.
+/// `Req[h]`: input `T_h`, page table `M_h`, frontier `c_h`, and `Q_h`, the ids of its pending
+/// tickets in issue order (at most `δ + 1 <= 2`).
 pub ghost struct LeaseV {
     pub toks: Seq<Token>,
     pub table: Seq<PageId>,
     pub c: nat,
-    pub pending: Option<u64>,
+    pub pending: Seq<u64>,
+    /// `ρ_h`: the reach, the number of token positions the page table covers (D18).
+    pub rho: nat,
+    /// `X_h` is non-empty (D22). With `δ <= 1` the deferred tail holds at most one ticket, and
+    /// then it is `Q_h[0]`, so `X_h = if dfr { [Q_h[0]] } else { [] }`.
+    pub dfr: bool,
+    /// `stopped_h` (D25): a completion with `stop` ended the lease; every ticket left in its
+    /// queue is an orphan (I18).
+    pub stopped: bool,
 }
 
 /// `Pending[t]`: lease, original frontier `a`, interval end `z`.
@@ -81,6 +102,47 @@ pub ghost struct PendV {
     pub lease: u64,
     pub a: nat,
     pub z: nat,
+    /// The draft tokens fed after the input (D16); empty unless `z = |T_h|`.
+    pub drafts: Seq<Token>,
+    /// The drafter classes also write proposal rows (D20).
+    pub propose: bool,
+    /// The drafts are a continuation's deferred drafts, placeholders until its completion
+    /// reports the accepted ones (D24).
+    pub ddr: bool,
+}
+
+/// Configuration fixed at create and shared by every paged class (I10).
+pub ghost struct PCfg {
+    /// `μ`: the reservation margin, positions reserved past the planned input (D18).
+    pub mu: nat,
+    /// `λ`: the maximum number of drafts per ticket (D16).
+    pub lam: nat,
+    /// `δ`: the ZOS depth (D21).
+    pub delta: nat,
+    /// Paged classes `[0, ntarget)` are target classes, the rest drafter classes (D20).
+    pub ntarget: nat,
+}
+
+/// Concrete `PCfg`.
+#[derive(Clone, Copy)]
+pub struct PCfgC {
+    pub mu: usize,
+    pub lam: usize,
+    pub delta: usize,
+    pub ntarget: usize,
+}
+
+impl View for PCfgC {
+    type V = PCfg;
+
+    open spec fn view(&self) -> PCfg {
+        PCfg { mu: self.mu as nat, lam: self.lam as nat, delta: self.delta as nat, ntarget: self.ntarget as nat }
+    }
+}
+
+/// The configuration of a v0.2.1 manager: no reservation, no drafts, no ZOS.
+pub open spec fn v021_cfg() -> PCfg {
+    PCfg { mu: 0, lam: 0, delta: 0, ntarget: 1 }
 }
 
 /// The abstract manager state. `F` is derived (`free_set`), `Index` is derived from `keys`
@@ -90,6 +152,8 @@ pub ghost struct MgrV {
     pub p: nat,
     pub b: nat,
     pub ns: Seq<u8>,
+    /// Configuration shared by every paged class of a coordinator (I10).
+    pub cfg: PCfg,
     pub leases: Map<u64, LeaseV>,
     pub pend: Map<u64, PendV>,
     pub refs: Seq<u64>,
@@ -139,7 +203,7 @@ impl MgrV {
 
     /// I10: configuration is fixed for the manager's lifetime.
     pub open spec fn same_config(self, o: MgrV) -> bool {
-        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns
+        self.id == o.id && self.p == o.p && self.b == o.b && self.ns == o.ns && self.cfg == o.cfg
     }
 }
 

@@ -3,9 +3,9 @@
 ## What is proved
 
 `scripts/verify.sh` runs Verus on `crates/pageproof-core` at a fixed `--rlimit 20` and fails on
-any error, timeout or rlimit exhaustion. Every public method of `Coordinator` (contract v0.3
-C0–C7) and of `Manager` (v0.2.1 C0–C6, the paged-class building block) is proved on its real
-body, with machine integers. See
+any error, timeout or rlimit exhaustion. Every public method of `Coordinator` (contract v0.6
+C0–C7 and C2b) and of `Manager` (v0.2.1 C0–C6, the paged-class building block) is proved on its
+real body, with machine integers. See
 [SPEC_NOTES.md](SPEC_NOTES.md) for the exact statement of each result and any deviations.
 
 ## What is trusted
@@ -37,15 +37,15 @@ Exact hashes are in [toolchain.json](toolchain.json).
   `ε ≤ Q²/2²⁵⁷ + Q/2²⁵⁶`.
 
 The core also uses these vstd-provided specs (vstd's own trusted base, not added here):
-`Vec` push/pop/index/set/swap_remove/extend_from_slice, `HashMap` get/insert/remove/contains_key
-(with the `u64` key model axiom), `slice_subrange`, `slice_to_vec`, and `AtomicU64`
-load/compare_exchange.
+`Vec` new/push/pop/index/set/remove/swap_remove/extend_from_slice and `vec![x; n]`, `HashMap`
+new/get/insert/remove/contains_key (with the `u64` key model axiom), `slice_subrange`,
+`slice_to_vec`, and `AtomicU64` load/compare_exchange.
 
 ## External assumptions (contract §9.0)
 
 | | Status here |
 |---|---|
-| E1 completion is real | Assumed. `finish_write` requires `Completion { ticket }` to name the ticket; truth is the executor's obligation. |
+| E1 completion is real | Assumed. `finish_write` requires the completion to name the ticket; truth is the executor's obligation. |
 | E2 KV depends only on the prefix | Assumed. Ghost `V` records provenance, not numerics. |
 | E3 single-threaded | Enforced in Rust by `&mut self`. The PyO3 class is `unsendable`. The process-global manager-id counter is atomic. |
 | Manager-id uniqueness | Trusted (see SPEC_NOTES). Relies on `AtomicU64` behaving as a counter. vstd gives no spec for its return values. Runtime-tested only. |
@@ -56,12 +56,15 @@ load/compare_exchange.
 | E8 SHA-256 collision resistance | The single trusted wrapper above. |
 | E9 arena base and addressing | Assumed. The coordinator never allocates device memory. It proves that owned units of all classes occupy disjoint byte ranges `[g·u_c, (g+1)·u_c)` inside `[0, N·S)` (`theorem_arena_disjoint`). That the arena base is aligned and that kernels address `base + g·u_c` is the executor's obligation. |
 | E10 state initialisation | Assumed. A plan with `init = true` requires the executor to initialise each state slot before reading it. Freed and reclaimed state units are not cleared (their ghost `W` is `⊥`). |
+| E11 state rebuild after a verify | Assumed. It enters only as `finish_write`'s ghost update `W = T'_h[0:c'_h]`. The plan exposes `num_drafts`. |
+| E12 drafter executor | Assumed. It enters only as `finish_write`'s ghost `V` and publication in drafter classes. The plan exposes `propose` and the drafter write range. |
+| E13 ZOS executor | Assumed. It enters only as `finish_write`'s ghost updates for a ticket behind another or with deferred inputs, and as the fact that an orphan's window lies at or past `c_h`. The plan exposes `producer`, `lo` and `slack`; the completion's `accepted`, `token` and `drafts` must be the device's values. |
 
 ## Not covered
 
 - `crates/pageproof-py` and `python/demo.py` are not verified. The shim only converts types. Its
-  one judgement call is that `finish_write(ticket)` constructs `Completion { ticket }`: calling it
-  is the executor's E1 assertion (in every class, for the coordinator).
+  one judgement call is that `finish_write(ticket, ...)` builds the completion from its arguments:
+  calling it is the executor's E1 and E13 assertion (in every class, for the coordinator).
 - The OS, allocator, CPython, and the dynamic loader.
 - Allocation failure, panics in std, and process termination (contract §5 excludes these).
 - Byte-level memory. The proof bounds element counts (`Manager::lemma_bounded`). That `Vec` and

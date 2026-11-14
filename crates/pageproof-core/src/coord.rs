@@ -31,9 +31,180 @@ pub open spec fn psum(per: Seq<usize>, k: int, m: nat) -> nat
     }
 }
 
+/// The configuration every paged class of a coordinator shares (§3.1, D18, D20, D21):
+/// `μ = (δ + 1)·λ`, plus `λ` when there are drafter classes `[ntarget, np)`.
+pub open spec fn cfg_rel(c: PCfg, np: nat) -> bool {
+    &&& 1 <= c.ntarget <= np
+    &&& c.lam <= max_slots()
+    &&& c.delta <= 1
+    &&& c.mu == create_mu(c.lam, c.delta, (np - c.ntarget) as nat)
+}
+
+/// The configuration checks `create` makes before it builds anything (C0).
+pub open spec fn create_early_ok(pu: Seq<usize>, du: Seq<usize>, lambda: nat, delta: nat) -> bool {
+    &&& pu.len() >= 1
+    &&& du.len() > 0 ==> lambda > 0
+    &&& delta <= 1
+    &&& lambda <= max_slots()
+    &&& create_mu(lambda, delta, du.len()) <= max_slots()
+}
+
+/// `μ = (δ + 1)·λ`, plus `λ` with drafter classes (D18).
+pub open spec fn create_mu(lambda: nat, delta: nat, nd: nat) -> nat {
+    lambda + (if delta == 1 { lambda } else { 0 }) + (if nd > 0 { lambda } else { 0 })
+}
+
+/// `n_c = S / u_c` for every class.
+pub open spec fn per_of(sbytes: nat, units: Seq<usize>) -> Seq<usize> {
+    Seq::new(units.len(), |c: int| (sbytes / (units[c] as nat)) as usize)
+}
+
 /// `Fits(m)` of §3.1: a lease of `m` blocks fits in an otherwise empty arena.
 pub open spec fn fits(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m: nat) -> bool {
     psum(per, np as int, m) + nstate <= nslab
+}
+
+/// `Fits(m)` over per-class unit counts `per` (§3.5): `Σ_{c < np} ceil(m / per[c]) + nst <= nslab`.
+pub fn fits_vec(per: &Vec<usize>, np: usize, nst: usize, nslab: usize, m: usize) -> (r: bool)
+    requires
+        np <= per@.len(),
+        np < 0x1_0000,
+        nst < 0x1_0000,
+        forall|i: int| 0 <= i < np ==> #[trigger] per@[i] >= 1,
+    ensures
+        r == fits(per@, np as nat, nst as nat, nslab as nat, m as nat),
+{
+    let mut sum: u128 = 0;
+    let mut i: usize = 0;
+    while i < np
+        invariant
+            np <= per@.len(),
+            forall|k: int| 0 <= k < np ==> #[trigger] per@[k] >= 1,
+            i <= np,
+            sum as nat == psum(per@, i as int, m as nat),
+            sum as nat <= i * (m as nat),
+            np < 0x1_0000,
+        decreases np - i,
+    {
+        let p = per[i];
+        proof {
+            assert(per@[i as int] >= 1);
+            if m > 0 {
+                vstd::arithmetic::div_mod::lemma_div_plus_one((m - 1) as int, p as int);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator((m - 1) as int, 1, p as int);
+            }
+        }
+        let q: usize = if m == 0 { 0 } else { (m - 1) / p + 1 };
+        proof {
+            if m == 0 {
+                assert(cdiv(0, p as nat) == 0) by {
+                    vstd::arithmetic::div_mod::lemma_basic_div((p - 1) as int, p as int);
+                }
+            }
+            assert(q as nat == cdiv(m as nat, p as nat));
+            assert(q <= m);
+            lemma_mul_succ(i as nat, m as nat);
+            assert((i + 1) * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires i + 1 <= 0x1_0000;
+            assert(0x1_0000 * (m as nat) <= u128::MAX) by (nonlinear_arith) requires m as nat <= u64::MAX;
+        }
+        sum = sum + q as u128;
+        i += 1;
+    }
+    proof {
+        assert(np * (m as nat) <= 0x1_0000 * (m as nat)) by (nonlinear_arith) requires np <= 0x1_0000;
+        assert(0x1_0000 * (m as nat) <= u64::MAX * 0x1_0000) by (nonlinear_arith) requires m as nat <= u64::MAX;
+        assert(nst < 0x1_0000);
+    }
+    sum + (nst as u128) <= nslab as u128
+}
+
+/// C0's last check: a one-token lease with its reservation fits, `Fits(ceil((1 + μ)/B))`.
+#[verifier::opaque]
+pub open spec fn create_fits_ok(nslab: nat, sbytes: nat, b: nat, pu: Seq<usize>, du: Seq<usize>, su: Seq<usize>, lambda: nat, delta: nat) -> bool {
+    fits(per_of(sbytes, pu + du + su), pu.len() + du.len(), su.len(), nslab, cdiv(1 + create_mu(lambda, delta, du.len()), b))
+}
+
+/// Decides `create_fits_ok` from the unit counts `create` computed, before any identifier is taken.
+fn create_fits(
+    per: &Vec<usize>,
+    Ghost(pu): Ghost<Seq<usize>>,
+    Ghost(du): Ghost<Seq<usize>>,
+    Ghost(su): Ghost<Seq<usize>>,
+    np: usize,
+    nst: usize,
+    nslab: usize,
+    Ghost(sbytes): Ghost<usize>,
+    b: usize,
+    Ghost(lambda): Ghost<usize>,
+    Ghost(delta): Ghost<usize>,
+    mu: usize,
+) -> (r: bool)
+    requires
+        b >= 1,
+        sbytes >= 1,
+        np == pu.len() + du.len(),
+        nst == su.len(),
+        mu as nat == create_mu(lambda as nat, delta as nat, du.len()),
+        mu as nat <= max_slots(),
+        per@.len() == pu.len() + du.len() + su.len(),
+        pu.len() + du.len() + su.len() < 0x1_0000,
+        forall|k: int| 0 <= k < per@.len() ==> {
+            &&& #[trigger] (pu + du + su)[k] >= 1
+            &&& per@[k] == sbytes / (pu + du + su)[k]
+            &&& per@[k] >= 1
+        },
+    ensures
+        r == create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu, du, su, lambda as nat, delta as nat),
+        per@ == per_of(sbytes as nat, pu + du + su),
+        r == fits(per@, pu.len() + du.len(), su.len(), nslab as nat, cdiv(1 + mu as nat, b as nat)),
+{
+    reveal(create_fits_ok);
+    let ghost all = pu + du + su;
+    assert(per@ =~= per_of(sbytes as nat, all)) by {
+        assert forall|k: int| 0 <= k < per@.len() implies #[trigger] per@[k] == per_of(sbytes as nat, all)[k] by {
+            assert(per@[k] == sbytes / all[k]);
+        }
+    }
+    let n1 = 1 + mu;
+    let m1 = (n1 - 1) / b + 1;
+    proof {
+        vstd::arithmetic::div_mod::lemma_div_plus_one((n1 - 1) as int, b as int);
+        assert(((n1 - 1 + b) as int) / (b as int) == ((n1 - 1) as int) / (b as int) + 1);
+        assert(m1 as nat == cdiv(n1 as nat, b as nat));
+    }
+    proof {
+        assert forall|k: int| 0 <= k < np implies #[trigger] per@[k] >= 1 by {
+            assert(per@[k] >= 1);
+        }
+    }
+    fits_vec(per, np, nst, nslab, m1)
+}
+
+/// `psum` is monotone in the block count.
+pub proof fn lemma_psum_mono(per: Seq<usize>, k: int, m1: nat, m2: nat)
+    requires
+        m1 <= m2,
+        forall|i: int| 0 <= i < k ==> #[trigger] per[i] >= 1,
+    ensures
+        psum(per, k, m1) <= psum(per, k, m2),
+    decreases k,
+{
+    if k > 0 {
+        lemma_psum_mono(per, k - 1, m1, m2);
+        lemma_cdiv_mono(m1, m2, per[k - 1] as nat);
+    }
+}
+
+/// `Fits` is monotone: a smaller lease fits whenever a larger one does.
+pub proof fn lemma_fits_mono(per: Seq<usize>, np: nat, nstate: nat, nslab: nat, m1: nat, m2: nat)
+    requires
+        m1 <= m2,
+        fits(per, np, nstate, nslab, m2),
+        forall|i: int| 0 <= i < np ==> #[trigger] per[i] >= 1,
+    ensures
+        fits(per, np, nstate, nslab, m1),
+{
+    lemma_psum_mono(per, np as int, m1, m2);
 }
 
 pub proof fn lemma_psum_ge(per: Seq<usize>, k: int, m: nat, i: int)
@@ -127,6 +298,34 @@ impl CoordV {
 
     pub open spec fn fits_m(self, m: nat) -> bool {
         fits(self.per, self.np, self.nst(), self.nslab, m)
+    }
+
+    /// The shared configuration (I10): `μ`, `λ`, `δ` and the number of target classes.
+    pub open spec fn mu(self) -> nat {
+        self.paged[0].cfg.mu
+    }
+
+    pub open spec fn lam(self) -> nat {
+        self.paged[0].cfg.lam
+    }
+
+    pub open spec fn delta(self) -> nat {
+        self.paged[0].cfg.delta
+    }
+
+    pub open spec fn ntarget(self) -> nat {
+        self.paged[0].cfg.ntarget
+    }
+
+    /// The extra write range of paged class `c` in a plan with `propose`: `λ` proposal rows in a
+    /// drafter class (D20), none otherwise.
+    pub open spec fn ext_of(self, c: int, propose: bool) -> nat {
+        if propose && c >= self.ntarget() { self.lam() } else { 0 }
+    }
+
+    /// Blocks covering the reach `L + μ` of an input of length `L` (D18).
+    pub open spec fn reach_blocks(self, l: nat) -> nat {
+        cdiv(l + self.mu(), self.b)
     }
 
     /// `FS`.
@@ -367,6 +566,13 @@ pub struct Coordinator {
     pub(crate) slots: HashMap<u64, Vec<usize>>,
 }
 
+/// I15: the live slot of a lease holds the state after `T_h[0:c_h]` once `c_h > 0`, and `⊥` once
+/// the lease is stopped (D25).
+pub open spec fn w_ok(l: LeaseV, w: Option<Seq<Token>>) -> bool {
+    &&& (!l.stopped && l.c > 0) ==> w == Some(l.toks.subrange(0, l.c as int))
+    &&& l.stopped ==> w is None
+}
+
 impl Coordinator {
     /// Public view.
     pub open(crate) spec fn view(&self) -> CoordV {
@@ -563,12 +769,78 @@ impl Coordinator {
                 &&& self.pv(i).p == self.cunits(i)
                 &&& self.pv(i).b == self.b as nat
                 &&& self.pv(i).ns == self.pv(0).ns
+                &&& self.pv(i).cfg == self.pv(0).cfg
+                &&& cfg_rel(self.pv(i).cfg, self.np())
             }
         &&& forall|j: int|
             0 <= j < self.nst() ==> {
                 &&& #[trigger] self.state@[j].valid()
                 &&& self.sv(j).p == self.cunits(self.np() + j)
             }
+    }
+
+    /// `pools_ok` of a fresh coordinator: every paged class shares `cfg` and `ns`.
+    pub(crate) proof fn lemma_create_pools(&self, cfg: PCfg, ns: Seq<u8>)
+        requires
+            cfg_rel(cfg, self.np()),
+            self.paged@.len() == self.np(),
+            forall|k: int|
+                0 <= k < self.np() ==> {
+                    &&& (#[trigger] self.paged@[k]).valid()
+                    &&& self.paged@[k]@.p == self.cunits(k)
+                    &&& self.paged@[k]@.b == self.b as nat
+                    &&& self.paged@[k]@.ns == ns
+                    &&& self.paged@[k]@.cfg == cfg
+                },
+            forall|j: int|
+                0 <= j < self.nst() ==> {
+                    &&& #[trigger] self.state@[j].valid()
+                    &&& self.state@[j]@.p == (self.nslab as nat) * (self.per@[self.np() + j] as nat)
+                },
+            self.np() >= 1,
+        ensures
+            self.pools_ok(),
+    {
+        assert forall|j: int| 0 <= j < self.nst() implies {
+            &&& #[trigger] self.state@[j].valid()
+            &&& self.sv(j).p == self.cunits(self.np() + j)
+        } by {
+            assert(self.state@[j].valid());
+        }
+        assert(self.paged@[0].valid());
+        assert forall|i: int| 0 <= i < self.np() implies {
+            &&& #[trigger] self.paged@[i].valid()
+            &&& self.pv(i).p == self.cunits(i)
+            &&& self.pv(i).b == self.b as nat
+            &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
+        } by {
+            assert(self.paged@[i].valid());
+        }
+        self.lemma_pools_intro();
+    }
+
+    /// `pools_ok` from its two parts; kept apart so the restatement is checked in a small context.
+    pub(crate) proof fn lemma_pools_intro(&self)
+        requires
+            forall|i: int|
+                0 <= i < self.np() ==> {
+                    &&& #[trigger] self.paged@[i].valid()
+                    &&& self.pv(i).p == self.cunits(i)
+                    &&& self.pv(i).b == self.b as nat
+                    &&& self.pv(i).ns == self.pv(0).ns
+                    &&& self.pv(i).cfg == self.pv(0).cfg
+                    &&& cfg_rel(self.pv(i).cfg, self.np())
+                },
+            forall|j: int|
+                0 <= j < self.nst() ==> {
+                    &&& #[trigger] self.state@[j].valid()
+                    &&& self.sv(j).p == self.cunits(self.np() + j)
+                },
+        ensures
+            self.pools_ok(),
+    {
     }
 
     /// I12/I13: slab ownership, `FS`, and per-unit ownership derived from the slab owner.
@@ -598,9 +870,12 @@ impl Coordinator {
                 &&& self.pv(i).leases[h].toks == self.pv(0).leases[h].toks
                 &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
                 &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
+                &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
+                &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
+                &&& self.pv(i).leases[h].stopped == self.pv(0).leases[h].stopped
             }
         &&& forall|h: u64|
-            #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].toks.len(), self.b as nat))
+            #[trigger] self.pv(0).leases.contains_key(h) ==> self.fits_m(cdiv(self.pv(0).leases[h].rho, self.b as nat))
     }
 
     /// I14/I15: one exclusive live slot per lease and state class, holding the state after
@@ -616,7 +891,7 @@ impl Coordinator {
                 let l = self.pv(0).leases[h];
                 &&& (x as nat) < self.sv(j).p
                 &&& self.sv(j).holder[x as int] == Some(h)
-                &&& l.c > 0 ==> self.sv(j).w[x as int] == Some(l.toks.subrange(0, l.c as int))
+                &&& w_ok(l, self.sv(j).w[x as int])
             }
         &&& forall|j: int, x: int|
             #![trigger self.sv(j).holder[x]]
@@ -1061,6 +1336,8 @@ impl Coordinator {
             &&& self.pv(i).p == self.cunits(i)
             &&& self.pv(i).b == self.b as nat
             &&& self.pv(i).ns == self.pv(0).ns
+            &&& self.pv(i).cfg == self.pv(0).cfg
+            &&& cfg_rel(self.pv(i).cfg, self.np())
         } by {
             assert(o.paged@[i].valid());
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
@@ -1134,6 +1411,9 @@ impl Coordinator {
             &&& self.pv(i).leases[h].toks == self.pv(0).leases[h].toks
             &&& self.pv(i).leases[h].c == self.pv(0).leases[h].c
             &&& self.pv(i).leases[h].pending == self.pv(0).leases[h].pending
+            &&& self.pv(i).leases[h].rho == self.pv(0).leases[h].rho
+            &&& self.pv(i).leases[h].dfr == self.pv(0).leases[h].dfr
+            &&& self.pv(i).leases[h].stopped == self.pv(0).leases[h].stopped
         } by {
             assert(self.pv(i) == (MgrV { own: self.pv(i).own, keys: self.pv(i).keys, ..o.pv(i) }));
             assert(self.pv(0) == (MgrV { own: self.pv(0).own, keys: self.pv(0).keys, ..o.pv(0) }));
@@ -1162,7 +1442,7 @@ impl Coordinator {
             let l = self.pv(0).leases[h];
             &&& (x as nat) < self.sv(j).p
             &&& self.sv(j).holder[x as int] == Some(h)
-            &&& l.c > 0 ==> self.sv(j).w[x as int] == Some(l.toks.subrange(0, l.c as int))
+            &&& w_ok(l, self.sv(j).w[x as int])
         } by {
             let x = o.slots@[h]@[j];
             assert(o.sv(j).holder[x as int] == Some(h));
@@ -1208,20 +1488,35 @@ pub open spec fn cfg_accepts(nslab: nat, sbytes: nat, b: nat, pu: Seq<usize>, su
 }
 
 impl Coordinator {
-    /// C0. `create(N, S, classes, B, Namespace)`. Paged classes are `pu` (in order), then state
-    /// classes `su`. Every slab starts free.
-    pub fn create(nslab: usize, sbytes: usize, pu: &[usize], su: &[usize], b: usize, ns: &[u8]) -> (r: Result<
-        Coordinator,
-        Error,
-    >)
+    /// C0. `create(N, S, classes, B, λ, δ, Namespace)`. Target paged classes are `pu` (in order),
+    /// drafter paged classes `du`, then state classes `su`. The reservation margin is
+    /// `μ = (δ + 1)·λ`, plus `λ` with drafter classes (D18). Every slab starts free.
+    ///
+    /// `δ ∈ {0, 1}` (D21); `δ >= 2` returns ConfigError (§1.1).
+    pub fn create(
+        nslab: usize,
+        sbytes: usize,
+        pu: &[usize],
+        du: &[usize],
+        su: &[usize],
+        b: usize,
+        lambda: usize,
+        delta: usize,
+        ns: &[u8],
+    ) -> (r: Result<Coordinator, Error>)
         ensures
             r matches Ok(co) ==> {
                 &&& co.inv()
+                &&& co@.lam() == lambda
+                &&& co@.mu() == create_mu(lambda as nat, delta as nat, du@.len())
+                &&& co@.ntarget() == pu@.len()
+                &&& co@.delta() == delta
+                &&& co@.fits_m(cdiv(1 + co@.mu(), b as nat))
                 &&& co@.nslab == nslab
                 &&& co@.sbytes == sbytes
                 &&& co@.b == b
-                &&& co@.unit == pu@ + su@
-                &&& co@.np == pu@.len()
+                &&& co@.unit == pu@ + du@ + su@
+                &&& co@.np == pu@.len() + du@.len()
                 &&& co@.nst() == su@.len()
                 &&& co@.owner.len() == nslab
                 &&& forall|s: int| 0 <= s < nslab ==> #[trigger] co@.owner[s] == 0
@@ -1230,12 +1525,43 @@ impl Coordinator {
                 &&& co@.paged[0].ns == ns@
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            !cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@) ==> r == Err::<Coordinator, Error>(
+            !cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@ + du@, su@, ns@) ==> r == Err::<Coordinator, Error>(
                 Error::ConfigError,
             ),
+            // C0: no target class, drafter classes without drafts, δ >= 2, or an unrepresentable μ.
+            (pu@.len() == 0 || (du@.len() > 0 && lambda == 0) || delta > 1 || lambda as nat > max_slots()
+                || create_mu(lambda as nat, delta as nat, du@.len()) > max_slots()) ==> r == Err::<Coordinator, Error>(Error::ConfigError),
+            // C0: not even a one-token lease (with its reservation) could attach, `¬Fits(ceil((1 + μ)/B))`.
+            // Checked before any identifier is taken, so this is always ConfigError.
+            !create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat) ==> r
+                == Err::<Coordinator, Error>(Error::ConfigError),
     {
-        if nslab == 0 || sbytes == 0 || b == 0 || pu.len() == 0 || pu.len() >= 0x1_0000 || su.len() >= 0x1_0000
-            - pu.len() || ns.len() > u32::MAX as usize {
+        // C0: drafter classes need λ >= 1; δ <= 1 (§1.1).
+        if pu.len() == 0 || pu.len() >= 0x1_0000 || du.len() >= 0x1_0000 || (du.len() > 0 && lambda == 0) || delta > 1
+            || lambda > MAX_SLOTS as usize {
+            return Err(Error::ConfigError);
+        }
+        // μ = (δ + 1)·λ, plus λ with drafter classes (D18).
+        let mu_z = if delta == 1 { lambda } else { 0 };
+        if mu_z > MAX_SLOTS as usize - lambda {
+            return Err(Error::ConfigError);
+        }
+        let mu_d = if du.len() > 0 { lambda } else { 0 };
+        if mu_d > MAX_SLOTS as usize - lambda - mu_z {
+            return Err(Error::ConfigError);
+        }
+        let mu = lambda + mu_z + mu_d;
+        // Target classes, then drafter classes: one list of paged classes (D20).
+        let ntarget = pu.len();
+        let mut pall: Vec<usize> = vstd::slice::slice_to_vec(pu);
+        pall.extend_from_slice(du);
+        proof {
+            assert(pall@ =~= pu@ + du@);
+            assert(mu as nat == create_mu(lambda as nat, delta as nat, du@.len()));
+            assert(create_early_ok(pu@, du@, lambda as nat, delta as nat));
+        }
+        if nslab == 0 || sbytes == 0 || b == 0 || pall.len() == 0 || pall.len() >= 0x1_0000 || su.len() >= 0x1_0000
+            - pall.len() || ns.len() > u32::MAX as usize {
             return Err(Error::ConfigError);
         }
         proof {
@@ -1247,14 +1573,16 @@ impl Coordinator {
         }
         let mut unit: Vec<usize> = Vec::new();
         let mut per: Vec<usize> = Vec::new();
-        let ghost all = pu@ + su@;
-        let ncls = pu.len() + su.len();
+        let ghost all = pall@ + su@;
+        let ncls = pall.len() + su.len();
         let mut c: usize = 0;
         while c < ncls
             invariant
+                pall@ == pu@ + du@,
+                create_early_ok(pu@, du@, lambda as nat, delta as nat),
                 0 <= c <= ncls,
                 ncls == all.len(),
-                all == pu@ + su@,
+                all == pall@ + su@,
                 nslab >= 1,
                 b >= 1,
                 sbytes >= 1,
@@ -1266,16 +1594,16 @@ impl Coordinator {
                     && (nslab as nat) * (per@[k] as nat) <= usize::MAX,
             decreases ncls - c,
         {
-            let u = if c < pu.len() { pu[c] } else { su[c - pu.len()] };
+            let u = if c < pall.len() { pall[c] } else { su[c - pall.len()] };
             proof {
                 assert(u == all[c as int]);
             }
             if u == 0 || !sbytes.is_multiple_of(u) {
                 proof {
-                    if c < pu.len() {
-                        assert(pu@[c as int] == u);
+                    if c < pall.len() {
+                        assert(pall@[c as int] == u);
                     } else {
-                        assert(su@[c - pu.len()] == u);
+                        assert(su@[c - pall.len()] == u);
                     }
                 }
                 return Err(Error::ConfigError);
@@ -1296,10 +1624,10 @@ impl Coordinator {
             }
             if (nslab as u128) * (n as u128) * (b as u128) > MAX_SLOTS as u128 {
                 proof {
-                    if c < pu.len() {
-                        assert(pu@[c as int] == u);
+                    if c < pall.len() {
+                        assert(pall@[c as int] == u);
                     } else {
-                        assert(su@[c - pu.len()] == u);
+                        assert(su@[c - pall.len()] == u);
                     }
                 }
                 return Err(Error::ConfigError);
@@ -1316,21 +1644,32 @@ impl Coordinator {
         }
         proof {
             assert(unit@ =~= all);
-            assert(cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@)) by {
-                assert forall|k: int| 0 <= k < pu@.len() implies #[trigger] pu@[k] >= 1 && (sbytes as nat) % (
-                pu@[k] as nat) == 0 && (nslab as nat) * ((sbytes as nat) / (pu@[k] as nat)) * (b as nat) <= max_slots() by {
-                    assert(all[k] == pu@[k]);
+            assert(cfg_accepts(nslab as nat, sbytes as nat, b as nat, pall@, su@, ns@)) by {
+                assert forall|k: int| 0 <= k < pall@.len() implies #[trigger] pall@[k] >= 1 && (sbytes as nat) % (
+                pall@[k] as nat) == 0 && (nslab as nat) * ((sbytes as nat) / (pall@[k] as nat)) * (b as nat) <= max_slots() by {
+                    assert(all[k] == pall@[k]);
                 }
                 assert forall|k: int| 0 <= k < su@.len() implies #[trigger] su@[k] >= 1 && (sbytes as nat) % (
                 su@[k] as nat) == 0 && (nslab as nat) * ((sbytes as nat) / (su@[k] as nat)) * (b as nat) <= max_slots() by {
-                    assert(all[pu@.len() + k] == su@[k]);
+                    assert(all[pall@.len() + k] == su@[k]);
                 }
             }
         }
+        // C0: a one-token lease must fit with its reservation, `Fits(ceil((1 + μ)/B))`. Checked before
+        // any identifier is taken, so an unusable configuration consumes none.
+        proof {
+            assert(all == pu@ + du@ + su@);
+        }
+        if !create_fits(&per, Ghost(pu@), Ghost(du@), Ghost(su@), pall.len(), su.len(), nslab, Ghost(sbytes), b, Ghost(lambda), Ghost(delta), mu) {
+            return Err(Error::ConfigError);
+        }
+        let ghost fits1 = cdiv(1 + mu as nat, b as nat);
         let id = match fresh_mgr_id() {
             Some(id) => id,
             None => return Err(Error::IdentifierExhausted),
         };
+        // Every paged class shares one configuration (I10): μ = λ with no drafters and δ = 0.
+        let cfg0 = PCfgC { mu, lam: lambda, delta, ntarget };
         // Paged classes.
         let mut paged: Vec<Manager> = Vec::new();
         let mut i: usize = 0;
@@ -1340,12 +1679,23 @@ impl Coordinator {
                 assert(all[k] >= 1);
             }
         }
-        while i < pu.len()
+        while i < pall.len()
             invariant
-                cfg_accepts(nslab as nat, sbytes as nat, b as nat, pu@, su@, ns@),
-                0 <= i <= pu@.len(),
+                pall@ == pu@ + du@,
+                create_early_ok(pu@, du@, lambda as nat, delta as nat),
+                cfg_accepts(nslab as nat, sbytes as nat, b as nat, pall@, su@, ns@),
+                create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat),
+                fits(per@, pall@.len(), su@.len(), nslab as nat, fits1),
+                fits1 == cdiv(1 + mu as nat, b as nat),
+                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
+                lambda as nat <= max_slots(),
+                mu as nat <= max_slots(),
+                mu as nat == create_mu(lambda as nat, delta as nat, (pall@.len() - ntarget) as nat),
+                1 <= ntarget <= pall@.len(),
+                delta <= 1,
+                0 <= i <= pall@.len(),
                 per@.len() == ncls,
-                ncls == pu@.len() + su@.len(),
+                ncls == pall@.len() + su@.len(),
                 b >= 1,
                 nslab >= 1,
                 ns@.len() <= u32::MAX,
@@ -1357,10 +1707,10 @@ impl Coordinator {
                 forall|k: int|
                     0 <= k < i ==> {
                         &&& #[trigger] paged@[k].valid()
-                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                        &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0@)
                         &&& paged@[k]@.ns == ns@
                     },
-            decreases pu@.len() - i,
+            decreases pall@.len() - i,
         {
             proof {
                 assert((nslab as nat) * (per@[i as int] as nat) <= usize::MAX);
@@ -1372,14 +1722,14 @@ impl Coordinator {
                 assert((nslab as nat) * (per@[i as int] as nat) >= 1) by (nonlinear_arith)
                     requires nslab >= 1, per@[i as int] >= 1;
             }
-            match Manager::create_empty(units, b, ns) {
+            match Manager::create_empty(units, b, ns, cfg0) {
                 Ok(m) => {
                     let ghost p0 = paged@;
                     paged.push(m);
                     proof {
                         assert forall|k: int| 0 <= k < i + 1 implies {
                             &&& #[trigger] paged@[k].valid()
-                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false)
+                            &&& paged@[k]@ == initial_own(paged@[k]@.id, (nslab as nat) * (per@[k] as nat), b as nat, ns@, false, cfg0@)
                             &&& paged@[k]@.ns == ns@
                         } by {
                             if k < i {
@@ -1392,6 +1742,8 @@ impl Coordinator {
                     proof {
                         // ConfigError is impossible: the configuration was checked above.
                         assert((units as nat) * (b as nat) <= max_slots());
+                        assert(cfg0.mu as nat <= max_slots());
+                        assert(cfg0.delta <= 1);
                     }
                     return Err(Error::IdentifierExhausted);
                 },
@@ -1402,16 +1754,27 @@ impl Coordinator {
         let mut j: usize = 0;
         let ghost pg0 = paged@;
         proof {
-            assert(pg0.len() == pu@.len());
+            assert(pg0.len() == pall@.len());
             assert(paged@[0].valid());
             assert(pg0[0]@.ns == ns@);
         }
         while j < su.len()
             invariant
+                pall@ == pu@ + du@,
+                create_early_ok(pu@, du@, lambda as nat, delta as nat),
+                create_fits_ok(nslab as nat, sbytes as nat, b as nat, pu@, du@, su@, lambda as nat, delta as nat),
+                fits(per@, pall@.len(), su@.len(), nslab as nat, fits1),
+                fits1 == cdiv(1 + mu as nat, b as nat),
+                cfg0@ == (PCfg { mu: mu as nat, lam: lambda as nat, delta: delta as nat, ntarget: ntarget as nat }),
+                mu as nat <= max_slots(),
+                mu as nat == create_mu(lambda as nat, delta as nat, (pall@.len() - ntarget) as nat),
+                1 <= ntarget <= pall@.len(),
+                delta <= 1,
+                lambda as nat <= max_slots(),
                 paged@ == pg0,
                 0 <= j <= su@.len(),
                 per@.len() == ncls,
-                ncls == pu@.len() + su@.len(),
+                ncls == pall@.len() + su@.len(),
                 nslab >= 1,
                 b >= 1,
                 forall|k: int| 0 <= k < ncls ==> #[trigger] per@[k] >= 1 && (nslab as nat) * (per@[k] as nat) * (b as nat)
@@ -1422,18 +1785,18 @@ impl Coordinator {
                 forall|k: int|
                     0 <= k < j ==> {
                         &&& #[trigger] state@[k].valid()
-                        &&& state@[k]@.p == (nslab as nat) * (per@[pu@.len() + k] as nat)
+                        &&& state@[k]@.p == (nslab as nat) * (per@[pall@.len() + k] as nat)
                         &&& state@[k]@.own == Seq::new(state@[k]@.p, |x: int| false)
                         &&& state@[k]@.holder == Seq::new(state@[k]@.p, |x: int| None::<u64>)
                     },
             decreases su@.len() - j,
         {
             proof {
-                let k = pu@.len() + j;
+                let k = pall@.len() + j;
                 assert(per@[k] >= 1);
                 lemma_mul_mono(1, b as nat, (nslab as nat) * (per@[k] as nat));
             }
-            let units = nslab * per[pu.len() + j];
+            let units = nslab * per[pall.len() + j];
             state.push(StatePool::new(units));
             j += 1;
         }
@@ -1446,7 +1809,7 @@ impl Coordinator {
             nslab,
             sbytes,
             b,
-            npaged: pu.len(),
+            npaged: pall.len(),
             unit,
             per,
             owner,
@@ -1467,26 +1830,24 @@ impl Coordinator {
                     assert(all[k] == co.unit@[k]);
                 }
             }
-            assert(co.pools_ok()) by {
-                assert forall|k: int| 0 <= k < co.np() implies {
-                    &&& #[trigger] co.paged@[k].valid()
-                    &&& co.pv(k).p == co.cunits(k)
-                    &&& co.pv(k).b == co.b as nat
-                    &&& co.pv(k).ns == co.pv(0).ns
-                } by {
-                    assert(co.paged@ == pg0);
-                    assert(pg0[k].valid());
-                    assert(pg0[0].valid());
-                    assert(pg0[k]@.ns == ns@);
-                    assert(pg0[0]@.ns == ns@);
-                }
-                assert forall|k: int| 0 <= k < co.nst() implies {
-                    &&& #[trigger] co.state@[k].valid()
-                    &&& co.sv(k).p == co.cunits(co.np() + k)
-                } by {
-                    assert(co.state@[k].valid());
-                }
+            assert(co.paged@ == pg0);
+            assert(co.np() == pall@.len());
+            assert(cfg_rel(cfg0@, co.np()));
+            assert forall|k: int| 0 <= k < co.np() implies {
+                &&& (#[trigger] co.paged@[k]).valid()
+                &&& co.paged@[k]@.p == co.cunits(k)
+                &&& co.paged@[k]@.b == co.b as nat
+                &&& co.paged@[k]@.ns == ns@
+                &&& co.paged@[k]@.cfg == cfg0@
+            } by {
+                assert(pg0[k].valid());
+                assert(pg0[k]@.ns == ns@);
+                assert(pg0[k]@.cfg == cfg0@);
+                assert(co.pv(k) == co.paged@[k]@);
             }
+            assert(co.state@ == st);
+            assert(co.per@ == per@);
+            co.lemma_create_pools(cfg0@, ns@);
             assert(co.own_ok()) by {
                 assert forall|s2: usize| #[trigger] co.fs@.contains(s2) <==> ((s2 as nat) < co.nslab && co.owner@[s2 as int]
                     == 0) by {}
@@ -1546,13 +1907,13 @@ impl Coordinator {
             assert(co@.pend() =~= Map::<u64, PendV>::empty()) by {
                 assert(co.paged@[0].valid());
             }
-            assert(co@.unit == pu@ + su@);
+            assert(co@.unit == pall@ + su@);
             assert(co@.nst() == su@.len());
             assert(co.inv());
             assert(co@.nslab == nslab);
             assert(co@.sbytes == sbytes);
             assert(co@.b == b);
-            assert(co@.np == pu@.len());
+            assert(co@.np == pall@.len());
             assert(co@.owner.len() == nslab);
             assert(forall|s: int| 0 <= s < nslab ==> #[trigger] co@.owner[s] == 0);
             assert(co.paged@ == pg);
@@ -1560,6 +1921,23 @@ impl Coordinator {
             co.lemma_view();
             assert(co@.paged[0] == co.pv(0));
             assert(co@.paged[0].ns == ns@);
+            assert(per@ =~= per_of(sbytes as nat, pall@ + su@)) by {
+                assert forall|k: int| 0 <= k < per@.len() implies #[trigger] per@[k] == per_of(sbytes as nat, pall@ + su@)[k] by {
+                    assert(per@[k] == sbytes / all[k]);
+                }
+            }
+            assert(co@.per == per@);
+            assert(co@.mu() == mu as nat && co@.lam() == lambda as nat && co@.delta() == delta as nat && co@.ntarget() == ntarget as nat) by {
+                assert(co.paged@[0].valid());
+                assert(co@.paged[0] == co.pv(0));
+            }
+        }
+        proof {
+            assert(co@.fits_m(fits1)) by {
+                assert(co@.per == per@);
+                assert(co@.np == pall@.len());
+                assert(co@.nst() == su@.len());
+            }
         }
         Ok(co)
     }

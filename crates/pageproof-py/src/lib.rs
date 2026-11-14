@@ -1,4 +1,4 @@
-//! Python facade for the verified block manager and the v0.3 coordinator. UNVERIFIED, part of the
+//! Python facade for the verified block manager and the v0.6 coordinator. UNVERIFIED, part of the
 //! trusted I/O shim.
 //!
 //! This file only converts between Python objects and the verified API. It never touches
@@ -8,6 +8,7 @@
 use pageproof_core::coord::Coordinator;
 use pageproof_core::manager::Manager;
 use pageproof_core::ops_write::Completion;
+use pageproof_core::coord_ops::{CoordCompletion, Drafts};
 use pageproof_core::types::{Error, Handle, Ticket};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -151,14 +152,27 @@ impl PyBlockManager {
     }
 }
 
-/// Immutable execution plan across classes (contract v0.3 C3).
+/// Immutable execution plan across classes (contract v0.6 C3, §3.4).
 #[pyclass(frozen, get_all)]
 struct CoordPlan {
     ticket: PyTicket,
     handle: PyHandle,
+    /// `T_h[lo : lo + ℓ] ++ D`, or placeholders 0 for a continuation (D24).
     input_ids: Vec<u32>,
+    /// The positions of the lowest outcome; the executor shifts a continuation's by `σ = a - lo`.
     positions: Vec<usize>,
     block_size: usize,
+    /// Start bound and slack: the window starts at `lo + σ` with `0 <= σ <= slack` (D24).
+    lo: usize,
+    slack: usize,
+    /// `ℓ`: the input length.
+    num_inputs: usize,
+    /// For a continuation, the ticket whose bonus token is its input (D24).
+    producer: Option<PyTicket>,
+    /// Drafts after the input (contract D16); the sampler checks outputs at `[z-1, z+k)`.
+    num_drafts: usize,
+    /// Drafter classes also write `λ` proposal rows (D20).
+    propose: bool,
     /// Per paged class.
     write_slots: Vec<Vec<usize>>,
     page_tables: Vec<Vec<usize>>,
@@ -168,7 +182,8 @@ struct CoordPlan {
     init: bool,
 }
 
-/// v0.3 coordinator: one slab arena shared by paged classes and state classes.
+/// v0.6 coordinator: one slab arena shared by paged, drafter and state classes, with speculative
+/// decoding (λ drafts per ticket) and zero-overhead scheduling (δ tickets ahead).
 #[pyclass(name = "Coordinator", unsendable)]
 struct PyCoordinator {
     inner: Coordinator,
@@ -183,8 +198,11 @@ fn lease_dict<'py>(py: Python<'py>, tables: Vec<Vec<usize>>, slots: Vec<usize>) 
 
 #[pymethods]
 impl PyCoordinator {
-    /// C0. `paged_units` and `state_units` are unit sizes in bytes; each must divide `slab_bytes`.
+    /// C0. `paged_units`, `drafter_units` and `state_units` are unit sizes in bytes; each must divide
+    /// `slab_bytes`. `max_drafts` is λ and `zos_depth` is δ (contract v0.6 §3.1).
     #[new]
+    #[pyo3(signature = (num_slabs, slab_bytes, paged_units, state_units, block_size, namespace, *, drafter_units = Vec::new(), max_drafts = 0, zos_depth = 0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         num_slabs: usize,
         slab_bytes: usize,
@@ -192,8 +210,21 @@ impl PyCoordinator {
         state_units: Vec<usize>,
         block_size: usize,
         namespace: &[u8],
+        drafter_units: Vec<usize>,
+        max_drafts: usize,
+        zos_depth: usize,
     ) -> PyResult<Self> {
-        Coordinator::create(num_slabs, slab_bytes, &paged_units, &state_units, block_size, namespace)
+        Coordinator::create(
+            num_slabs,
+            slab_bytes,
+            &paged_units,
+            &drafter_units,
+            &state_units,
+            block_size,
+            max_drafts,
+            zos_depth,
+            namespace,
+        )
             .map(|inner| PyCoordinator { inner })
             .map_err(err)
     }
@@ -210,15 +241,43 @@ impl PyCoordinator {
         lease_dict(py, v.tables, v.slots)
     }
 
-    /// C3.
-    fn begin_write(&mut self, handle: PyHandle, n: usize) -> PyResult<CoordPlan> {
-        let (_, p) = self.inner.begin_write(handle.into(), n).map_err(err)?;
+    /// C2b. Appends the bonus position of the newest pending ticket, whose token is not yet on the
+    /// host (D22).
+    fn extend_deferred<'py>(&mut self, py: Python<'py>, handle: PyHandle) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let v = self.inner.extend_deferred(handle.into()).map_err(err)?;
+        lease_dict(py, v.tables, v.slots)
+    }
+
+    /// C3. `drafts` are the host's draft tokens after the input (D16). A continuation takes
+    /// `deferred_drafts` drafts from its producer's proposal on the device instead (D24).
+    /// `propose` asks the drafter classes for proposal rows (D20).
+    #[pyo3(signature = (handle, n, drafts = Vec::new(), propose = false, *, deferred_drafts = None))]
+    fn begin_write(
+        &mut self,
+        handle: PyHandle,
+        n: usize,
+        drafts: Vec<u32>,
+        propose: bool,
+        deferred_drafts: Option<usize>,
+    ) -> PyResult<CoordPlan> {
+        let d = match deferred_drafts {
+            None => Drafts::Known(drafts),
+            Some(k) if drafts.is_empty() => Drafts::Deferred(k),
+            Some(_) => return Err(pyo3::exceptions::PyValueError::new_err("give drafts or deferred_drafts, not both")),
+        };
+        let (_, p) = self.inner.begin_write(handle.into(), n, d, propose).map_err(err)?;
         Ok(CoordPlan {
             ticket: p.ticket.into(),
             handle: p.handle.into(),
             input_ids: p.input_ids,
             positions: p.positions,
             block_size: p.block_size,
+            lo: p.lo,
+            slack: p.slack,
+            num_inputs: p.num_inputs,
+            producer: p.producer.map(PyTicket::from),
+            num_drafts: p.num_drafts,
+            propose: p.propose,
             write_slots: p.write_slots,
             page_tables: p.page_tables,
             state_slots: p.state_slots,
@@ -226,11 +285,16 @@ impl PyCoordinator {
         })
     }
 
-    /// C4. The caller (executor) asserts that `ticket`'s plan has been executed in every class
-    /// (E1/E2/E5/E10).
-    fn finish_write(&mut self, ticket: PyTicket) -> PyResult<usize> {
+    /// C4. `accepted` is how many of the ticket's drafts the sampler accepted (D17). `token` is the
+    /// token it sampled after them, required when the ticket heads the deferred tail (D22).
+    /// `drafts` are the drafts a continuation accepted from its producer's proposal (D24). `stop`
+    /// ends the lease and orphans every later ticket (D25). The caller (executor) asserts that the
+    /// plan has been executed in every class and that these are the device's values
+    /// (E1/E2/E5/E10–E13).
+    #[pyo3(signature = (ticket, accepted = 0, token = None, drafts = Vec::new(), stop = false))]
+    fn finish_write(&mut self, ticket: PyTicket, accepted: usize, token: Option<u32>, drafts: Vec<u32>, stop: bool) -> PyResult<usize> {
         let t: Ticket = ticket.into();
-        self.inner.finish_write(t, Completion { ticket: t }).map_err(err)
+        self.inner.finish_write(t, CoordCompletion { ticket: t, accepted, token, drafts, stop }).map_err(err)
     }
 
     /// C5.
@@ -244,8 +308,17 @@ impl PyCoordinator {
         let d = lease_dict(py, v.lease.tables, v.lease.slots)?;
         d.set_item("len", v.len)?;
         d.set_item("computed", v.computed)?;
+        d.set_item("reach", v.reach)?;
+        d.set_item("planned", v.planned)?;
+        d.set_item("slack", v.slack)?;
+        d.set_item("deferred", v.deferred)?;
+        d.set_item("stopped", v.stopped)?;
         d.set_item("pending", v.pending.map(PyTicket::from))?;
+        d.set_item("queue", v.queue.into_iter().map(PyTicket::from).collect::<Vec<_>>())?;
         d.set_item("block_size", v.block_size)?;
+        d.set_item("max_drafts", v.lam)?;
+        d.set_item("margin", v.mu)?;
+        d.set_item("zos_depth", v.delta)?;
         Ok(d)
     }
 

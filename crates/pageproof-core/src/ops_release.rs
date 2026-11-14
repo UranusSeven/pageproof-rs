@@ -72,8 +72,8 @@ impl Manager {
                 &&& rv.computed as nat == l.c
                 &&& rv.pages@ == l.table
                 &&& rv.block_size as nat == self@.b
-                &&& (rv.pending is Some) == (l.pending is Some)
-                &&& rv.pending matches Some(t) ==> t.mgr == self@.id && Some(t.id) == l.pending
+                &&& (rv.pending is Some) == (l.pending.len() > 0)
+                &&& rv.pending matches Some(t) ==> t.mgr == self@.id && t.id == l.pending[0]
             },
     {
         if !self.handle_ok(h) {
@@ -84,10 +84,7 @@ impl Manager {
             self.lemma_rep_dom();
         }
         let l = self.leases.get(&h.id).unwrap();
-        let pending = match l.pending {
-            Some(t) => Some(Ticket { mgr: self.id, id: t }),
-            None => None,
-        };
+        let pending = if l.pending.len() > 0 { Some(Ticket { mgr: self.id, id: l.pending[0] }) } else { None };
         Ok(RequestView {
             len: l.toks.len(),
             computed: l.c,
@@ -105,9 +102,10 @@ impl Manager {
             !(h.mgr == self@.id && self@.leases.contains_key(h.id)) ==> r == Err::<usize, Error>(Error::InvalidHandle),
             (h.mgr == self@.id && self@.leases.contains_key(h.id)) ==> {
                 let l = self@.leases[h.id];
-                &&& (j as nat) < l.toks.len() ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
+                // Any position of the reach has an allocated slot (C6); only `j < c_h` holds valid KV.
+                &&& (j as nat) < l.rho ==> r == Ok::<usize, Error>(slot_of(self@.b, l.table, j as int) as usize)
                     && slot_of(self@.b, l.table, j as int) < self@.p * self@.b
-                &&& (j as nat) >= l.toks.len() ==> r == Err::<usize, Error>(Error::InvalidArgument)
+                &&& (j as nat) >= l.rho ==> r == Err::<usize, Error>(Error::InvalidArgument)
             },
     {
         if !self.handle_ok(h) {
@@ -118,7 +116,7 @@ impl Manager {
             self.lemma_rep_dom();
         }
         let l = self.leases.get(&h.id).unwrap();
-        if j >= l.toks.len() {
+        if j >= l.rho {
             return Err(Error::InvalidArgument);
         }
         let ghost v = self@;
@@ -126,9 +124,8 @@ impl Manager {
         proof {
             reveal(lease_ok);
             assert(lease_ok(v, self.den_log(), h.id));
-            lemma_cdiv_props(lv.toks.len(), v.b);
             lemma_div_bounds(j as nat, v.b);
-            // j / b < m because j < L <= m*b.
+            // j / b < m because j < ρ <= m*b.
             let m = lv.table.len();
             if (j as nat) / v.b >= m {
                 lemma_mul_mono(m, (j as nat) / v.b, v.b);
@@ -261,17 +258,17 @@ impl Manager {
             !(h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id)) ==> r == Err::<Vec<Token>, Error>(
                 Error::InvalidHandle,
             ) && final(self)@ == old(self)@,
-            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending is Some)
+            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending.len() > 0)
                 ==> r == Err::<Vec<Token>, Error>(Error::Busy) && final(self)@ == old(self)@,
             r matches Ok(toks) ==> {
                 &&& h.mgr == old(self)@.id
                 &&& old(self)@.leases.contains_key(h.id)
-                &&& old(self)@.leases[h.id].pending is None
+                &&& old(self)@.leases[h.id].pending.len() == 0
                 &&& toks@ == old(self)@.leases[h.id].toks
                 &&& final(self)@ == released(old(self)@, h.id)
             },
             r is Err ==> final(self)@ == old(self)@,
-            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending is None)
+            (h.mgr == old(self)@.id && old(self)@.leases.contains_key(h.id) && old(self)@.leases[h.id].pending.len() == 0)
                 ==> r is Ok,
     {
         if !self.handle_ok(h) {
@@ -281,7 +278,7 @@ impl Manager {
             self.lemma_valid();
             self.lemma_rep_dom();
         }
-        if self.leases.get(&h.id).unwrap().pending.is_some() {
+        if self.leases.get(&h.id).unwrap().pending.len() > 0 {
             return Err(Error::Busy);
         }
         let ghost v = self@;
@@ -330,7 +327,7 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].pending is None,
+        v.leases[h].pending.len() == 0,
     ensures
         inv(released(v, h), log),
 {
@@ -349,11 +346,9 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
         assert forall|i: nat| i < l.table.len() implies #[trigger] blk_ok(v2, log, l, i) by {
             assert(blk_ok(v, log, l, i));
         }
-        if l.pending is Some {
-            let t = l.pending->Some_0;
-            assert(v.pend.contains_key(t));
-            assert(pend_ok(v, t));
-            assert(v.pend[t].lease == h2);
+        assert forall|i: int| 0 <= i < l.pending.len() implies v2.pend.contains_key(#[trigger] l.pending[i])
+            && v2.pend[l.pending[i]].lease == h2 by {
+            assert(v.pend.contains_key(l.pending[i]));
         }
     }
     // Pages.
@@ -390,7 +385,7 @@ pub proof fn lemma_release_inv(v: MgrV, log: Log, h: u64)
         let r = v.pend[t];
         assert(r.lease != h) by {
             if r.lease == h {
-                assert(v.leases[h].pending == Some(t));
+                assert(v.leases[h].pending.contains(t));
             }
         }
     }

@@ -14,10 +14,26 @@ verus! {
 broadcast use vstd::std_specs::hash::group_hash_axioms;
 
 /// Abstract state after a successful `extend`: `T' = T ++ suffix`, table grows by `fresh`.
-pub open spec fn extended(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>) -> MgrV {
+/// The input length after C2 (`suffix`) or C2b (`dfr`: the deferred position), `L̂'`.
+pub open spec fn glen(l: LeaseV, suffix: Seq<Token>, dfr: bool) -> nat {
+    if dfr { l.toks.len() + 1 } else { l.toks.len() + suffix.len() }
+}
+
+/// C2 and C2b: lease `h` grows by `suffix` (extend), or by the deferred position (extend_deferred,
+/// `dfr`, with an empty suffix), and its table by `fresh`; the reach becomes `L̂' + μ` (D18, D22).
+pub open spec fn grown(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>, dfr: bool) -> MgrV {
     let l = v.leases[h];
     MgrV {
-        leases: v.leases.insert(h, LeaseV { toks: l.toks + suffix, table: l.table + fresh, ..l }),
+        leases: v.leases.insert(
+            h,
+            LeaseV {
+                toks: l.toks + suffix,
+                table: l.table + fresh,
+                rho: glen(l, suffix, dfr) + v.cfg.mu,
+                dfr: l.dfr || dfr,
+                ..l
+            },
+        ),
         refs: inc_seq(v.refs, fresh, fresh.len() as int),
         keys: revoke(v.keys, fresh),
         holders: Seq::new(
@@ -28,55 +44,82 @@ pub open spec fn extended(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId
     }
 }
 
-/// The complete C2 contract.
-pub open spec fn extend_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, r: Result<PageTableView, Error>) -> bool {
-    let live = h.mgr == v.id && v.leases.contains_key(h.id);
+pub open spec fn extended(v: MgrV, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>) -> MgrV {
+    grown(v, h, suffix, fresh, false)
+}
+
+/// C2's Busy (D21): the queue is full, or its oldest ticket has drafts or proposal rows.
+pub open spec fn extend_busy(v: MgrV, l: LeaseV) -> bool {
+    l.pending.len() > v.cfg.delta || (l.pending.len() > 0 && (v.pend[l.pending[0]].drafts.len() > 0
+        || v.pend[l.pending[0]].propose))
+}
+
+/// Busy for C2 and C2b: extend needs a queue with room whose oldest ticket has no drafts or
+/// proposal rows (D21); extend_deferred only a queue with room, so it may follow a verify (C2b).
+pub open spec fn grow_busy(v: MgrV, l: LeaseV, dfr: bool) -> bool {
+    if dfr { l.pending.len() > v.cfg.delta } else { extend_busy(v, l) }
+}
+
+/// The complete C2 (`dfr` false) and C2b (`dfr`, empty suffix) contracts.
+pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, dfr: bool, r: Result<PageTableView, Error>) -> bool {
+    let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
     let l = v.leases[h.id];
-    let l2 = l.toks.len() + suffix.len();
-    let d = cdiv(l2, v.b) - l.table.len();
-    &&& !live ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
-    &&& (live && l.pending is Some) ==> r == Err::<PageTableView, Error>(Error::Busy)
-    &&& (live && l.pending is None && l.c != l.toks.len()) ==> r == Err::<PageTableView, Error>(
-        Error::InvalidPhase,
+    // A stopped lease accepts no new work (D25), checked first.
+    let live = live0 && !l.stopped;
+    let l2 = glen(l, suffix, dfr);
+    let d = cdiv(l2 + v.cfg.mu, v.b) - l.table.len();
+    // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); every
+    // input position must be computed or covered by a pending ticket, and none may be deferred.
+    // extend_deferred needs a pending ticket whose bonus position it appends (D22).
+    let busy = grow_busy(v, l, dfr);
+    let ph = !l.dfr && pfront(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
+    let arg = dfr || suffix.len() > 0;
+    &&& !live0 ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
+    &&& (live0 && l.stopped) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
+    &&& (live && busy) ==> r == Err::<PageTableView, Error>(Error::Busy)
+    &&& (live && !busy && !ph) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
+    &&& (live && !busy && ph && !arg) ==> r == Err::<PageTableView, Error>(Error::InvalidArgument)
+    &&& (live && !busy && ph && arg && l2 + v.cfg.mu > v.p * v.b) ==> r == Err::<PageTableView, Error>(
+        Error::RequestTooLarge,
     )
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() == 0) ==> r == Err::<
-        PageTableView,
-        Error,
-    >(Error::InvalidArgument)
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && l2 > v.p * v.b) ==> r
-        == Err::<PageTableView, Error>(Error::RequestTooLarge)
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && l2 <= v.p * v.b) ==> (
-    r is Ok <==> v.free_set().len() >= d)
-    &&& (live && l.pending is None && l.c == l.toks.len() && suffix.len() > 0 && l2 <= v.p * v.b && v.free_set().len()
-        < d) ==> r == Err::<PageTableView, Error>(Error::NoCapacity)
+    &&& (live && !busy && ph && arg && l2 + v.cfg.mu <= v.p * v.b) ==> (r is Ok <==> v.free_set().len() >= d)
+    &&& (live && !busy && ph && arg && l2 + v.cfg.mu <= v.p * v.b && v.free_set().len() < d) ==> r
+        == Err::<PageTableView, Error>(Error::NoCapacity)
     &&& r matches Ok(view) ==> {
         let fresh = view.pages@.subrange(l.table.len() as int, view.pages@.len() as int);
         &&& live
-        &&& view.pages@.len() == cdiv(l2, v.b)
+        &&& view.pages@.len() == cdiv(l2 + v.cfg.mu, v.b)
         &&& view.pages@.subrange(0, l.table.len() as int) == l.table
         &&& fresh.len() == d
         &&& fresh.no_duplicates()
         &&& forall|j: int| 0 <= j < fresh.len() ==> v.is_free(#[trigger] fresh[j])
-        &&& v2 == extended(v, h.id, suffix, fresh)
+        &&& v2 == grown(v, h.id, suffix, fresh, dfr)
         &&& v2.leases[h.id].c == l.c
     }
 }
 
-/// `Valid` is preserved by `extended`.
-pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>)
+pub open spec fn extend_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, r: Result<PageTableView, Error>) -> bool {
+    grow_result(v, v2, h, suffix, false, r)
+}
+
+/// `Valid` is preserved by `grown`.
+pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh: Seq<PageId>, dfr: bool)
     requires
         inv(v, log),
         v.leases.contains_key(h),
-        v.leases[h].pending is None,
-        v.leases[h].c == v.leases[h].toks.len(),
-        suffix.len() > 0,
-        v.leases[h].toks.len() + suffix.len() <= v.p * v.b,
-        blocks_for(v.leases[h].toks.len() + suffix.len(), v.b, v.leases[h].table.len() + fresh.len()),
+        !grow_busy(v, v.leases[h], dfr),
+        !v.leases[h].dfr,
+        !v.leases[h].stopped,
+        pfront(v, v.leases[h]) == v.leases[h].toks.len(),
+        dfr ==> suffix.len() == 0 && v.leases[h].pending.len() > 0,
+        !dfr ==> suffix.len() > 0,
+        v.leases[h].toks.len() + (if dfr { 1nat } else { suffix.len() }) + v.cfg.mu <= v.p * v.b,
+        blocks_for(v.leases[h].toks.len() + (if dfr { 1nat } else { suffix.len() }) + v.cfg.mu, v.b, v.leases[h].table.len() + fresh.len()),
         fresh.no_duplicates(),
         forall|j: int| 0 <= j < fresh.len() ==> v.is_free(#[trigger] fresh[j]),
     ensures
-        inv(extended(v, h, suffix, fresh), log),
-        forall|x: PageId| (x as nat) < v.p ==> #[trigger] extended(v, h, suffix, fresh).refs[x as int] == if fresh.contains(x) {
+        inv(grown(v, h, suffix, fresh, dfr), log),
+        forall|x: PageId| (x as nat) < v.p ==> #[trigger] grown(v, h, suffix, fresh, dfr).refs[x as int] == if fresh.contains(x) {
             v.refs[x as int] + 1
         } else {
             v.refs[x as int] as int
@@ -85,11 +128,39 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
     reveal(lease_ok);
     reveal(page_ok);
     reveal(pend_ok);
-    let v2 = extended(v, h, suffix, fresh);
+    let v2 = grown(v, h, suffix, fresh, dfr);
     let l = v.leases[h];
     let l2 = v2.leases[h];
     let n = l.table.len();
     assert(lease_ok(v, log, h));
+    assert(l2.dfr == dfr);
+    assert(lhat(l2) == l.toks.len() + (if dfr { 1nat } else { suffix.len() }));
+    // With δ <= 1 and room in the queue, at most one ticket is pending and it ends at L, so c <= L.
+    // extend needs it without drafts; extend_deferred keeps its drafts, which fit the new reach.
+    assert(l.pending.len() <= 1);
+    assert(l2.pending == l.pending);
+    if l.pending.len() == 1 {
+        assert(v.pend.contains_key(l.pending[0]));
+        assert(pend_ok(v, l.pending[0]));
+        assert(v.pend[l.pending[0]].z == l.toks.len());
+        assert(v.pend[l.pending[0]].drafts.len() <= v.cfg.lam);
+        if !dfr {
+            assert(v.pend[l.pending[0]].drafts.len() == 0);
+        }
+        assert(pfront(v2, l2) == l.toks.len());
+        assert(sdr(v2, l2) == v.pend[l.pending[0]].drafts.len());
+    } else {
+        assert(pfront(v2, l2) == l.c);
+        assert(sdr(v2, l2) == 0);
+    }
+    if dfr {
+        // X_h becomes [Q_h[0]] (I17); δ = 1 because a ticket is pending with room in the queue.
+        assert(v.cfg.delta <= 1);
+        assert(v.cfg.delta == 1);
+        assert(dlam(v.cfg) == v.cfg.lam);
+    }
+    assert(l2.rho == lhat(l2) + v.cfg.mu);
+    assert(l.c <= l.toks.len());
     assert(fresh.subrange(0, fresh.len() as int) =~= fresh);
     // Old table pages are referenced by h, fresh pages are free: disjoint.
     assert forall|i: int, j: int| 0 <= i < n && 0 <= j < fresh.len() implies #[trigger] l.table[i] != #[trigger] fresh[j] by {
@@ -222,12 +293,13 @@ pub proof fn lemma_extend_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fre
     }
     assert forall|t: u64| #[trigger] v2.pend.contains_key(t) implies pend_ok(v2, t) by {
         assert(pend_ok(v, t));
-        assert(v.pend[t].lease != h) by {
-            if v.pend[t].lease == h {
-                assert(v.leases[h].pending == Some(t));
-            }
+        if v.pend[t].lease == h {
+            // The pending ticket is the oldest; the reach is now whole for the longer input (I16).
+            assert(l.pending.contains(t));
+            assert(l.pending[0] == t);
+        } else {
+            lemma_pend_frame(v, v2, t);
         }
-        lemma_pend_frame(v, v2, t);
     }
     // Either nothing was added (last page unchanged) or the new last page is a fresh free page.
     assert(v2.leases.dom() =~= v.leases.dom().insert(h));
@@ -301,6 +373,38 @@ fn inc_suffix(refs: &mut Vec<u64>, tbl: &Vec<PageId>, k: usize)
 }
 
 impl Manager {
+    /// C2's gate on a live lease: `(Busy, p_h)` as in `extend_result`.
+    pub fn extend_gate(&self, h: u64) -> (r: (bool, usize))
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r.0 == extend_busy(self@, self@.leases[h]),
+            r.1 as nat == pfront(self@, self@.leases[h]),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+            reveal(lease_ok);
+            assert(lease_ok(self@, self.den_log(), h));
+        }
+        let l = self.leases.get(&h).unwrap();
+        let q = l.pending.len();
+        if q == 0 {
+            (false, l.c)
+        } else {
+            let t0 = l.pending[0];
+            let tl = l.pending[q - 1];
+            proof {
+                assert(self@.pend.contains_key(t0));
+                assert(self@.pend.contains_key(tl));
+            }
+            let r0 = self.pend.get(&t0).unwrap();
+            let rl = self.pend.get(&tl).unwrap();
+            (q > self.cfg.delta || r0.drafts.len() > 0 || r0.propose, rl.z)
+        }
+    }
+
     /// C2. `extend(h, suffix)`.
     pub fn extend(&mut self, h: Handle, suffix: &[Token]) -> (r: Result<PageTableView, Error>)
         requires
@@ -311,6 +415,37 @@ impl Manager {
             r is Err ==> final(self)@ == old(self)@,
             extend_result(old(self)@, final(self)@, h, suffix@, r),
     {
+        self.grow(h, suffix, false)
+    }
+
+    /// C2b. `extend_deferred(h)`: append the bonus position of the newest pending ticket (D22).
+    pub fn extend_deferred(&mut self, h: Handle) -> (r: Result<PageTableView, Error>)
+        requires
+            old(self).valid(),
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            r is Err ==> final(self)@ == old(self)@,
+            grow_result(old(self)@, final(self)@, h, Seq::<Token>::empty(), true, r),
+    {
+        let none: Vec<Token> = Vec::new();
+        proof {
+            assert(none@ =~= Seq::<Token>::empty());
+        }
+        self.grow(h, none.as_slice(), true)
+    }
+
+    /// C2 and C2b.
+    pub(crate) fn grow(&mut self, h: Handle, suffix: &[Token], dfr: bool) -> (r: Result<PageTableView, Error>)
+        requires
+            old(self).valid(),
+            dfr ==> suffix@.len() == 0,
+        ensures
+            final(self).valid(),
+            final(self).den_log() == old(self).den_log(),
+            r is Err ==> final(self)@ == old(self)@,
+            grow_result(old(self)@, final(self)@, h, suffix@, dfr, r),
+    {
         if !self.handle_ok(h) {
             return Err(Error::InvalidHandle);
         }
@@ -320,19 +455,35 @@ impl Manager {
         }
         let ghost v = self@;
         let ghost log = self.den_log();
-        let (l_len, l_c, l_pend, m) = {
-            let l = self.leases.get(&h.id).unwrap();
-            (l.toks.len(), l.c, l.pending.is_some(), l.table.len())
-        };
-        if l_pend {
-            return Err(Error::Busy);
-        }
-        if l_c != l_len {
+        if self.leases.get(&h.id).unwrap().stopped {
             return Err(Error::InvalidPhase);
         }
-        if suffix.len() == 0 {
+        let (l_len, _l_c, q, m, l_dfr) = {
+            let l = self.leases.get(&h.id).unwrap();
+            (l.toks.len(), l.c, l.pending.len(), l.table.len(), l.dfr)
+        };
+        proof {
+            reveal(lease_ok);
+            reveal(pend_ok);
+            assert(lease_ok(v, log, h.id));
+        }
+        // Busy (D21): the queue is full, or, for extend, its oldest ticket has drafts or proposal rows.
+        let (busy0, pf) = self.extend_gate(h.id);
+        let busy = if dfr { q > self.cfg.delta } else { busy0 };
+        proof {
+            assert(busy == grow_busy(v, v.leases[h.id], dfr));
+        }
+        if busy {
+            return Err(Error::Busy);
+        }
+        if l_dfr || pf != l_len || (dfr && q == 0) {
+            return Err(Error::InvalidPhase);
+        }
+        if !dfr && suffix.len() == 0 {
             return Err(Error::InvalidArgument);
         }
+        // The input grows by the suffix, or by the deferred position (D22).
+        let add = if dfr { 1 } else { suffix.len() };
         let b = self.b;
         let p = self.p;
         proof {
@@ -341,24 +492,20 @@ impl Manager {
             assert(b as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires p >= 1;
             assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
         }
-        if suffix.len() > p * b - l_len {
+        let mu = self.cfg.mu;
+        if add > p * b - l_len || mu > p * b - l_len - add {
             return Err(Error::RequestTooLarge);
         }
-        let l2 = l_len + suffix.len();
-        let m2 = (l2 + b - 1) / b;
+        let l2 = l_len + add;
+        let m2 = (l2 + mu + b - 1) / b;
         proof {
             lemma_cdiv_props(l_len as nat, b as nat);
-            lemma_cdiv_props(l2 as nat, b as nat);
-            lemma_cdiv_mono(l_len as nat, l2 as nat, b as nat);
-            // blocks_for(l_len, b, m) pins m = cdiv(l_len, b).
-            let c1 = cdiv(l_len as nat, b as nat);
-            if (m as nat) < c1 {
-                lemma_mul_mono(m as nat, (c1 - 1) as nat, b as nat);
+            lemma_cdiv_props((l2 + mu) as nat, b as nat);
+            // m = ceil(ρ/B) with ρ <= L + μ < L' + μ, so m <= m2 (D18).
+            if (m as nat) > (m2 as nat) {
+                lemma_mul_mono(m2 as nat, (m - 1) as nat, b as nat);
             }
-            if (m as nat) > c1 {
-                lemma_mul_mono(c1, (m - 1) as nat, b as nat);
-            }
-            assert(m as nat == c1);
+            assert(m <= m2);
         }
         let d = m2 - m;
         if self.free.len() < d {
@@ -398,14 +545,16 @@ impl Manager {
         }
         inc_suffix(&mut self.refs, &l.table, m);
         l.toks.extend_from_slice(suffix);
+        l.rho = l2 + mu;
+        l.dfr = dfr;
         proof {
             assert(l.toks@ =~= v.leases[h.id].toks + suffix@);
             assert(l.table@ =~= t0 + fresh);
-            lemma_extend_inv(v, log, h.id, suffix@, fresh);
+            lemma_grow_inv(v, log, h.id, suffix@, fresh, dfr);
         }
         let view = PageTableView { pages: vstd::slice::slice_to_vec(l.table.as_slice()) };
         self.leases.insert(h.id, l);
-        let ghost v2 = extended(v, h.id, suffix@, fresh);
+        let ghost v2 = grown(v, h.id, suffix@, fresh, dfr);
         self.g = Ghost(v2);
         proof {
             assert(self.leases@.dom() =~= v2.leases.dom());

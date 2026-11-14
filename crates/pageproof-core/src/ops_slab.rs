@@ -218,7 +218,7 @@ impl Manager {
             self.valid(),
         ensures
             r is None <==> !self@.leases.contains_key(h),
-            r matches Some(p) ==> p == (self@.leases[h].pending is Some),
+            r matches Some(p) ==> p == (self@.leases[h].pending.len() > 0),
     {
         proof {
             self.lemma_valid();
@@ -226,8 +226,38 @@ impl Manager {
         }
         match self.leases.get(&h) {
             None => None,
-            Some(l) => Some(l.pending.is_some()),
+            Some(l) => Some(l.pending.len() > 0),
         }
+    }
+
+    /// `|D|` of a pending ticket.
+    pub fn pend_drafts_len(&self, t: u64) -> (r: usize)
+        requires
+            self.valid(),
+            self@.pend.contains_key(t),
+        ensures
+            r as nat == self@.pend[t].drafts.len(),
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.pend.get(&t).unwrap().drafts.len()
+    }
+
+    /// `ρ_h` of a live lease.
+    pub fn lease_rho(&self, h: u64) -> (r: usize)
+        requires
+            self.valid(),
+            self@.leases.contains_key(h),
+        ensures
+            r as nat == self@.leases[h].rho,
+    {
+        proof {
+            self.lemma_valid();
+            self.lemma_rep_dom();
+        }
+        self.leases.get(&h).unwrap().rho
     }
 
     /// `(|T_h|, c_h, pending)` of a live lease.
@@ -238,14 +268,14 @@ impl Manager {
         ensures
             r.0 as nat == self@.leases[h].toks.len(),
             r.1 as nat == self@.leases[h].c,
-            r.2 == (self@.leases[h].pending is Some),
+            r.2 == (self@.leases[h].pending.len() > 0),
     {
         proof {
             self.lemma_valid();
             self.lemma_rep_dom();
         }
         let l = self.leases.get(&h).unwrap();
-        (l.toks.len(), l.c, l.pending.is_some())
+        (l.toks.len(), l.c, l.pending.len() > 0)
     }
 
     /// `Pending[t]` as `(lease, a, z)`, if live.

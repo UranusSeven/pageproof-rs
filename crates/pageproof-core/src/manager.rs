@@ -42,7 +42,14 @@ pub struct LeaseC {
     pub toks: Vec<Token>,
     pub table: Vec<PageId>,
     pub c: usize,
-    pub pending: Option<u64>,
+    /// `Q_h`: pending ticket ids in issue order.
+    pub pending: Vec<u64>,
+    /// `ρ_h`.
+    pub rho: usize,
+    /// `X_h` is non-empty (D22).
+    pub dfr: bool,
+    /// `stopped_h` (D25).
+    pub stopped: bool,
     /// Chain head: key of the last published complete block, or `Seed(ns)`.
     pub head: Digest,
 }
@@ -51,6 +58,9 @@ pub struct PendC {
     pub lease: u64,
     pub a: usize,
     pub z: usize,
+    pub drafts: Vec<Token>,
+    pub propose: bool,
+    pub ddr: bool,
 }
 
 pub struct Manager {
@@ -58,6 +68,8 @@ pub struct Manager {
     pub(crate) p: usize,
     pub(crate) b: usize,
     pub(crate) ns: Vec<u8>,
+    /// The shared configuration (v0.2.1: `v021_cfg`).
+    pub(crate) cfg: PCfgC,
     pub(crate) seed: Digest,
     pub(crate) leases: HashMap<u64, LeaseC>,
     pub(crate) pend: HashMap<u64, PendC>,
@@ -74,11 +86,11 @@ pub struct Manager {
 }
 
 pub open spec fn lease_view(l: LeaseC) -> LeaseV {
-    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending }
+    LeaseV { toks: l.toks@, table: l.table@, c: l.c as nat, pending: l.pending@, rho: l.rho as nat, dfr: l.dfr, stopped: l.stopped }
 }
 
 pub open spec fn pend_view(r: PendC) -> PendV {
-    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat }
+    PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@, propose: r.propose, ddr: r.ddr }
 }
 
 impl Manager {
@@ -106,6 +118,7 @@ impl Manager {
         &&& v.p == self.p as nat
         &&& v.b == self.b as nat
         &&& v.ns == self.ns@
+        &&& v.cfg == self.cfg@
         &&& self.seed == v.seed()
         &&& v.refs == self.refs@
         &&& v.keys == self.keys@
@@ -161,7 +174,7 @@ impl Manager {
             self.index_buckets() <= self@.p,
             self.num_leases() <= self@.p,
             self.num_leases() == self@.leases.dom().len(),
-            self.num_pending() <= self.num_leases(),
+            self.num_pending() <= (self@.cfg.delta + 1) * self.num_leases(),
             forall|h: u64| #[trigger] self@.leases.contains_key(h) ==> self@.leases[h].table.len() <= self@.p
                 && self@.leases[h].toks.len() <= self@.p * self@.b,
             self@.free_set().len() <= self@.p,
@@ -207,6 +220,16 @@ impl Manager {
         self.index.bucket_count()
     }
 
+    /// The shared configuration.
+    pub fn cfg_exec(&self) -> (r: PCfgC)
+        requires
+            self.valid(),
+        ensures
+            r@ == self@.cfg,
+    {
+        self.cfg
+    }
+
     pub fn free_count(&self) -> (r: usize)
         requires
             self.valid(),
@@ -223,16 +246,18 @@ impl Manager {
 
 /// The abstract initial state (every unit owned: the v0.2.1 configuration).
 pub open spec fn initial(id: u64, p: nat, b: nat, ns: Seq<u8>) -> MgrV {
-    initial_own(id, p, b, ns, true)
+    initial_own(id, p, b, ns, true, v021_cfg())
 }
 
-/// The abstract initial state with every unit owned (`o`) or unowned (`!o`).
-pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool) -> MgrV {
+/// The abstract initial state with every unit owned (`o`) or unowned (`!o`), and configuration
+/// `cfg`.
+pub open spec fn initial_own(id: u64, p: nat, b: nat, ns: Seq<u8>, o: bool, cfg: PCfg) -> MgrV {
     MgrV {
         id,
         p,
         b,
         ns,
+        cfg,
         leases: Map::empty(),
         pend: Map::empty(),
         refs: Seq::new(p, |i: int| 0u64),
@@ -258,32 +283,39 @@ impl Manager {
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
             (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
     {
-        Self::create_own(p, b, ns, true)
+        Self::create_own(p, b, ns, true, PCfgC { mu: 0, lam: 0, delta: 0, ntarget: 1 })
     }
 
-    /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs).
-    pub fn create_empty(p: usize, b: usize, ns: &[u8]) -> (r: Result<Manager, Error>)
+    /// A paged class over `p` units, owning none of them (v0.3, units arrive with slabs), with
+    /// reservation margin `mu` (D18).
+    pub fn create_empty(p: usize, b: usize, ns: &[u8], cfg: PCfgC) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, false, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
+                || cfg.delta > 1 || !cfg_room(cfg@)) ==> r is Err,
     {
-        Self::create_own(p, b, ns, false)
+        Self::create_own(p, b, ns, false, cfg)
     }
 
-    fn create_own(p: usize, b: usize, ns: &[u8], o: bool) -> (r: Result<Manager, Error>)
+    fn create_own(p: usize, b: usize, ns: &[u8], o: bool, cfg: PCfgC) -> (r: Result<Manager, Error>)
         ensures
             r matches Ok(m) ==> {
                 &&& m.valid()
-                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o)
+                &&& m@ == initial_own(m@.id, p as nat, b as nat, ns@, o, cfg@)
             },
             r matches Err(e) ==> e == Error::ConfigError || e == Error::IdentifierExhausted,
-            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX) ==> r is Err,
+            (p == 0 || b == 0 || (p as nat) * (b as nat) > max_slots() || ns@.len() > u32::MAX || cfg.mu as nat > max_slots()
+                || cfg.delta > 1 || !cfg_room(cfg@)) ==> r is Err,
     {
-        if p == 0 || b == 0 || ns.len() > u32::MAX as usize {
+        if p == 0 || b == 0 || ns.len() > u32::MAX as usize || cfg.mu > MAX_SLOTS as usize || cfg.delta > 1 {
+            return Err(Error::ConfigError);
+        }
+        // D18: μ covers a ticket's drafts plus δ more tickets' drafts.
+        if cfg.lam > cfg.mu || (cfg.delta == 1 && cfg.lam > cfg.mu - cfg.lam) {
             return Err(Error::ConfigError);
         }
         proof {
@@ -314,7 +346,7 @@ impl Manager {
         let seed = hash_seed(ns, Tracked(&mut log));
         let refs: Vec<u64> = vec![0u64; p];
         let keys: Vec<Option<Digest>> = vec![None; p];
-        let ghost v = initial_own(id, p as nat, b as nat, ns@, o);
+        let ghost v = initial_own(id, p as nat, b as nat, ns@, o, cfg@);
         assert(refs@ =~= v.refs);
         assert(keys@ =~= v.keys);
         let own: Vec<bool> = vec![o; p];
@@ -326,6 +358,7 @@ impl Manager {
             p,
             b,
             ns: nsv,
+            cfg,
             seed,
             leases: HashMap::new(),
             pend: HashMap::new(),
