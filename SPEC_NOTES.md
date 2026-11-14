@@ -101,13 +101,17 @@ and verified; it is the paged-class building block of the `Coordinator`.
   never succeeds with `δ = 0`. `create_empty` also requires `λ + δλ ≤ μ`, which every coordinator
   configuration satisfies.
 - **Reclaim choice is greedy** (D9 leaves it open); `plan_rel` proves the counts.
-- **Two §7 slab rows can't be exercised through the coordinator.** Without a state class no slab
-  is ever reclaimed: the paged classes grow in lockstep, so when one class is short (`F < d`), every
-  other class has fewer than `d + n` free units and can't give up a slab. With a state class there
-  are no hits (D13). So "a reclaimable slab holds the only free candidate for a hit" (Prot under
-  pressure) can't happen, and "reclaim revokes keys" can't show as a lost hit. The `Prot` and
-  revocation rules are still proved (`slabplan.rs`, `reclaim_range`). Revocation is also tested
-  on one paged class (`edge_cases.rs::reclaim_revokes_the_keys_of_its_range`).
+- **Paged classes agree on leases, not on which pages hits share.** D14 keeps every paged class
+  on the same leases, inputs and table lengths, but each class picks its own candidate for a hit.
+  `scan_bucket` takes the first referenced candidate in bucket order, revoking a key reorders a
+  bucket (`swap_remove`), and each class's free set pops in its own order. Classes with different
+  pages per slab can therefore revoke a key in one class only, and later hits can share one
+  lease's page in one class and another lease's in the other. Free-unit counts then differ across
+  classes, so a paged-only arena can reclaim: `coord_edge_cases.rs::divergent_paged_arena` builds
+  such an arena. With it, `paged_only_reclaim_revokes_the_keys_of_its_slab` checks that a
+  reclaimed slab's key stops being a hit, and `prot_keeps_the_only_free_candidate_of_a_hit` covers
+  the §7 row "a reclaimable slab holds the only free candidate for a hit" (Prot under pressure).
+  The proofs never relied on the classes sharing the same pages.
 - **State units are not cleared.** Freed, reclaimed and stopped slots get `W = ⊥`; E10 makes the
   executor initialise a slot when `init` is set.
 - **`Coordinator::create` caps the class count at 2¹⁶** and each class at `N·n_c·B ≤ 2⁴⁰` token

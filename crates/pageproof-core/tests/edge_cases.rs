@@ -442,10 +442,11 @@ fn index_buckets_stay_bounded_under_churn() {
 
 #[test]
 fn reclaim_revokes_the_keys_of_its_range() {
-    // §3.5 rule 3, obligation 12: reclaiming a slab revokes every key in it. In a coordinator this
-    // can't show as a lost hit, because reclaim needs a state class and a state class disables
-    // hits (D13). So this checks it on one paged class, through the same `reclaim_range` and
-    // `grant_range` the coordinator's slab plan calls. One page per slab.
+    // §3.5 rule 3, obligation 12: reclaiming a slab revokes every key in it. This checks it
+    // directly on one paged class, through the same `reclaim_range` and `grant_range` the
+    // coordinator's slab plan calls; `coord_edge_cases.rs::
+    // paged_only_reclaim_revokes_the_keys_of_its_slab` checks it through a coordinator. One page
+    // per slab.
     let t = toks(12, 41);
     for (revoked, cached) in [(1usize, 4usize), (0, 0)] {
         let mut m = mgr(4, 4);

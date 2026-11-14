@@ -222,10 +222,8 @@ fn reclaim_idle_keyed_slab_for_state() {
 #[test]
 fn release_leaves_idle_keyed_slabs_reclaimable() {
     // Paged-only: after release, idle keyed slabs count as reclaimable while their blocks remain
-    // hits. Without a state class no paged slab is ever reclaimed: every paged class grows in
-    // lockstep, so none is ever short while another has an idle slab to spare. With a state class
-    // there are no hits (D13), so a coordinator can't show that reclaim revokes keys;
-    // `edge_cases.rs::reclaim_revokes_the_keys_of_its_range` checks it on one paged class.
+    // hits. Nothing is reclaimed here; `paged_only_reclaim_revokes_the_keys_of_its_slab` reclaims
+    // in a paged-only arena and checks that the reclaimed slab's keys are gone.
     // Class 0: 1 page/slab; class 1: 4 pages/slab.
     let mut co = Coordinator::create(3, 64, &[64, 16], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 5);
@@ -286,11 +284,10 @@ fn reclaim_when_free_slabs_run_out() {
 
 #[test]
 fn reattach_hits_the_cached_pages_of_idle_slabs() {
-    // Re-attach takes its hits from idle keyed slabs. The §7 row "a reclaimable slab holds the only
-    // free candidate for a hit position" (Prot under pressure) has no test because it can't
-    // happen: Prot is non-empty only when k* > 0, which needs no state class, and without a state
-    // class no slab is ever reclaimed. Class 0: unit 16 (4/slab). Class 1: unit 32 (2/slab).
-    // 3 slabs.
+    // Re-attach takes its hits from idle keyed slabs, with nothing reclaimed. The §7 row "a
+    // reclaimable slab holds the only free candidate for a hit position" (Prot under pressure) is
+    // `prot_keeps_the_only_free_candidate_of_a_hit`. Class 0: unit 16 (4/slab). Class 1: unit 32
+    // (2/slab). 3 slabs.
     let mut co = Coordinator::create(3, 64, &[16, 32], &[], &[], 4, 0, 0, NS).unwrap();
     let t = toks(8, 7);
     let (ha, _, va) = co.attach(&t).unwrap();
@@ -1750,4 +1747,83 @@ fn a_free_slab_is_used_before_a_reclaimable_one() {
     for h in [hy, hz] {
         co.release(h).unwrap();
     }
+}
+
+/// A paged-only arena whose two classes no longer agree on which lease's page a hit shares
+/// (review of PR 7). Class 0 has 4 pages per slab, class 1 one. Afterwards no slab is free,
+/// class 0 has 5 free units and class 1 has 8. Returns Q's prompt and Q's tables.
+fn divergent_paged_arena() -> (Coordinator, Vec<u32>, LeaseView) {
+    let mut co = Coordinator::create(25, 64, &[16, 64], &[], &[], 4, 0, 0, NS).unwrap();
+    let t: Vec<u32> = (500..513).collect(); // three full blocks and a tail: 4 pages
+    let p: Vec<u32> = (600..616).collect(); // Q's prompt: four full blocks, one class-0 slab
+    // A, B and X publish t's three blocks on their own pages: three candidates per key.
+    let (ha, _, _) = co.attach(&t).unwrap();
+    let (hb, _, vb) = co.attach(&t).unwrap();
+    let (hx, _, vx) = co.attach(&t).unwrap();
+    for h in [ha, hb, hx] {
+        compute_all(&mut co, h);
+    }
+    co.release(ha).unwrap();
+    // Y needs 5 pages and each class has A's 4 free. Class 0 takes a fresh 4-page slab and keeps
+    // A's keys; class 1 takes A's pages, revoking them and reordering its buckets.
+    co.attach(&(700..717).collect::<Vec<u32>>()).unwrap();
+    // So D hits t's blocks on B's pages in class 0 and on X's pages in class 1.
+    let (_, cd, vd) = co.attach(&t).unwrap();
+    assert_eq!(cd, 12);
+    assert_eq!(&vd.tables[0][..3], &vb.tables[0][..3]);
+    assert_eq!(&vd.tables[1][..3], &vx.tables[1][..3]);
+    // W uses up class 0's leftover pages of A; Q takes exactly one class-0 slab.
+    co.attach(&(720..728).collect::<Vec<u32>>()).unwrap();
+    let (hq, _, vq) = co.attach(&p).unwrap();
+    compute_all(&mut co, hq);
+    // Releasing B frees its block pages in class 1 only, since D holds them in class 0.
+    co.release(hb).unwrap();
+    co.release(hq).unwrap();
+    assert_eq!((free_slabs(&co), co.arena().free_units), (0, vec![5, 8]));
+    (co, p, vq)
+}
+
+#[test]
+fn paged_only_reclaim_revokes_the_keys_of_its_slab() {
+    // §7 "reclaim revokes keys", through the coordinator. Once the classes disagree on which pages
+    // hits share, a paged-only arena reclaims: class 0 is short, and class 1 gives its lowest idle
+    // slab, which holds the only class-1 candidate of Q's block 0.
+    let (mut co, p, vq) = divergent_paged_arena();
+    let (mut twin, _, _) = divergent_paged_arena();
+    assert_eq!(vq.tables[1][0], 0, "Q's block 0 is slab 0 in class 1 (one page per slab)");
+    let before = owners(&co);
+    let (hz, _, vz) = co.attach(&(800..824).collect::<Vec<u32>>()).unwrap();
+    let after = owners(&co);
+    let moved: Vec<usize> = (0..25).filter(|&s| before[s] != after[s]).collect();
+    assert_eq!(moved, vec![0]);
+    assert_eq!((before[0], after[0]), (2, 1), "class 1 gave slab 0 to class 0");
+    assert!(!vz.tables[0].contains(&vq.tables[0][0]), "class 0 keeps Q's block-0 page");
+    co.release(hz).unwrap();
+    // Block 0 is still published in class 0 but no longer in class 1, so nothing hits. On the
+    // same arena without the reclaim, the whole prompt hits.
+    let mut probe = p.clone();
+    probe.push(1);
+    assert_eq!(co.attach(&probe).unwrap().1, 0);
+    assert_eq!(twin.attach(&probe).unwrap().1, 16);
+}
+
+#[test]
+fn prot_keeps_the_only_free_candidate_of_a_hit() {
+    // §7: a reclaimable slab holds the only free candidate for a hit position of this attach, so
+    // it is not reclaimed in this call (Prot). Slab 0 is class 1's lowest idle slab, the donor's
+    // first choice, but it holds Q's block 0, which this attach hits while class 0 is short.
+    let (mut co, p, vq) = divergent_paged_arena();
+    assert_eq!(vq.tables[1], vec![0, 1, 2, 3]);
+    let before = owners(&co);
+    let mut longer = p.clone();
+    longer.extend(1..9u32); // 6 pages: 4 hits and 2 fresh
+    let (h, cached, v) = co.attach(&longer).unwrap();
+    assert_eq!(cached, 16);
+    assert_eq!(&v.tables[1][..4], &vq.tables[1][..]);
+    let after = owners(&co);
+    let moved: Vec<usize> = (0..25).filter(|&s| before[s] != after[s]).collect();
+    assert_eq!(moved.len(), 1);
+    assert!(moved[0] > 3, "a slab other than Q's was reclaimed, here {}", moved[0]);
+    assert_eq!((before[moved[0]], after[moved[0]]), (2, 1));
+    co.release(h).unwrap();
 }
