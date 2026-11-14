@@ -99,8 +99,9 @@ Speculative decoding with a drafter class and ZOS:
 sd = pp.Coordinator(1024, 1966080, [96 << 10], [], 16, b"model-v1",
                     drafter_units=[96 << 10], max_drafts=4, zos_depth=1)
 h, cached, _ = sd.attach(prompt_ids)
-p = sd.begin_write(h, len(prompt_ids) - 1 - cached)  # prefill all but the last token
-sd.finish_write(p.ticket)
+if cached < len(prompt_ids) - 1:                     # a repeat prompt can be cached up to its last token
+    p = sd.begin_write(h, len(prompt_ids) - 1 - cached)  # prefill all but the last token
+    sd.finish_write(p.ticket)
 v = sd.begin_write(h, 1, drafts, propose=True)       # verify step: the last token + drafts
 sd.extend_deferred(h)                                # plan the next step now
 c = sd.begin_write(h, 1, propose=True, deferred_drafts=4)
