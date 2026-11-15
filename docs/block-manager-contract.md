@@ -1,6 +1,6 @@
-# Block Manager Functional Contract v0.6 (draft)
+# Block Manager Functional Contract v0.6
 
-Status: specification draft for review. v0.4.1, v0.5 and v0.6 are **not yet implemented**. This repository implements and verifies v0.3 (`Coordinator`); `SPEC_NOTES.md` maps each v0.3 clause to its proof. With `δ = 0`, v0.6 behaves exactly like v0.4.1 (§9.1 obligation 20). With `δ = 0`, `λ = 0` and no drafter class, it behaves exactly like v0.3 (obligation 18). With `λ = 0`, it behaves exactly like v0.5 (obligation 24). So the v0.3 proofs are the base for v0.4.1, v0.4.1 is the base for v0.5, and v0.5 is the base for v0.6.
+Status: implemented and verified. `crates/pageproof-core` implements v0.6 (`Coordinator`, merged in [pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)), and Verus proves every public method against C0–C7 and C2b. `SPEC_NOTES.md` maps each clause and §9.1 obligation to its proof and lists the deviations, among them that the refinement obligations 14, 18, 20 and 24 are not proved as observational equivalences. By design, with `δ = 0`, v0.6 behaves exactly like v0.4.1 (§9.1 obligation 20). With `δ = 0`, `λ = 0` and no drafter class, it behaves exactly like v0.3 (obligation 18). With `λ = 0`, it behaves exactly like v0.5 (obligation 24). So the v0.3 proofs were the base for v0.4.1, v0.4.1 for v0.5, and v0.5 for v0.6.
 Date: 2026-11-13 (v0.5: 2026-11-12; v0.4.1: 2026-11-12; v0.4: 2026-11-12; v0.3: 2026-11-04; v0.2.1: 2026-11-03; v0.2: 2026-11-02; v0.1: 2026-11-01).
 Reference code: nano-vLLM `bb823b3e06983d71485a8e1f23715ebd87d98ef8`: `block_manager.py`, `sequence.py`, `scheduler.py`; `prefix_keys` in `shell/offload.py` (the existing implementation of chained keys).
 Layout reference: DeepInfer `0d0a93ff09c99af7a8521f230e16507bf3e00dda`: `deepinfer/kv_spec/kvspec.py` (`LogicalSpec`, `layout`, `PhysicalPlan`), `deepinfer/kv_spec/deepseek_v4.py`, `deepinfer/worker/kv_cache_views.py`.
@@ -79,7 +79,7 @@ One coordinator serves one model configuration and owns its arena. External code
 
 ### 1.1 Explicit non-goals and write assumption for v0.6
 
-v0.4 supports speculative decoding with **linear draft chains**: a verify ticket feeds the last input token followed by up to `λ` drafts, and its completion accepts a prefix of them. Rejected drafts never enter `T_h`, so no truncate primitive is needed (D17). v0.5 adds zero-overhead scheduling for steps without drafts or proposals: up to `δ` further steps of a lease may be planned before the previous step's sampled token reaches the host (D21, D22). v0.6 lets such a step follow a verify step whose acceptance count is not yet known: the step's start is bounded, and its inputs and drafts come from the device (D24). The following capabilities are still not in this draft's state machine. Callers must handle them separately and must not treat them as proved properties:
+v0.4 supports speculative decoding with **linear draft chains**: a verify ticket feeds the last input token followed by up to `λ` drafts, and its completion accepts a prefix of them. Rejected drafts never enter `T_h`, so no truncate primitive is needed (D17). v0.5 adds zero-overhead scheduling for steps without drafts or proposals: up to `δ` further steps of a lease may be planned before the previous step's sampled token reaches the host (D21, D22). v0.6 lets such a step follow a verify step whose acceptance count is not yet known: the step's start is bounded, and its inputs and drafts come from the device (D24). The following capabilities are still not in this version's state machine. Callers must handle them separately and must not treat them as proved properties:
 
 - Tree drafts (EAGLE-2, Medusa trees): the accepted path would sit in non-contiguous slots, which needs a KV compaction step in the plan.
 - More than one state slot per lease for rollback (vLLM's default path, which keeps `num_speculative_tokens` extra state blocks per request, or kvspec `State.copies > 1`). This contract keeps exactly one slot and relies on the executor to rebuild the accepted state inside it (D19, E11). A state executor that cannot do that must run with `λ = 0`.
@@ -100,7 +100,7 @@ Until these primitives exist, an adapter must not claim to cover every feature o
 
 ## 2. Design decisions adopted in this version
 
-| ID | Draft default | Rationale or cost |
+| ID | Decision | Rationale or cost |
 |---|---|---|
 | D1 | Each coordinator fixes `N`, `S`, the class table, `B` and the KV namespace; there is no globally mutable block size | Multiple processes or instances do not depend on one implicit global value |
 | D2 | attach reserves pages in every paged class for all current input tokens, and one slot in every state class | Keeps upstream's eager allocation; chunked prefill only advances the computed frontier |
@@ -128,7 +128,7 @@ Until these primitives exist, an adapter must not claim to cover every feature o
 | D24 | A ticket whose input is a deferred token is a **continuation** of that token's producer, the newest pending ticket. Its start is bounded: `a = lo + σ`, where `lo` is known at issue and `σ ∈ [0, s]` is the number of drafts the older pending tickets of the lease will accept, with slack `s` their total draft count. Its drafts, if any, are the ones its producer's proposal forward samples, and the coordinator learns them only from the continuation's completion. The plan lists write slots for every position the ticket can write, `[lo, lo + s + 1 + k)` (plus `λ` in drafter classes with `propose`), and the executor writes the window that starts at `a` | This is microgravity's device row: `context_lens` is `lo`, `ctx_slack` is `s`, and `prev_seq` names the producer, whose `PrevSpec(accepted, last, drafts)` resolves the context and the inputs on the device (`shell.md` §1.10, `runner.md` §3.3). Listing every slot keeps E5: the executor selects addresses from the plan. microgravity's runner instead derives the slots on the device from the block table and the shifted positions (`runner.md` §3.3); that is the same selection when the block table it reads is the plan's page mapping (E5). A continuation needs no host-known drafts, so the host never waits for the device's proposal. The v0.5 deferred decode is the special case `s = 0`, `k = 0` |
 | D25 | A completion may carry `stop`. It commits a prefix of what the device accepted, appends the bonus token only if one is given and the ticket heads `X_h`, orphans every younger ticket of the lease, and makes the lease **stopped**. An orphan completes in issue order and credits, publishes and binds nothing. A stopped lease accepts no new work; it can only be inspected and, once its queue is empty, released | The device does not apply stop rules, so its acceptance count can run past an EOS inside the accepted span, and the continuation already started from that count (microgravity `process_outputs_spec` truncates on the host and drops the in-flight row of a finished sequence). After a truncation, the continuation's window starts past the coordinator's frontier and its inputs follow the EOS, so its KV is not KV of `T_h` and must not be credited. Making the lease terminal keeps the frontier and the state slot from ever depending on an orphan's writes |
 
-D1–D25 are proposed semantics, not claims that upstream already satisfies them. D4, D6–D8, D10–D14 and D16–D25 in particular require changes to the implementation and interface; this draft does not promise function-by-function compatibility with the old API.
+D1–D25 are proposed semantics, not claims that upstream already satisfies them. D4, D6–D8, D10–D14 and D16–D25 in particular require changes to the implementation and interface; this contract does not promise function-by-function compatibility with the old API.
 
 ## 3. Abstract state
 
@@ -176,7 +176,7 @@ The domain of `den` is exactly the chain outputs `{Seed(ns)} ∪ {K(h,i)}`. It i
 
 Request handles and execution tickets use distinct types that cannot be confused, and are bound to the coordinator and to their generation. An invalidated handle or ticket can never become valid again on a later object. If a concrete implementation's counter space is exhausted, it must safely reject new operations and never wrap around and reuse ids.
 
-A request in this draft means a block-manager lease, not the scheduler's WAITING/RUNNING/FINISHED state. The scheduler still manages its business requests; releasing a lease does not delete the user request or its output.
+A request in this contract means a block-manager lease, not the scheduler's WAITING/RUNNING/FINISHED state. The scheduler still manages its business requests; releasing a lease does not delete the user request or its output.
 
 ### 3.3 Semantic conventions
 
@@ -413,7 +413,7 @@ Every method must satisfy:
 
 These failure-atomicity requirements cover the specified input, capacity and phase errors. Process termination, runtime OOM and hardware faults are outside this version's state-machine promises.
 
-This draft assumes methods are called sequentially on one thread (or serialized by the caller), and claims no multi-threaded linearizability (E3). Computing a chained key is a pure function and modifies no state. `owner` and every `Index_c` change only on successful methods. So the strong failure atomicity of item 3 covers slab ownership, page tables, slots, references, every `Index_c` and id-allocation state, with no separate key-store state to cover.
+This contract assumes methods are called sequentially on one thread (or serialized by the caller), and claims no multi-threaded linearizability (E3). Computing a chained key is a pure function and modifies no state. `owner` and every `Index_c` change only on successful methods. So the strong failure atomicity of item 3 covers slab ownership, page tables, slots, references, every `Index_c` and id-allocation state, with no separate key-store state to cover.
 
 ## 6. API contracts
 
@@ -709,7 +709,7 @@ Returns `owner[s]` for every slab, and `|F_c|` and `|R_c|` (with `Prot = ∅`) f
 
 ## 8. Mapping from upstream methods and intentional changes
 
-| Upstream interface | Draft interface | Change |
+| Upstream interface | Contract interface | Change |
 |---|---|---|
 | BlockManager constructor | create | Fixes the arena, the class table and B, checks A1, and validates the representation range |
 | can_allocate + allocate | attach | One atomic operation across every class; does not depend on an externally supplied num_cached_blocks |
@@ -818,7 +818,7 @@ This is a new interface designed for a provable implementation; it cannot replac
 
 Auxiliary lemmas, loop invariants and data structures may be designed by the agent. But new assumes, axioms, skipped function bodies, or weakened pre/postconditions must not be used to pass off a proof as complete. E1–E13 are explicitly listed external assumptions and must not become a loophole for new assumes.
 
-v0.3 was implemented and proved in these steps: the slab arena with one paged class and obligation 14; several paged classes with per-class Index and `Cap`; state classes and cross-class atomicity; the ticket/completion protocol across classes and the Python runner adapter. v0.4 continues in these steps: (1) `λ` and the reach `ρ_h` with the new attach/extend demands, `drafts = []` and `n = 0` everywhere, and obligation 18; (2) verify tickets and partial commit on target paged classes (obligations 15, 16); (3) state classes with `num_drafts` and the E11 ghost update; (4) drafter classes and proposal rows (obligation 17); (5) the Python facade. v0.5 continues in these steps: (1) `δ` and the queue `Q_h` of at most `δ + 1` tickets, several tickets with known inputs, in-order completion, and obligation 20; (2) `extend` while tickets are pending (obligation 21); (3) `X_h`, extend_deferred, the `deferred` plan field and binding in `finish_write` (obligations 22, 23); (4) the Python facade and runtime tests that mirror microgravity's depth-1 vs depth-0 fuzz (`tests/test_scheduler.py`): identical token streams and published keys with and without pipelining, no unit of a pending ticket handed to another lease, out-of-order completion rejected, release Busy while any ticket is pending, and the EOS case of §7. v0.6 continues in these steps: (1) the `lo`, `s` and `base` fields and the reservation `μ = (δ + 1)·λ (+ λ)` with `λ > 0` (obligations 24, 25); (2) continuations with `k = 0` behind a verify ticket (obligation 26); (3) `Deferred(k)` drafts, a continuation behind a ticket with `propose`, and state classes (E11 with the device-side count); (4) `stop` and orphans (obligation 27); (5) the Python facade and runtime tests that mirror microgravity's ZOS-with-speculation tests (`tests/test_spec.py`): outputs equal plain decoding for clean and noisy drafts, device rows really used, block bounds checked after every step, and the planted bugs of `shell.md` §1.10 caught. Each step keeps the same external functional goals; properties left for later must not be counted as proved.
+v0.3 was implemented and proved in these steps: the slab arena with one paged class and obligation 14; several paged classes with per-class Index and `Cap`; state classes and cross-class atomicity; the ticket/completion protocol across classes and the Python runner adapter. v0.4.1, v0.5 and v0.6 were implemented and proved the same way, one verified step at a time ([pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)): (1) `λ`, `μ` and the reach `ρ_h` with the new attach/extend demands; (2) verify tickets and partial commit, with state classes taking `num_drafts`; (3) drafter classes and proposal rows; (4) queues of at most `δ + 1` tickets with in-order completion, and `extend` while tickets are pending; (5) `X_h`, extend_deferred and binding in `finish_write`; (6) the `lo`, `s` and `base` fields, continuations behind a verify ticket and `Deferred(k)` drafts; (7) `stop` and orphans; (8) the Python facade. Runtime tests in `crates/pageproof-core/tests` exercise the §7 table. The runtime tests this plan also called for have not been written: those that mirror microgravity's depth-1 vs depth-0 fuzz (`tests/test_scheduler.py`) and its ZOS-with-speculation tests (`tests/test_spec.py`). They are runtime checks, not proof obligations. Each step keeps the same external functional goals; properties left for later must not be counted as proved.
 
 ## 10. Decided and open
 
@@ -876,7 +876,8 @@ Decided in v0.6:
 - A continuation's completion reports its accepted drafts (D22).
 - `stop` commits a prefix of what the device accepted, orphans younger tickets and makes the lease terminal (D25, I18).
 - Host-known drafts still need an empty queue, and `propose` still needs a drafter class.
-Still open (must be decided in a later version or before implementation):
+
+Still open (to be decided in a later version):
 
 - Tree drafts: a compaction step in the plan that moves the accepted path's KV into the slots of `[z, z+n)`, and how it interacts with I6 and I16.
 - ZOS depth `δ >= 2`: stop and orphans (D25) cover the EOS case, but chains of continuations need the bounded start restated with several unknown acceptance counts, and the reservation grows by `λ` per extra step. Also open is whether to keep making a stopped lease terminal, or let it continue after the orphans drain.
@@ -896,6 +897,5 @@ Still open (must be decided in a later version or before implementation):
 - Whether to share identity with `prefix_keys` in `shell/offload.py`. Sharing requires aligning the Tag, the namespace fields and `grain == B`; otherwise the contract should state explicitly that there are two separate schemes.
 - Primitives for offload (`adopt`).
 - Static caches inside the arena.
-- The verification toolchain and repository name (outside this document).
 
-One more explicit boundary: this draft proves resources, provenance, addresses and protocol. Whether the GPU actually completed according to plan, and whether the KV and state values are numerically correct, need a separate executor contract. That boundary cannot be treated as proved just by assigning values to the ghosts `V_c` and `W_c`.
+One more explicit boundary: the proofs this contract requires cover resources, provenance, addresses and protocol. Whether the GPU actually completed according to plan, and whether the KV and state values are numerically correct, need a separate executor contract. That boundary cannot be treated as proved just by assigning values to the ghosts `V_c` and `W_c`.
