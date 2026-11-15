@@ -1,5 +1,6 @@
-//! Runtime checks of the contract v0.3 §7 edge cases against the verified coordinator: slab arena,
-//! several paged classes, state classes, reclaim, Prot, and the all-or-nothing operations.
+//! Runtime checks of the contract's §7 edge cases (v0.3 through v0.6 rows) against the verified
+//! coordinator: slab arena, several paged classes, state classes, reclaim, Prot, the all-or-nothing
+//! operations, speculative decoding, ZOS and stop.
 use pageproof_core::coord::Coordinator;
 use pageproof_core::coord_attach::LeaseView;
 use pageproof_core::coord_ops::{CoordCompletion, Drafts};
