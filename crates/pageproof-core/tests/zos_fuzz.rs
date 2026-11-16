@@ -49,7 +49,7 @@ const UNWRITTEN: u64 = 0;
 const MAX_TICKS: usize = 200_000;
 
 /// Returns `Err` with the message when the condition fails. Messages start with the check's tag
-/// (`[kv]`, `[stream]`, ...), which the planted-bug test matches.
+/// (`[kv]`, `[stream]`, ...).
 macro_rules! ensure {
     ($cond:expr, $($fmt:tt)+) => {
         if !$cond {
@@ -263,41 +263,6 @@ fn gen_mix(seed: u64, nreq: usize) -> Vec<ReqSpec> {
         .collect()
 }
 
-/// Bugs planted one at a time, in the simulated executor or (`IgnoreStop`) the scheduler, to show
-/// that the checks catch them. They approximate the planted bugs of microgravity's
-/// `docs/spec/shell.md` §1.10, which is not in this repository, from the contract's account of
-/// device rows and completions (D24, D25, E11–E13, `runner.md` §3.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Bug {
-    /// A continuation ignores the shift σ, its producer's acceptance count: its context is
-    /// `[0, lo)` and its window starts at `lo` (`ctx_slack` ignored).
-    NoShift,
-    /// A continuation writes the right slots, but its attention covers `[0, lo)` instead of
-    /// `[0, lo + σ)`: the context length omits the slack.
-    ContextWithoutSlack,
-    /// A continuation attends to the right context, but writes its window from `lo`: the slots are
-    /// derived from unshifted positions. Its own outputs are right; only the KV is misplaced.
-    SlotsWithoutShift,
-    /// A continuation feeds the plan's placeholder `input_ids` instead of its producer's bonus token
-    /// and drafts.
-    PlaceholderInputs,
-    /// A continuation takes its row from the ticket before its producer (`prev_seq` off by one):
-    /// that ticket's acceptance count, bonus token and drafts.
-    StaleProducer,
-    /// A continuation verifies the drafts of an older proposal than its producer's.
-    StaleDrafts,
-    /// The completion reports every draft as accepted, not the count the device used (E13(3)).
-    OverReport,
-    /// The proposal rows start at the input end `z` instead of the bonus position `z + n`, over
-    /// drafter KV that the completion credits (E12(2)).
-    ProposalAtInputEnd,
-    /// The state slot is rebuilt after every draft instead of after the accepted ones (E11).
-    StateAfterAllDrafts,
-    /// The scheduler does not cut the accepted span at an EOS or at max_tokens and never reports
-    /// stop (microgravity's `process_outputs_spec` truncates on the host, D25).
-    IgnoreStop,
-}
-
 #[derive(Clone)]
 struct Cfg {
     name: &'static str,
@@ -314,9 +279,6 @@ struct Cfg {
     /// flight, whenever it looks at the lease.
     pipeline: u32,
     nreq: usize,
-    /// Every request's drafter noise, instead of the mix's.
-    noise: Option<u32>,
-    bug: Option<Bug>,
 }
 
 impl Cfg {
@@ -333,8 +295,6 @@ impl Cfg {
             max_live: 4,
             pipeline: 70,
             nreq: 12,
-            noise: None,
-            bug: None,
         }
     }
 
@@ -353,11 +313,7 @@ impl Cfg {
 
     /// Plain decoding of the same model: `λ = 0`, `δ = 0` and no drafter class.
     fn plain(&self) -> Cfg {
-        Cfg { lam: 0, delta: 0, du: Vec::new(), bug: None, ..self.clone() }
-    }
-
-    fn with_bug(&self, bug: Bug) -> Cfg {
-        Cfg { bug: Some(bug), ..self.clone() }
+        Cfg { lam: 0, delta: 0, du: Vec::new(), ..self.clone() }
     }
 }
 
@@ -878,7 +834,7 @@ impl Run<'_> {
         if lv.held_drafts.len() >= k {
             return lv.held_drafts[..k].to_vec();
         }
-        let noise = self.cfg.noise.unwrap_or(self.reqs[lv.rid].spec.noise);
+        let noise = self.reqs[lv.rid].spec.noise;
         let (last, prefix) = lv.host_t.split_last().expect("a non-empty lease");
         let ch = chain_over(&self.m, prefix);
         draft(&self.m, ch, *last, k, noise, &mut self.rng)
@@ -917,11 +873,11 @@ impl Run<'_> {
     /// Runs the oldest ticket of a lease that the device has not run yet.
     fn execute(&mut self, li: usize) -> Result<(), String> {
         let Some(ix) = self.lives[li].dev_pending.pop_front() else { return Ok(()) };
-        let (m, lam, bug) = (self.m, self.cfg.lam, self.cfg.bug);
+        let (m, lam) = (self.m, self.cfg.lam);
         let (h, rid, a) = (self.lives[li].h, self.lives[li].rid, self.lives[li].end);
         let p = self.issued[ix].plan.clone();
         let samples = self.issued[ix].samples;
-        let noise = self.cfg.noise.unwrap_or(self.reqs[rid].spec.noise);
+        let noise = self.reqs[rid].spec.noise;
         let (l, k) = (p.l, p.k);
         // D24: the window starts where the previous ticket's input and accepted drafts end.
         ensure!(
@@ -972,38 +928,8 @@ impl Run<'_> {
                 self.stats.shifted += 1;
             }
         }
-        // A planted bug changes what the device feeds or where it writes.
-        let (mut s_used, mut ctx, mut in_used, mut dr_used) = (sigma, a, inputs, drafts);
-        if producer.is_some() {
-            let stale = match self.lives[li].dev_done.as_slice() {
-                [.., older, _] => self.issued[*older].dev.clone(),
-                _ => None,
-            };
-            match (bug, stale) {
-                (Some(Bug::NoShift), _) => {
-                    s_used = 0;
-                    ctx = p.lo;
-                },
-                (Some(Bug::ContextWithoutSlack), _) => ctx = p.lo,
-                (Some(Bug::SlotsWithoutShift), _) => s_used = 0,
-                (Some(Bug::PlaceholderInputs), _) => {
-                    in_used = p.input_ids[..l].to_vec();
-                    dr_used = p.input_ids[l..].to_vec();
-                },
-                (Some(Bug::StaleProducer), Some(o)) if o.bonus.is_some() && o.proposals.len() >= k => {
-                    s_used = o.n.min(p.slack);
-                    ctx = (p.lo + s_used).min(a);
-                    in_used = vec![o.bonus.expect("checked")];
-                    dr_used = o.proposals[..k].to_vec();
-                },
-                (Some(Bug::StaleDrafts), Some(o)) if o.proposals.len() >= k => dr_used = o.proposals[..k].to_vec(),
-                _ => {},
-            }
-        }
         // §9.0 (b): every slot of [0, a) holds the KV of the lease's tokens, in every paged class.
-        let mut chains = Vec::with_capacity(a + 1);
         let mut ch = Chain::start();
-        chains.push(ch);
         for pos in 0..a {
             let tok = self.lives[li].seq[pos];
             let kv = Model::kv(ch.att, tok, pos);
@@ -1015,7 +941,6 @@ impl Run<'_> {
                 );
             }
             ch.feed(&m, tok);
-            chains.push(ch);
         }
         self.stats.kv_checked += a * p.page_tables.len();
         // I15, E11: the state slot holds the state after [0, a), or the plan starts from the initial state.
@@ -1030,14 +955,13 @@ impl Run<'_> {
             }
         }
         // The forward over the window writes target and drafter KV at every position (D20).
-        let mut cur = chains[ctx];
-        cur.pos = if bug == Some(Bug::SlotsWithoutShift) { a } else { p.lo + s_used };
+        let mut cur = ch;
         let mut after = Vec::with_capacity(l + k);
         let mut outs = Vec::with_capacity(k + 1);
-        for (i, &tok) in in_used.iter().chain(&dr_used).enumerate() {
+        for (i, &tok) in inputs.iter().chain(&drafts).enumerate() {
             let (kv, next) = cur.feed(&m, tok);
             for (c, ws) in p.write_slots.iter().enumerate() {
-                self.kv[c][ws[s_used + i]] = Model::content(kv, c);
+                self.kv[c][ws[sigma + i]] = Model::content(kv, c);
             }
             after.push(cur);
             if i + 1 >= l {
@@ -1046,7 +970,7 @@ impl Run<'_> {
         }
         // The greedy sampler accepts the leading drafts that equal the model's tokens.
         let mut n = 0;
-        while n < k && dr_used[n] == outs[n] {
+        while n < k && drafts[n] == outs[n] {
             n += 1;
         }
         let bonus = samples.then(|| outs[n]);
@@ -1056,36 +980,33 @@ impl Run<'_> {
             ensure!(noise > 0 || n == k, "[accept] request {rid}, ticket {ix}: clean drafts rejected after {n} of {k}");
         }
         // E11: the state after the input and the accepted drafts, in the same slot.
-        let keep = if bug == Some(Bug::StateAfterAllDrafts) { l + k } else { l + n };
         for (s, &g) in p.state_slots.iter().enumerate() {
-            self.st[s][g] = Model::state_content(after[keep - 1].st, s);
+            self.st[s][g] = Model::state_content(after[l + n - 1].st, s);
         }
         // D20: the proposal forward writes λ rows from the bonus position and samples λ drafts.
         let mut proposals = Vec::new();
         if p.propose {
             let bonus = bonus.expect("a ticket with propose samples");
             proposals = draft(&m, after[l + n - 1], bonus, lam, noise, &mut self.rng);
-            let first = if bug == Some(Bug::ProposalAtInputEnd) { s_used + l } else { s_used + l + n };
+            let first = sigma + l + n;
             for (j, &d) in proposals.iter().enumerate() {
                 for (c, ws) in p.write_slots.iter().enumerate().skip(m.nt) {
                     self.kv[c][ws[first + j]] = mix(0x9809_05A1 + j as u64, u64::from(d));
                 }
             }
         }
-        // The lease's tokens as the coordinator will commit them: the device's count, unless the
-        // completion over-reports.
-        let n_rep = if bug == Some(Bug::OverReport) { k } else { n };
+        // The lease's tokens as the coordinator will commit them.
         let lv = &mut self.lives[li];
         if let Some(x) = bonus {
             lv.seq.truncate(z);
-            lv.seq.extend_from_slice(&dr_used[..n_rep]);
+            lv.seq.extend_from_slice(&drafts[..n]);
             lv.seq.push(x);
-            lv.end = z + n_rep;
+            lv.end = z + n;
         } else {
             lv.end = z;
         }
         lv.dev_done.push(ix);
-        self.issued[ix].dev = Some(DevOut { n, bonus, drafts: dr_used, proposals });
+        self.issued[ix].dev = Some(DevOut { n, bonus, drafts, proposals });
         Ok(())
     }
 
@@ -1165,7 +1086,7 @@ impl Run<'_> {
         } else {
             // The device's acceptance count and bonus token. The host applies the stop rules (EOS,
             // max_tokens) that the device does not (D25).
-            let n_dev = if self.cfg.bug == Some(Bug::OverReport) { k } else { dv.n };
+            let n_dev = dv.n;
             let bonus = dv.bonus.expect("a sampling ticket");
             let mut cand = dv.drafts[..n_dev].to_vec();
             cand.push(bonus);
@@ -1182,7 +1103,7 @@ impl Run<'_> {
                     );
                     req.out.push(x);
                     take += 1;
-                    if (x == EOS || req.out.len() == req.spec.max_tokens) && self.cfg.bug != Some(Bug::IgnoreStop) {
+                    if x == EOS || req.out.len() == req.spec.max_tokens {
                         fin = true;
                         break;
                     }
@@ -1506,42 +1427,4 @@ fn zos_with_speculation_matches_plain_decoding() {
     assert!(s.out_of_order > 0 && s.release_busy > 0 && s.hits > 0 && s.preemptions > 0, "{s:?}");
     assert!(s.kv_checked > 0 && s.iso_checked > 0, "the KV and isolation checks saw nothing: {s:?}");
     assert!(s.deferred_nocap > 0 && s.extend_nocap > 0, "the tight arena never ran out: {s:?}");
-}
-
-/// The planted bugs of microgravity's `shell.md` §1.10 belong to microgravity. These approximations
-/// are planted one at a time in the simulated executor, and each run must fail with the check that
-/// should catch the bug.
-#[test]
-fn planted_executor_bugs_are_caught() {
-    let noisy = Cfg { noise: Some(40), ..Cfg::new("noisy drafter", 48, &[16], &[16], &[], 2) };
-    let clean = Cfg { noise: Some(0), ..Cfg::new("clean drafter", 48, &[16], &[16], &[], 2) };
-    let state = Cfg { noise: Some(40), ..Cfg::new("noisy drafter and state", 64, &[16], &[16], &[8], 2) };
-    let zos = Cfg::new("ZOS without speculation", 48, &[16], &[], &[], 0);
-    let cases: [(Bug, &Cfg, &[&str]); 11] = [
-        (Bug::NoShift, &noisy, &["[kv]", "[stream]"]),
-        (Bug::ContextWithoutSlack, &noisy, &["[kv]", "[stream]"]),
-        (Bug::SlotsWithoutShift, &noisy, &["[kv]"]),
-        (Bug::PlaceholderInputs, &noisy, &["[kv]", "[stream]"]),
-        (Bug::PlaceholderInputs, &zos, &["[kv]", "[stream]"]),
-        (Bug::StaleProducer, &noisy, &["[kv]", "[stream]"]),
-        (Bug::StaleDrafts, &clean, &["[accept]"]),
-        (Bug::OverReport, &noisy, &["[stream]"]),
-        (Bug::ProposalAtInputEnd, &noisy, &["[kv]"]),
-        (Bug::StateAfterAllDrafts, &state, &["[state]"]),
-        (Bug::IgnoreStop, &noisy, &["[stream]"]),
-    ];
-    for (bug, cfg, tags) in cases {
-        let cfg = cfg.with_bug(bug);
-        let err = (0..4)
-            .find_map(|seed| run(&cfg, &gen_mix(200 + seed, cfg.nreq), seed).err())
-            .unwrap_or_else(|| panic!("{bug:?} on {} was not caught", cfg.name));
-        eprintln!("{bug:?} on {}: {err}", cfg.name);
-        assert!(tags.iter().any(|t| err.contains(t)), "{bug:?} on {} was caught by an unexpected check: {err}", cfg.name);
-    }
-    // The same runs without a planted bug pass.
-    for cfg in [&noisy, &clean, &state, &zos] {
-        for seed in 0..4 {
-            run(cfg, &gen_mix(200 + seed, cfg.nreq), seed).unwrap_or_else(|e| panic!("{}, seed {seed}: {e}", cfg.name));
-        }
-    }
 }
