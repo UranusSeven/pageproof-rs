@@ -1,7 +1,6 @@
-//! Randomised runtime tests that contract §9.2 planned for v0.5 and v0.6. They mirror microgravity's
-//! scheduler fuzz (`tests/test_scheduler.py`, ZOS depth 1 against depth 0) and its
-//! ZOS-with-speculation tests (`tests/test_spec.py`). `coord_edge_cases.rs` checks the §7 rows one
-//! scenario at a time; this file compares whole runs over random request mixes.
+//! Randomised runtime tests that contract §9.2 planned for v0.5 and v0.6: ZOS depth 1 against
+//! depth 0, and ZOS with speculation against plain decoding. `coord_edge_cases.rs` checks the §7
+//! rows one scenario at a time; this file compares whole runs over random request mixes.
 //!
 //! A run drives the verified `Coordinator` with three simulated parts:
 //!
@@ -1325,8 +1324,8 @@ impl Run<'_> {
 
 const SEEDS: u64 = 6;
 
-/// §9.2, v0.5 step (4), after microgravity's depth-1 vs depth-0 fuzz (`tests/test_scheduler.py`):
-/// each mix runs with `δ = 1`, pipelining with extend_deferred and continuations, and with `δ = 0`.
+/// §9.2, ZOS depth 1 against depth 0: each mix runs with `δ = 1`, pipelining with extend_deferred
+/// and continuations, and with `δ = 0`.
 ///
 /// - Token streams are identical, and so are release snapshots, except that `δ = 1` may bind a
 ///   final EOS through `X_h`: then its snapshot has the EOS appended (the EOS row of §7).
@@ -1379,9 +1378,9 @@ fn zos_depth_one_matches_depth_zero() {
     assert_eq!(zero_total.continuations, 0);
 }
 
-/// §9.2, v0.6 step (5), after microgravity's ZOS-with-speculation tests (`tests/test_spec.py`):
-/// speculative decoding with `λ > 0`, mostly with a drafter class and `δ = 1`, against plain
-/// decoding (`λ = 0`, `δ = 0`) of the same model, with clean and noisy drafters.
+/// §9.2, ZOS with speculation: speculative decoding with `λ > 0`, mostly with a drafter class and
+/// `δ = 1`, against plain decoding (`λ = 0`, `δ = 0`) of the same model, with clean and noisy
+/// drafters.
 ///
 /// - The committed tokens equal plain decoding, and so does every release snapshot followed by
 ///   the token the scheduler kept.
