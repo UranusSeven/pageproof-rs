@@ -7,7 +7,7 @@ use crate::types::*;
 use crate::model::*;
 use crate::arith::*;
 use crate::e8::*;
-use crate::idxset::IdxSet;
+use crate::idxlist::IdxList;
 use crate::index::KeyIndex;
 
 verus! {
@@ -75,7 +75,9 @@ pub struct Manager {
     pub(crate) pend: HashMap<u64, PendC>,
     pub(crate) refs: Vec<u64>,
     pub(crate) keys: Vec<Option<Digest>>,
-    pub(crate) free: IdxSet,
+    /// `F`, in the order fresh pages are taken: unkeyed pages first, then cached pages, least
+    /// recently released first (`keyed_last`, D9).
+    pub(crate) free: IdxList,
     /// v0.3: concrete ownership mask (`U_c`).
     pub(crate) own: Vec<bool>,
     pub(crate) index: KeyIndex,
@@ -91,6 +93,115 @@ pub open spec fn lease_view(l: LeaseC) -> LeaseV {
 
 pub open spec fn pend_view(r: PendC) -> PendV {
     PendV { lease: r.lease, a: r.a as nat, z: r.z as nat, drafts: r.drafts@, propose: r.propose, ddr: r.ddr }
+}
+
+/// The free list keeps every unkeyed page before every keyed (cached) one. Fresh pages are taken
+/// from the front (`take_fresh`), so a fresh page revokes a key only when no unkeyed free page is
+/// left; released cached pages join at the back, so they are evicted least recently released
+/// first (D9 leaves the choice open).
+#[verifier::opaque]
+pub open spec fn keyed_last(order: Seq<PageId>, keys: Seq<Option<Digest>>) -> bool {
+    forall|i: int, j: int|
+        #![trigger keys[order[i] as int], keys[order[j] as int]]
+        0 <= i <= j < order.len() && keys[order[i] as int] is Some ==> keys[order[j] as int] is Some
+}
+
+/// An unkeyed page may join at the front.
+pub proof fn lemma_keyed_last_front(order: Seq<PageId>, keys: Seq<Option<Digest>>, b: PageId)
+    requires
+        keyed_last(order, keys),
+        keys[b as int] is None,
+    ensures
+        keyed_last(seq![b] + order, keys),
+{
+    reveal(keyed_last);
+    let o2 = seq![b] + order;
+    assert(o2[0] == b);
+    assert forall|i: int, j: int|
+        #![trigger keys[o2[i] as int], keys[o2[j] as int]]
+        0 <= i <= j < o2.len() && keys[o2[i] as int] is Some implies keys[o2[j] as int] is Some by {
+        assert(i > 0);
+        assert(o2[i] == order[i - 1]);
+        assert(o2[j] == order[j - 1]);
+    }
+}
+
+/// A keyed page may join at the back.
+pub proof fn lemma_keyed_last_back(order: Seq<PageId>, keys: Seq<Option<Digest>>, b: PageId)
+    requires
+        keyed_last(order, keys),
+        keys[b as int] is Some,
+    ensures
+        keyed_last(order.push(b), keys),
+{
+    reveal(keyed_last);
+    let o2 = order.push(b);
+    assert forall|i: int, j: int|
+        #![trigger keys[o2[i] as int], keys[o2[j] as int]]
+        0 <= i <= j < o2.len() && keys[o2[i] as int] is Some implies keys[o2[j] as int] is Some by {
+        if j < order.len() {
+            assert(o2[i] == order[i]);
+            assert(o2[j] == order[j]);
+        } else {
+            assert(o2[j] == b);
+        }
+    }
+}
+
+/// Any page may leave.
+pub proof fn lemma_keyed_last_remove(order: Seq<PageId>, keys: Seq<Option<Digest>>, k: int)
+    requires
+        keyed_last(order, keys),
+        0 <= k < order.len(),
+    ensures
+        keyed_last(order.remove(k), keys),
+{
+    reveal(keyed_last);
+    let o2 = order.remove(k);
+    order.remove_ensures(k);
+    assert forall|i: int, j: int|
+        #![trigger keys[o2[i] as int], keys[o2[j] as int]]
+        0 <= i <= j < o2.len() && keys[o2[i] as int] is Some implies keys[o2[j] as int] is Some by {
+        let i0 = if i < k { i } else { i + 1 };
+        let j0 = if j < k { j } else { j + 1 };
+        assert(o2[i] == order[i0]);
+        assert(o2[j] == order[j0]);
+    }
+}
+
+/// Keys may change on pages outside the list, and on listed pages without becoming or ceasing to
+/// be keys.
+pub proof fn lemma_keyed_last_frame(order: Seq<PageId>, keys: Seq<Option<Digest>>, keys2: Seq<Option<Digest>>)
+    requires
+        keyed_last(order, keys),
+        forall|j: int|
+            #![trigger order[j]]
+            0 <= j < order.len() ==> (keys2[order[j] as int] is Some) == (keys[order[j] as int] is Some),
+    ensures
+        keyed_last(order, keys2),
+{
+    reveal(keyed_last);
+    assert forall|i: int, j: int|
+        #![trigger keys2[order[i] as int], keys2[order[j] as int]]
+        0 <= i <= j < order.len() && keys2[order[i] as int] is Some implies keys2[order[j] as int] is Some by {
+        assert(keys[order[i] as int] is Some);
+        assert(keys[order[j] as int] is Some);
+    }
+}
+
+/// If the first page is keyed, every page is.
+pub proof fn lemma_keyed_last_head(order: Seq<PageId>, keys: Seq<Option<Digest>>)
+    requires
+        keyed_last(order, keys),
+        order.len() > 0,
+        keys[order[0] as int] is Some,
+    ensures
+        forall|j: int| #![trigger order[j]] 0 <= j < order.len() ==> keys[order[j] as int] is Some,
+{
+    reveal(keyed_last);
+    assert forall|j: int| #![trigger order[j]] 0 <= j < order.len() implies keys[order[j] as int] is Some by {
+        assert(keys[order[0] as int] is Some);
+    }
 }
 
 impl Manager {
@@ -133,6 +244,7 @@ impl Manager {
         &&& self.free.wf()
         &&& self.free.universe() == v.p
         &&& self.free@ == v.free_set()
+        &&& keyed_last(self.free.order(), v.keys)
         &&& self.index.wf(v.keys)
     }
 
@@ -351,7 +463,10 @@ impl Manager {
         assert(keys@ =~= v.keys);
         let own: Vec<bool> = vec![o; p];
         assert(own@ =~= v.own);
-        let free = if o { IdxSet::new_full(p) } else { IdxSet::new_empty(p) };
+        proof {
+            assert(p as nat <= (p as nat) * (b as nat)) by (nonlinear_arith) requires b >= 1;
+        }
+        let free = if o { IdxList::new_full(p) } else { IdxList::new_empty(p) };
         let index = KeyIndex::new(Ghost(keys@));
         let m = Manager {
             id,
@@ -375,6 +490,7 @@ impl Manager {
         proof {
             vstd::set_lib::range_set_properties::<usize>(0usize, p);
             assert(m.free@ =~= v.free_set());
+            reveal(keyed_last);
             assert(m.leases@.dom() =~= v.leases.dom());
             assert(m.pend@.dom() =~= v.pend.dom());
             reveal(page_ok);

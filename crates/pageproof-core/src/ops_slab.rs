@@ -6,7 +6,7 @@ use crate::spec::*;
 use crate::types::*;
 use crate::model::*;
 use crate::manager::*;
-use crate::idxset::IdxSet;
+use crate::idxlist::IdxList;
 use crate::index::KeyIndex;
 #[cfg(verus_keep_ghost)]
 use crate::index::in_index;
@@ -351,7 +351,7 @@ impl Manager {
             lemma_free_of(v.p, v.refs, v.own);
             assert(self.free@ == v.free_set());
             reveal(page_ok);
-            assert forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n implies v.refs[y] == 0 by {
+            assert forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n implies v.refs[y] == 0 && v.keys[y] is None by {
                 assert(in_range(y, lo as nat, n as nat));
                 assert(page_ok(v, log, y as PageId));
             }
@@ -368,8 +368,9 @@ impl Manager {
                 forall|y: int| 0 <= y < v.p ==> #[trigger] self.own@[y] == if lo <= y < x { true } else { v.own[y] },
                 forall|y: PageId| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && v.refs[y as int] == 0
                     && self.own@[y as int]),
-                forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n ==> v.refs[y] == 0,
+                forall|y: int| #![trigger v.refs[y]] lo <= y < lo + n ==> v.refs[y] == 0 && v.keys[y] is None,
                 self.free@.len() == v.free_set().len() + (x - lo),
+                keyed_last(self.free.order(), v.keys),
             decreases lo + n - x,
         {
             proof {
@@ -377,8 +378,11 @@ impl Manager {
                 assert(!self.own@[x as int]);
                 assert(!self.free@.contains(x));
                 vstd::set::lemma_set_insert_len(self.free@, x);
+                assert(v.refs[x as int] == 0 && v.keys[x as int] is None);
+                lemma_keyed_last_front(self.free.order(), v.keys, x);
             }
-            self.free.insert(x);
+            // Granted units are unkeyed, so they join at the front.
+            self.free.push_front(x);
             self.own.set(x, true);
             x += 1;
         }
@@ -431,6 +435,7 @@ impl Manager {
                 forall|y: PageId| #[trigger] self.free@.contains(y) <==> ((y as nat) < v.p && v.refs[y as int] == 0
                     && self.own@[y as int]),
                 self.free@.len() + (x - lo) == v.free_set().len(),
+                keyed_last(self.free.order(), self.keys@),
             decreases lo + n - x,
         {
             proof {
@@ -439,8 +444,14 @@ impl Manager {
                 assert(self.free@.contains(x));
                 vstd::set::lemma_set_remove_len(self.free@, x);
             }
+            let ghost ob = self.free.order();
             self.free.remove(x);
+            proof {
+                lemma_keyed_last_remove(ob, self.keys@, ob.index_of(x));
+                self.free.lemma_bounds();
+            }
             self.own.set(x, false);
+            let ghost kb = self.keys@;
             let kx = self.keys[x];
             match kx {
                 Some(kd) => {
@@ -448,6 +459,16 @@ impl Manager {
                     self.keys.set(x, None);
                 },
                 None => {},
+            }
+            proof {
+                // x left the list, so no listed page changed its key.
+                let o2 = self.free.order();
+                assert forall|j: int| #![trigger o2[j]] 0 <= j < o2.len() implies (self.keys@[o2[j] as int] is Some)
+                    == (kb[o2[j] as int] is Some) by {
+                    assert(self.free@.contains(o2[j]));
+                    assert(o2[j] != x);
+                }
+                lemma_keyed_last_frame(o2, kb, self.keys@);
             }
             x += 1;
         }

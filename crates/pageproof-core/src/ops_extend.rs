@@ -5,7 +5,7 @@ use crate::types::*;
 use crate::model::*;
 use crate::arith::*;
 use crate::manager::*;
-use crate::idxset::IdxSet;
+use crate::idxlist::IdxList;
 use crate::index::KeyIndex;
 use crate::ops_attach::*;
 
@@ -93,6 +93,7 @@ pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, d
         &&& fresh.len() == d
         &&& fresh.no_duplicates()
         &&& forall|j: int| 0 <= j < fresh.len() ==> v.is_free(#[trigger] fresh[j])
+        &&& unkeyed_first(v, view.pages@, l.table.len())
         &&& v2 == grown(v, h.id, suffix, fresh, dfr)
         &&& v2.leases[h.id].c == l.c
     }
@@ -528,6 +529,12 @@ impl Manager {
         take_fresh(&mut self.free, &mut self.keys, &mut self.index, &mut l.table, d, Ghost(p as nat));
         let ghost fresh = l.table@.subrange(m as int, l.table@.len() as int);
         proof {
+            assert forall|i: int, y: PageId|
+                #![trigger l.table@[i], v.is_free(y)]
+                m <= i < l.table@.len() && v.keys[l.table@[i] as int] is Some && v.is_free(y) && v.keys[y as int]
+                    is None implies l.table@.contains(y) by {
+                assert(f_old.contains(y));
+            }
             assert forall|j: int| 0 <= j < fresh.len() implies v.is_free(#[trigger] fresh[j]) by {
                 assert(l.table@[m + j] == fresh[j]);
             }

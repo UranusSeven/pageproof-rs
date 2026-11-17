@@ -1419,6 +1419,20 @@ impl Manager {
             assert forall|t2: u64| #[trigger] self.pend@.contains_key(t2) implies pend_view(self.pend@[t2]) == v2.pend[t2] by {
             }
             lemma_free_of(v.p, v.refs, v.own);
+            // Published pages are write pages (ref 1), so no free page changed its key.
+            self.free.lemma_bounds();
+            assert forall|j: int|
+                #![trigger self.free.order()[j]]
+                0 <= j < self.free.order().len() implies (self.keys@[self.free.order()[j] as int] is Some) == (
+                keys0[self.free.order()[j] as int] is Some) by {
+                let y = self.free.order()[j];
+                assert(self.free@.contains(y));
+                assert(v.refs[y as int] == 0);
+                assert forall|i2: int| lo <= i2 < hi implies lv.table[i2] as int != y as int by {
+                    assert(write_page_ok(v, hid, lv.table[(i2 as nat) as int]));
+                }
+            }
+            lemma_keyed_last_frame(self.free.order(), keys0, self.keys@);
             assert(v.leases[hid].pending[0] == t.id);
             // §9.0 (c)
             reveal(lease_ok);
