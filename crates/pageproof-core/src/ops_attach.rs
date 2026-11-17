@@ -6,7 +6,7 @@ use crate::model::*;
 use crate::arith::*;
 use crate::manager::*;
 use crate::e8::*;
-use crate::idxset::IdxSet;
+use crate::idxlist::IdxList;
 use crate::index::KeyIndex;
 #[cfg(verus_keep_ghost)]
 use crate::index::in_index;
@@ -50,7 +50,18 @@ pub open spec fn attach_choice_k(v: MgrV, toks: Seq<Token>, table: Seq<PageId>, 
         ) ==> v.refs[table[i] as int] > 0)
     // i >= k*: fresh pages taken from F (distinct from the hit pages by no_duplicates).
     &&& forall|i: int| #![trigger table[i]] kstar <= i < table.len() ==> v.refs[table[i] as int] == 0 && v.own[table[i] as int]
+    // §7: unkeyed free pages are taken before cached ones.
+    &&& unkeyed_first(v, table, kstar)
     &&& v.next_handle < u64::MAX
+}
+
+/// The fresh pages `table[lo..]` revoke a cached key only if every unkeyed free page of `v` is in
+/// the table too (§7: a class takes its unkeyed free units before evicting a cached one).
+pub open spec fn unkeyed_first(v: MgrV, table: Seq<PageId>, lo: nat) -> bool {
+    forall|i: int, y: PageId|
+        #![trigger table[i], v.is_free(y)]
+        lo <= i < table.len() && v.keys[table[i] as int] is Some && v.is_free(y) && v.keys[y as int] is None
+            ==> table.contains(y)
 }
 
 /// Abstract state after a successful `attach`.
@@ -556,11 +567,12 @@ pub fn count_hits_active(hits: &Vec<(PageId, bool)>) -> (u: usize)
 
 /// Commit, part 1: take the hit pages; inactive (free) cache pages are reactivated.
 fn take_hits(
-    free: &mut IdxSet,
+    free: &mut IdxList,
     hits: &Vec<(PageId, bool)>,
     Ghost(p): Ghost<nat>,
     Ghost(refs): Ghost<Seq<u64>>,
     Ghost(own): Ghost<Seq<bool>>,
+    Ghost(keys): Ghost<Seq<Option<Digest>>>,
 ) -> (table: Vec<PageId>)
     requires
         p <= max_slots(),
@@ -569,6 +581,7 @@ fn take_hits(
         old(free).wf(),
         old(free).universe() == p,
         old(free)@ == free_of(p, refs, own),
+        keyed_last(old(free).order(), keys),
         forall|j: int|
             #![trigger hits@[j]]
             0 <= j < hits@.len() ==> (hits@[j].0 as nat) < p && hits@[j].1 == (refs[hits@[j].0 as int] > 0),
@@ -582,6 +595,7 @@ fn take_hits(
         forall|y: PageId| #[trigger] final(free)@.contains(y) <==> (free_of(p, refs, own).contains(y) && !table@.contains(y)),
         final(free)@.len() + (hits@.len() - n_active(hits@, hits@.len() as nat)) == old(free)@.len(),
         n_active(hits@, hits@.len() as nat) <= hits@.len(),
+        keyed_last(final(free).order(), keys),
 {
     let ghost f0 = free@;
     let mut table: Vec<PageId> = Vec::new();
@@ -611,6 +625,7 @@ fn take_hits(
             forall|y: PageId| #[trigger] free@.contains(y) <==> (free_of(p, refs, own).contains(y) && !table@.contains(y)),
             free@.len() + (j - n_active(hits@, j as nat)) == f0.len(),
             n_active(hits@, j as nat) <= j,
+            keyed_last(free.order(), keys),
         decreases hits@.len() - j,
     {
         let (x, act) = hits[j];
@@ -629,9 +644,11 @@ fn take_hits(
             proof {
                 assert(fb.contains(x));
             }
+            let ghost ob = free.order();
             free.remove(x);
             proof {
                 vstd::set::lemma_set_remove_len(fb, x);
+                lemma_keyed_last_remove(ob, keys, ob.index_of(x));
             }
         }
         table.push(x);
@@ -646,9 +663,11 @@ fn take_hits(
     table
 }
 
-/// Commit, part 2: pop `n` fresh pages from F and revoke their old keys.
+/// Commit, part 2: pop `n` fresh pages from the front of F and revoke their old keys. Unkeyed
+/// pages come first (`keyed_last`), so a fresh page revokes a key only if every unkeyed page of F
+/// is taken too.
 pub(crate) fn take_fresh(
-    free: &mut IdxSet,
+    free: &mut IdxList,
     keys: &mut Vec<Option<Digest>>,
     index: &mut KeyIndex,
     table: &mut Vec<PageId>,
@@ -664,6 +683,7 @@ pub(crate) fn take_fresh(
         old(index).wf(old(keys)@),
         old(table)@.no_duplicates(),
         forall|y: PageId| #[trigger] old(free)@.contains(y) ==> !old(table)@.contains(y),
+        keyed_last(old(free).order(), old(keys)@),
     ensures
         final(free).wf(),
         final(free).universe() == p,
@@ -675,10 +695,18 @@ pub(crate) fn take_fresh(
         forall|y: PageId| #[trigger] final(free)@.contains(y) <==> (old(free)@.contains(y) && !final(table)@.contains(y)),
         final(keys)@ == revoke(old(keys)@, final(table)@.subrange(old(table)@.len() as int, final(table)@.len() as int)),
         final(index).wf(final(keys)@),
+        keyed_last(final(free).order(), final(keys)@),
+        forall|j: int, y: PageId|
+            #![trigger final(table)@[j], old(free)@.contains(y)]
+            old(table)@.len() <= j < final(table)@.len() && old(keys)@[final(table)@[j] as int] is Some && old(
+                free,
+            )@.contains(y) && old(keys)@[y as int] is None ==> final(table)@.contains(y),
 {
     let ghost t0 = table@;
     let ghost k0 = keys@;
     let ghost f0 = free@;
+    // Some fresh page so far carried a key.
+    let ghost mut kf = false;
     let mut c: usize = 0;
     proof {
         assert(table@.subrange(0, t0.len() as int) =~= t0);
@@ -701,15 +729,35 @@ pub(crate) fn take_fresh(
             forall|y: PageId| #[trigger] f0.contains(y) ==> !t0.contains(y),
             free@.len() + c == f0.len(),
             keys@ == revoke(k0, table@.subrange(t0.len() as int, table@.len() as int)),
+            keyed_last(free.order(), keys@),
+            forall|j: int|
+                #![trigger free.order()[j]]
+                0 <= j < free.order().len() ==> keys@[free.order()[j] as int] == k0[free.order()[j] as int],
+            kf ==> forall|j: int|
+                #![trigger free.order()[j]]
+                0 <= j < free.order().len() ==> k0[free.order()[j] as int] is Some,
+            forall|j: int| #![trigger table@[j]] t0.len() <= j < table@.len() && k0[table@[j] as int] is Some ==> kf,
         decreases n - c,
     {
         proof {
             free.lemma_bounds();
         }
         let ghost fb = free@;
-        let x = free.pop_any();
+        let ghost ob = free.order();
+        let x = free.pop_front();
         proof {
             vstd::set::lemma_set_remove_len(fb, x);
+            lemma_keyed_last_remove(ob, keys@, 0);
+            ob.remove_ensures(0);
+            assert(keys@[x as int] == k0[x as int]) by {
+                assert(ob[0] == x);
+            }
+            if k0[x as int] is Some {
+                lemma_keyed_last_head(ob, keys@);
+                assert forall|j: int| #![trigger ob[j]] 0 <= j < ob.len() implies k0[ob[j] as int] is Some by {
+                    assert(keys@[ob[j] as int] == k0[ob[j] as int]);
+                }
+            }
         }
         let ghost kb = keys@;
         let kx = keys[x];
@@ -724,6 +772,27 @@ pub(crate) fn take_fresh(
         table.push(x);
         c += 1;
         proof {
+            let o2 = free.order();
+            assert(o2 == ob.remove(0));
+            assert forall|j: int| #![trigger o2[j]] 0 <= j < o2.len() implies o2[j] != x && o2[j] == ob[j + 1] by {
+                assert(ob[0] == x);
+            }
+            assert(forall|y: int| 0 <= y < p && y != x as int ==> keys@[y] == kb[y]);
+            lemma_keyed_last_frame(o2, kb, keys@);
+            assert forall|j: int| #![trigger o2[j]] 0 <= j < o2.len() implies keys@[o2[j] as int] == k0[o2[j] as int] by {
+                assert(ob[j + 1] == o2[j]);
+            }
+            if kf {
+                assert forall|j: int| #![trigger o2[j]] 0 <= j < o2.len() implies k0[o2[j] as int] is Some by {
+                    assert(ob[j + 1] == o2[j]);
+                }
+            }
+            kf = kf || k0[x as int] is Some;
+            assert forall|j: int| #![trigger table@[j]] t0.len() <= j < table@.len() && k0[table@[j] as int] is Some implies kf by {
+                if j < tb.len() {
+                    assert(table@[j] == tb[j]);
+                }
+            }
             assert(!tb.contains(x));
             assert(table@.subrange(0, t0.len() as int) =~= tb.subrange(0, t0.len() as int));
             assert(table@.no_duplicates()) by {
@@ -765,6 +834,22 @@ pub(crate) fn take_fresh(
                 }
             }
             assert(keys@ =~= revoke(k0, fr1));
+        }
+    }
+    proof {
+        // Every unkeyed page of F was taken before the first keyed one.
+        assert forall|j: int, y: PageId|
+            #![trigger table@[j], f0.contains(y)]
+            t0.len() <= j < table@.len() && k0[table@[j] as int] is Some && f0.contains(y) && k0[y as int] is None implies table@.contains(
+            y,
+        ) by {
+            assert(kf);
+            if !table@.contains(y) {
+                assert(free@.contains(y));
+                assert(free.order().contains(y));
+                let jj = choose|jj: int| 0 <= jj < free.order().len() && free.order()[jj] == y;
+                assert(k0[free.order()[jj] as int] is Some);
+            }
         }
     }
 }
@@ -1061,8 +1146,9 @@ impl Manager {
                 }
             }
         }
-        let mut table = take_hits(&mut self.free, &hits, Ghost(p as nat), Ghost(v.refs), Ghost(v.own));
+        let mut table = take_hits(&mut self.free, &hits, Ghost(p as nat), Ghost(v.refs), Ghost(v.own), Ghost(v.keys));
         let ghost tab_h = table@;
+        let ghost f_h = self.free@;
         proof {
             assert(table@.no_duplicates()) by {
                 assert forall|i: int, j: int| 0 <= i < table@.len() && 0 <= j < table@.len() && i != j implies table@[i]
@@ -1109,6 +1195,21 @@ impl Manager {
             assert forall|i: int| #![trigger table@[i]] kstar <= i < table@.len() implies v.refs[table@[i] as int]
                 == 0 && v.own[table@[i] as int] by {
                 assert(free_of(p as nat, v.refs, v.own).contains(table@[i]));
+            }
+            // Unkeyed free pages are never hits, so take_fresh saw all of them.
+            assert forall|i: int, y: PageId|
+                #![trigger table@[i], v.is_free(y)]
+                kstar <= i < table@.len() && v.keys[table@[i] as int] is Some && v.is_free(y) && v.keys[y as int]
+                    is None implies table@.contains(y) by {
+                assert(free_of(p as nat, v.refs, v.own).contains(y));
+                assert(!tab_h.contains(y)) by {
+                    if tab_h.contains(y) {
+                        let k = choose|k: int| 0 <= k < tab_h.len() && tab_h[k] == y;
+                        assert(tab_h[k] == hits@[k].0);
+                        assert(in_index(v.keys, v.key_of(toks@, k as nat), hits@[k].0));
+                    }
+                }
+                assert(f_h.contains(y));
             }
             assert(attach_choice_k(v, toks@, table@, kstar as nat));
             lemma_attach_inv(v, log1, toks@, table@, kstar as nat);

@@ -5,6 +5,7 @@ use crate::types::*;
 use crate::model::*;
 use crate::arith::*;
 use crate::manager::*;
+use crate::idxlist::IdxList;
 
 verus! {
 
@@ -139,11 +140,19 @@ impl Manager {
 }
 
 
-/// Decrement loop for `release`: decrements each page of `tbl` once and returns freed pages to
-/// the free set. Purely concrete; the abstract proof is in `lemma_release_inv`.
+/// `r0` with every page of `tbl[i..]` decremented once.
+pub open spec fn dec_tail(r0: Seq<u64>, tbl: Seq<PageId>, i: int) -> Seq<u64> {
+    Seq::new(r0.len(), |x: int| if tbl.subrange(i, tbl.len() as int).contains(x as PageId) { (r0[x] - 1) as u64 } else { r0[x] })
+}
+
+/// Decrement loop for `release`: decrements each page of `tbl` once, last page first, and returns
+/// freed pages to the free set, unkeyed ones at the front and keyed ones at the back
+/// (`keyed_last`). So cached pages are evicted in release order and, within one release, the
+/// deepest block first. Purely concrete; the abstract proof is in `lemma_release_inv`.
 fn dec_pages(
     refs: &mut Vec<u64>,
-    free: &mut crate::idxset::IdxSet,
+    free: &mut IdxList,
+    keys: &Vec<Option<Digest>>,
     tbl: &Vec<PageId>,
     Ghost(p): Ghost<nat>,
     Ghost(own): Ghost<Seq<bool>>,
@@ -152,9 +161,11 @@ fn dec_pages(
         p <= max_slots(),
         forall|i: int| 0 <= i < tbl@.len() ==> own[#[trigger] tbl@[i] as int],
         old(refs)@.len() == p,
+        keys@.len() == p,
         old(free).wf(),
         old(free).universe() == p,
         old(free)@ == free_of(p, old(refs)@, own),
+        keyed_last(old(free).order(), keys@),
         tbl@.no_duplicates(),
         forall|i: int| 0 <= i < tbl@.len() ==> (#[trigger] tbl@[i] as nat) < p,
         forall|i: int| 0 <= i < tbl@.len() ==> old(refs)@[#[trigger] tbl@[i] as int] >= 1,
@@ -163,35 +174,58 @@ fn dec_pages(
         final(free).wf(),
         final(free).universe() == p,
         final(free)@ == free_of(p, final(refs)@, own),
+        keyed_last(final(free).order(), keys@),
 {
     let ghost r0 = refs@;
-    let mut i: usize = 0;
+    let ghost n = tbl@.len() as int;
+    let mut i: usize = tbl.len();
     proof {
-        assert(dec_seq(r0, tbl@, 0) =~= r0);
+        assert(dec_tail(r0, tbl@, n) =~= r0);
     }
-    while i < tbl.len()
+    while i > 0
         invariant
             0 <= i <= tbl@.len(),
+            n == tbl@.len(),
             p <= max_slots(),
             r0.len() == p,
-            refs@ == dec_seq(r0, tbl@, i as int),
+            keys@.len() == p,
+            refs@ == dec_tail(r0, tbl@, i as int),
             free.wf(),
             free.universe() == p,
             free@ == free_of(p, refs@, own),
+            keyed_last(free.order(), keys@),
             tbl@.no_duplicates(),
             forall|k: int| 0 <= k < tbl@.len() ==> (#[trigger] tbl@[k] as nat) < p,
             forall|k: int| 0 <= k < tbl@.len() ==> r0[#[trigger] tbl@[k] as int] >= 1,
             forall|k: int| 0 <= k < tbl@.len() ==> own[#[trigger] tbl@[k] as int],
-        decreases tbl@.len() - i,
+        decreases i,
     {
+        i -= 1;
         let x = tbl[i];
         let ghost before = refs@;
+        let ghost post = tbl@.subrange(i as int, n);
+        let ghost pre = tbl@.subrange(i + 1, n);
         proof {
+            assert forall|y: PageId| #[trigger] post.contains(y) <==> (y == x || pre.contains(y)) by {
+                if post.contains(y) {
+                    let k = choose|k: int| 0 <= k < post.len() && post[k] == y;
+                    if k > 0 {
+                        assert(pre[k - 1] == y);
+                    }
+                }
+                if y == x {
+                    assert(post[0] == x);
+                }
+                if pre.contains(y) {
+                    let k = choose|k: int| 0 <= k < pre.len() && pre[k] == y;
+                    assert(post[k + 1] == y);
+                }
+            }
             // x has not been decremented yet.
-            assert(!tbl@.subrange(0, i as int).contains(x)) by {
-                if tbl@.subrange(0, i as int).contains(x) {
-                    let k = choose|k: int| 0 <= k < i && tbl@.subrange(0, i as int)[k] == x;
-                    assert(tbl@[k] == tbl@[i as int]);
+            assert(!pre.contains(x)) by {
+                if pre.contains(x) {
+                    let k = choose|k: int| 0 <= k < pre.len() && pre[k] == x;
+                    assert(tbl@[i + 1 + k] == tbl@[i as int]);
                 }
             }
             assert(refs@[x as int] == r0[x as int]);
@@ -200,21 +234,14 @@ fn dec_pages(
         let nv = refs[x] - 1;
         refs.set(x, nv);
         proof {
-            let pre = tbl@.subrange(0, i as int);
-            let post = tbl@.subrange(0, i + 1);
-            assert(post =~= pre.push(x));
-            assert forall|y: int| 0 <= y < r0.len() implies refs@[y] == dec_seq(r0, tbl@, i + 1)[y] by {
-                vstd::seq_lib::lemma_seq_contains_after_push(pre, x, y as PageId);
-                if y == x as int {
-                    assert(post.contains(x)) by {
-                        assert(post[i as int] == x);
-                    }
-                } else {
+            assert forall|y: int| 0 <= y < r0.len() implies refs@[y] == dec_tail(r0, tbl@, i as int)[y] by {
+                assert(post.contains(y as PageId) <==> (y as PageId == x || pre.contains(y as PageId)));
+                if y != x as int {
                     assert((y as PageId) != x);
-                    assert(before[y] == dec_seq(r0, tbl@, i as int)[y]);
+                    assert(before[y] == dec_tail(r0, tbl@, i + 1)[y]);
                 }
             }
-            assert(refs@ =~= dec_seq(r0, tbl@, i + 1));
+            assert(refs@ =~= dec_tail(r0, tbl@, i as int));
             lemma_free_of(p, before, own);
             lemma_free_of(p, refs@, own);
         }
@@ -224,7 +251,21 @@ fn dec_pages(
                     assert(before[x as int] != 0);
                 }
             }
-            free.insert(x);
+            let kx = keys[x];
+            match kx {
+                Some(_) => {
+                    proof {
+                        lemma_keyed_last_back(free.order(), keys@, x);
+                    }
+                    free.push_back(x);
+                },
+                None => {
+                    proof {
+                        lemma_keyed_last_front(free.order(), keys@, x);
+                    }
+                    free.push_front(x);
+                },
+            }
             proof {
                 assert forall|y: PageId| #[trigger] free@.contains(y) <==> free_of(p, refs@, own).contains(y) by {
                     if y != x {
@@ -243,7 +284,9 @@ fn dec_pages(
                 assert(free@ =~= free_of(p, refs@, own));
             }
         }
-        i += 1;
+    }
+    proof {
+        assert(dec_tail(r0, tbl@, 0) =~= dec_seq(r0, tbl@, n));
     }
 }
 
@@ -304,7 +347,7 @@ impl Manager {
             }
         }
         let l = self.leases.remove(&h.id).unwrap();
-        dec_pages(&mut self.refs, &mut self.free, &l.table, Ghost(self.p as nat), Ghost(v.own));
+        dec_pages(&mut self.refs, &mut self.free, &self.keys, &l.table, Ghost(self.p as nat), Ghost(v.own));
         let ghost v2 = released(v, h.id);
         proof {
             lemma_release_inv(v, log, h.id);

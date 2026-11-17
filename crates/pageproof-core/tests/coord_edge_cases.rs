@@ -1482,19 +1482,21 @@ fn drafter_slab_is_reclaimed_for_a_target_class() {
 #[test]
 fn prefix_cached_in_the_target_class_only() {
     // §7: target prefix cached, drafter class not: k* stops at the first block missing in any
-    // paged class. Target pages are 16 B (4 per slab), drafter pages 32 B (2 per slab).
+    // paged class. Target pages are 16 B (4 per slab), drafter pages 32 B (2 per slab), μ = 2.
     let mut co = Coordinator::create(6, 64, &[16], &[32], &[], 4, 1, 0, NS).unwrap();
-    let t = toks(9, 70);
+    let t = toks(17, 70); // 5 pages: blocks 0-3 published, block 4 partial
     let (ha, _, va) = co.attach(&t).unwrap();
     compute_all(&mut co, ha);
     co.release(ha).unwrap();
-    let (tgt0, drf0) = (va.tables[0][0], va.tables[1][0]);
-    let (_hx1, _, v1) = co.attach(&toks(4, 71)).unwrap();
-    let (hx2, _, v2) = co.attach(&toks(8, 72)).unwrap();
-    // Precondition (free-page order): the drafter page of block 0 is reused, the target's is not.
-    assert!(!v1.tables[0].contains(&tgt0) && !v2.tables[0].contains(&tgt0), "target block 0 kept");
-    assert!(v1.tables[1].contains(&drf0) || v2.tables[1].contains(&drf0), "drafter block 0 reused");
-    co.release(hx2).unwrap();
+    // Slab rounding leaves the target class 4 unkeyed free pages and the drafter class 2. A
+    // 6-page lease takes those first, then cached pages deepest block first: 2 in the target
+    // class, all 4 in the drafter class.
+    assert_eq!(co.arena().free_units, vec![8, 6]);
+    let (hx, _, vx) = co.attach(&toks(20, 71)).unwrap();
+    let (tgt, drf) = (&va.tables[0], &va.tables[1]);
+    assert_eq!(&vx.tables[0][4..], &[tgt[3], tgt[2]]);
+    assert_eq!(&vx.tables[1][2..], &[drf[3], drf[2], drf[1], drf[0]]);
+    co.release(hx).unwrap();
     let (hc, cached, _) = co.attach(&t).unwrap();
     assert_eq!(cached, 0);
     co.release(hc).unwrap();
@@ -1827,4 +1829,122 @@ fn prot_keeps_the_only_free_candidate_of_a_hit() {
     assert!(moved[0] > 3, "a slab other than Q's was reclaimed, here {}", moved[0]);
     assert_eq!((before[moved[0]], after[moved[0]]), (2, 1));
     co.release(h).unwrap();
+}
+
+// ---- D9 free-page order: unkeyed pages first, then cached pages, least recently released
+// first (§7 row on unkeyed and cached units; SPEC_NOTES representation choice 8) ----
+
+#[test]
+fn cold_attach_takes_unkeyed_pages_before_cached_ones() {
+    // §7: a class with unkeyed free units takes them before evicting a cached block, so a cold
+    // attach right after a release keeps the released prefix hittable. One paged class with 4
+    // pages per slab, no state class (D13).
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let p = toks(9, 100); // 3 pages: blocks 0 and 1 published, block 2 partial
+    let (ha, _, va) = co.attach(&p).unwrap();
+    compute_all(&mut co, ha);
+    co.release(ha).unwrap();
+    // F holds two unkeyed pages (the slab's spare unit and A's tail) and A's two cached blocks.
+    assert_eq!((co.arena().free_units, free_slabs(&co)), (vec![4], 3));
+    let a = &va.tables[0];
+    let (hq, cq, vq) = co.attach(&toks(5, 101)).unwrap();
+    assert_eq!(cq, 0);
+    assert!(vq.tables[0].contains(&a[2]), "A's unkeyed tail page is reused");
+    assert!(!vq.tables[0].contains(&a[0]) && !vq.tables[0].contains(&a[1]), "A's cached blocks are kept");
+    // So A's whole prefix still hits, on the same pages.
+    let (hb, cb, vb) = co.attach(&p).unwrap();
+    assert_eq!(cb, 8);
+    assert_eq!(&vb.tables[0][..2], &a[..2]);
+    for h in [hq, hb] {
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn extend_takes_unkeyed_pages_before_cached_ones() {
+    // The same order for extend's fresh pages.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let p = toks(9, 102);
+    let (ha, _, va) = co.attach(&p).unwrap();
+    compute_all(&mut co, ha);
+    co.release(ha).unwrap();
+    let a = &va.tables[0];
+    let (hq, _, _) = co.attach(&toks(4, 103)).unwrap();
+    compute_all(&mut co, hq);
+    // F: the slab's spare unit (unkeyed) and A's two cached blocks. The new block takes the
+    // spare unit.
+    assert_eq!(co.arena().free_units, vec![3]);
+    let vq = co.extend(hq, &toks(4, 104)).unwrap();
+    assert!(!a.contains(&vq.tables[0][1]));
+    let (hb, cb, _) = co.attach(&p).unwrap();
+    assert_eq!(cb, 8);
+    for h in [hq, hb] {
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn cached_blocks_are_evicted_least_recently_released_first() {
+    // With no unkeyed free unit and no free slab, a fresh page evicts the cached block released
+    // longest ago, and within one release the deepest block first, so a prefix's shallow blocks
+    // outlive its deep ones. Two slabs of 4 pages; A and B fill one slab each.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let (pa, pb) = (toks(16, 110), toks(16, 111)); // 4 full blocks each
+    let (ha, _, va) = co.attach(&pa).unwrap();
+    let (hb, _, vb) = co.attach(&pb).unwrap();
+    compute_all(&mut co, ha);
+    compute_all(&mut co, hb);
+    co.release(ha).unwrap();
+    co.release(hb).unwrap();
+    assert_eq!((co.arena().free_units, free_slabs(&co)), (vec![8], 0));
+    let (a, b) = (&va.tables[0], &vb.tables[0]);
+    // The oldest cached block goes first: A's deepest.
+    let (hx, _, vx) = co.attach(&toks(4, 112)).unwrap();
+    assert_eq!(vx.tables[0], vec![a[3]]);
+    // Then the rest of A, deepest first, before any block of B.
+    let (hy, _, vy) = co.attach(&toks(12, 113)).unwrap();
+    assert_eq!(vy.tables[0], vec![a[2], a[1], a[0]]);
+    co.release(hx).unwrap();
+    co.release(hy).unwrap();
+    // B's prefix is whole; A's is gone.
+    let mut qb = pb.clone();
+    qb.push(1);
+    let (hb2, cb, vb2) = co.attach(&qb).unwrap();
+    assert_eq!(cb, 16);
+    assert_eq!(&vb2.tables[0][..4], &b[..]);
+    co.release(hb2).unwrap();
+    let mut qa = pa.clone();
+    qa.push(1);
+    assert_eq!(co.attach(&qa).unwrap().1, 0);
+}
+
+#[test]
+fn a_hit_makes_a_cached_prefix_most_recently_released() {
+    // LRU by release, not FIFO by publication: a lease that hits A's cached blocks and is
+    // released puts them behind B's, so pressure then evicts B's deepest block first.
+    let mut co = Coordinator::create(3, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let (pa, pb) = (toks(9, 120), toks(9, 121)); // 3 pages: 2 published blocks and a tail
+    let (ha, _, va) = co.attach(&pa).unwrap();
+    let (hb, _, vb) = co.attach(&pb).unwrap();
+    compute_all(&mut co, ha);
+    compute_all(&mut co, hb);
+    co.release(ha).unwrap();
+    co.release(hb).unwrap();
+    // Reuse A's prefix and release it again.
+    let (hc, cc, vc) = co.attach(&pa).unwrap();
+    assert_eq!(cc, 8);
+    assert!(!vb.tables[0][..2].contains(&vc.tables[0][2]), "the fresh page is unkeyed, not a cached block of B");
+    co.release(hc).unwrap();
+    // F: 4 unkeyed pages, then B's blocks, then A's. A 5-page lease evicts B's block 1 only.
+    assert_eq!((co.arena().free_units, free_slabs(&co)), (vec![8], 1));
+    let (hx, _, vx) = co.attach(&toks(20, 122)).unwrap();
+    assert_eq!(vx.tables[0][4], vb.tables[0][1]);
+    assert!(!vx.tables[0].contains(&va.tables[0][0]) && !vx.tables[0].contains(&va.tables[0][1]));
+    co.release(hx).unwrap();
+    let (h1, c1, _) = co.attach(&pa).unwrap();
+    assert_eq!(c1, 8);
+    co.release(h1).unwrap();
+    let (h2, c2, _) = co.attach(&pb).unwrap();
+    assert_eq!(c2, 4);
+    co.release(h2).unwrap();
 }

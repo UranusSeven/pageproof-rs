@@ -8,6 +8,7 @@ pub mod spec;
 pub mod e8;
 pub mod arith;
 pub mod idxset;
+pub mod idxlist;
 pub mod index;
 pub mod types;
 pub mod model;

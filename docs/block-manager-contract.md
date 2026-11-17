@@ -110,7 +110,7 @@ Until these primitives exist, an adapter must not claim to cover every feature o
 | D6 | The core interface uses atomic `attach` / `extend` that check capacity and mutate together, across all classes | Avoids relying on possibly stale can_allocate/can_append results, and avoids a lease that got pages but no state slot |
 | D7 | `begin_write` / `finish_write` make in-flight work explicit; in-flight requests cannot release, and can extend only as D21 allows | Protects units through a metadata protocol; whether the GPU actually completed remains the executor's responsibility |
 | D8 | Keep every published cache entry until its page is reused or its slab is reclaimed; lookup is complete and the hit prefix is the longest | An explicit cache-functionality promise, stronger than upstream's single-valued hash index. Slab reclaim happens only when free slabs do not suffice (D11) |
-| D9 | Free-unit choice, eviction order, reclaimed-slab choice, and page choice among equal keys are not fixed; when a referenced hit candidate exists, it is preferred | Leaves room for optimization and ensures no spurious failure when resources suffice |
+| D9 | Free-unit choice, eviction order, reclaimed-slab choice, and page choice among equal keys are not fixed, except that a class takes its unkeyed free units before its cached ones (§7); when a referenced hit candidate exists, it is preferred | Leaves room for optimization and ensures no spurious failure when resources suffice |
 | D10 | Memory is one arena of `N` slabs of `S` bytes. Unit class `c` has unit size `u_c` with `u_c \| S` (A1, checked at create); `S = lcm_c u_c` is the smallest valid choice and the recommended default. Unit `g` of class `c` occupies bytes `[g·u_c, (g+1)·u_c)` | Each class sees the arena as a regular `[N·n_c, u_c]` array, so block-table kernels that compute `base + id·stride` work unchanged, and a slab has no tail waste. Cost: when the `u_c` share few factors the LCM is large; pad unit sizes (kvspec `stride_align`) to keep `S` reasonable |
 | D11 | Slabs are acquired on demand, free slabs first. A slab whose units all have `ref = 0` is reclaimable even if some are keyed; reclaiming revokes those keys. Release never returns a slab; slabs never move | Keeps cached pages as long as possible and lets a class whose pages are all idle give memory to another class. Cost: reclaiming loses cache entries |
 | D12 | Capacity is exact per class plus slabs (`Cap`, §3.5). Free units of one class never serve another class unless a whole slab is reclaimed | Keeps success-iff-capacity provable. Fragmentation is part of the contract: free bytes spread over partly used slabs do not count for another class |
@@ -459,7 +459,7 @@ Prot &= \{ slab_c(g) \mid c\in Cp,\ i<k^*,\ \text{no candidate of } Index_c[K(h,
 - The slab plan of §3.5 is performed for `(d, Prot)`.
 - Returns a fresh valid handle h with `T_h=T`, `c_h=k^*B`, `ρ_h = L + μ`, an empty ticket queue `Q_h`, an empty deferred tail `X_h`, `stopped_h` false, `|M_h^c| = m^+` for every `c ∈ Cp`, and one live slot `σ_h^c` for every `c ∈ Cs`.
 - For `c ∈ Cp` and `i<k*`, the page-table entry is chosen from the corresponding pre-call `Index_c`. If a referenced candidate exists it is chosen; otherwise a free cached candidate is reactivated.
-- For `c ∈ Cp` and `i>=k*`, distinct free pages of class c are allocated, including the reserved blocks `[m, m^+)`; these pages must not overwrite the cache-hit pages chosen in this call.
+- For `c ∈ Cp` and `i>=k*`, distinct free pages of class c are allocated, including the reserved blocks `[m, m^+)`; these pages must not overwrite the cache-hit pages chosen in this call. A page with a key is allocated only if every unkeyed free page of class c, after the slab plan, is allocated too.
 - For `c ∈ Cs`, `σ_h^c` is a fresh unit taken from `F_c`, with `ref_c = 1`; its contents are unconstrained (`W_c = ⊥`).
 - Every old reference count increases by exactly one for each new page-table entry or slot that refers to it. Units taken from `F_c` are removed from it.
 - The old keys of pages newly allocated as writable are revoked, and their `Index_c` entries correctly removed. Hit pages' keys and KV are unchanged.
@@ -467,7 +467,7 @@ Prot &= \{ slab_c(g) \mid c\in Cp,\ i<k^*,\ \text{no candidate of } Index_c[K(h,
 
 The demand formula distinguishes reusing an active page from reusing a free cache page: the former saves one free-unit slot, the latter still consumes one. Finding a cache hit does not mean no physical capacity is needed.
 
-attach does not implicitly preempt other requests, does not evict referenced units, and does not advance GPU computation. Which free page or slab is evicted is not part of this contract, except that reclaim happens only when free slabs do not suffice.
+attach does not implicitly preempt other requests, does not evict referenced units, and does not advance GPU computation. Which free page or slab is evicted is not part of this contract, except that reclaim happens only when free slabs do not suffice, and a class evicts a cached page only when it has no unkeyed free page left.
 
 ### C2. extend(h, suffix) -> Result<LeaseView>
 
@@ -485,7 +485,7 @@ Let the old length be L, the old block count `m = m_h = ceil(ρ_h/B)`, `L'=L+|su
 
 - The slab plan of §3.5 is performed for `(d, ∅)`.
 - `T'_h=T_h ++ suffix`, `c'_h=c_h` and `ρ'_h = L' + μ`; the old input prefix and the ticket queue are unchanged. Pending plans stay valid: their inputs lie in the old prefix and their page mappings in the old page tables.
-- For every `c ∈ Cp`, the old page table remains a prefix of the new one; exactly `d_c` new distinct free pages are added, each with ref=1 and key=None. Pages already reserved at positions `[L, ρ_h)` are reused for the suffix; they are exclusive and unpublished (I16).
+- For every `c ∈ Cp`, the old page table remains a prefix of the new one; exactly `d_c` new distinct free pages are added, each with ref=1 and key=None, unkeyed free pages first as in C1. Pages already reserved at positions `[L, ρ_h)` are reused for the suffix; they are exclusive and unpublished (I16).
 - State slots are unchanged.
 - Existing KV, live state, published keys and other requests are unchanged; any cache identity the newly occupied pages had is correctly revoked.
 - extend does not look up the prefix cache for the new suffix and does not copy shared pages. If the old tail block still has unused slots, it must be exclusive and unpublished in every paged class, and later writes may use those slots.
@@ -628,6 +628,7 @@ Returns `owner[s]` for every slab, and `|F_c|` and `|R_c|` (with `Prot = ∅`) f
 | A reclaimable slab holds the only free candidate for a hit position of this attach | Not reclaimed in this call (`Prot`) |
 | `FS` non-empty and a reclaimable slab exists | The free slab is used; nothing is reclaimed |
 | Release of the last lease using a slab | The slab stays owned and becomes reclaimable; keys are kept |
+| attach, extend or extend_deferred needs fresh units in a class whose free units include unkeyed and cached ones | The unkeyed units are taken first. A cached unit is taken, and its key revoked, only if every unkeyed free unit of that class, after the slab plan, is taken too. A cold attach right after a release therefore keeps the released prefix hittable while unkeyed units remain. Which cached unit goes first is not fixed (D9) |
 | extend of a hybrid lease | State demand is 0; only paged classes may need units or slabs |
 | attach of an input with `¬Fits(m)` | RequestTooLarge even on an empty arena, not NoCapacity |
 | First plan of a lease (`a = 0`) with a state class | `init = true`; the executor initializes the slot before reading it (E10) |

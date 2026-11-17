@@ -14,6 +14,8 @@ use crate::ops_extend::*;
 use crate::ops_write::*;
 use crate::slabplan::*;
 use crate::coord_attach::*;
+#[cfg(verus_keep_ghost)]
+use crate::ops_attach::unkeyed_first;
 
 verus! {
 
@@ -76,6 +78,7 @@ pub open spec fn coord_grown(o: CoordV, mid: CoordV, n: CoordV, h: u64, suffix: 
             &&& fresh.len() == d
             &&& fresh.no_duplicates()
             &&& forall|j: int| 0 <= j < fresh.len() ==> mid.paged[c].is_free(#[trigger] fresh[j])
+            &&& unkeyed_first(mid.paged[c], tables[c], o.paged[c].leases[h].table.len())
             &&& n.paged[c] == grown(mid.paged[c], h, suffix, fresh, dfr)
         }
 }
@@ -1057,6 +1060,7 @@ impl Coordinator {
             &&& fresh.len() == dd
             &&& fresh.no_duplicates()
             &&& forall|j: int| 0 <= j < fresh.len() ==> mid@.paged[c].is_free(#[trigger] fresh[j])
+            &&& unkeyed_first(mid@.paged[c], tv[c], o@.paged[c].leases[h].table.len())
             &&& fin@.paged[c] == grown(mid@.paged[c], h, suffix, fresh, dfr)
         } by {
             assert(tv[c] == tables@[c]@);
@@ -1090,6 +1094,7 @@ impl Coordinator {
             assert(view.pages@.len() == cdiv(glen(l, suffix, dfr) + mv.cfg.mu, mv.b));
             assert(fresh.len() == cdiv(glen(l, suffix, dfr) + mv.cfg.mu, mv.b) - l.table.len());
             assert(forall|j: int| 0 <= j < fresh.len() ==> mv.is_free(#[trigger] fresh[j]));
+            assert(unkeyed_first(mv, view.pages@, l.table.len()));
             assert(fin.pv(c) == grown(mv, h, suffix, fresh, dfr));
             assert(l.toks.len() == o@.leases()[h].toks.len());
             assert(mid@.b == o@.b);

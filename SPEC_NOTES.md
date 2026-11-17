@@ -15,8 +15,8 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | I1–I11, I16–I18 per paged class | `Coordinator::pools_ok`, `model::inv` | Every paged class (target and drafter) is a valid `Manager` over `N·n_c` units with the shared configuration. |
 | D14 lockstep, obligation 17 | `Coordinator::lock_ok` | Paged classes hold the same leases, inputs, frontiers, reaches, queues, deferred flags, stopped flags, tickets and counters. Every lease satisfies `Fits(ceil(ρ_h/B))`. |
 | I14, I15 | `Coordinator::slots_ok`, `w_ok` | One exclusive slot per lease per state class. `W = T_h[0:c_h]` once `c_h > 0` on a lease that is not stopped, and `W = ⊥` on a stopped lease. |
-| C1 attach | `coord_attach.rs` | v0.3's result, with tables sized for the reach `ρ = L + μ` (`m^+ = ceil((L + μ)/B)`), joint `k*` over `ceil(L/B)`, success iff `Cap(d, Prot)`. |
-| C2 extend, C2b extend_deferred | `coord_ops.rs` `Coordinator::grow`, `coord_grow_result` | One body for both. Errors in contract order: InvalidHandle, InvalidPhase on a stopped lease, Busy (extend: full queue or a head with drafts or `propose`; extend_deferred: full queue), InvalidPhase (`X_h` non-empty, `p_h ≠ L_h`, or extend_deferred with an empty queue), InvalidArgument, RequestTooLarge iff `¬Fits(m')`, NoCapacity iff `¬Cap`. On success every paged class gets `grown(...)`: `ρ' = L̂' + μ`, and extend_deferred sets `X_h = [Q_h[0]]`. |
+| C1 attach | `coord_attach.rs` | v0.3's result, with tables sized for the reach `ρ = L + μ` (`m^+ = ceil((L + μ)/B)`), joint `k*` over `ceil(L/B)`, success iff `Cap(d, Prot)`. In every paged class a fresh page revokes a key only if every unkeyed free page left after the slab plan is in the table too (`unkeyed_first` in `attach_choice_k`, the §7 row on unkeyed and cached units). |
+| C2 extend, C2b extend_deferred | `coord_ops.rs` `Coordinator::grow`, `coord_grow_result` | One body for both. Errors in contract order: InvalidHandle, InvalidPhase on a stopped lease, Busy (extend: full queue or a head with drafts or `propose`; extend_deferred: full queue), InvalidPhase (`X_h` non-empty, `p_h ≠ L_h`, or extend_deferred with an empty queue), InvalidArgument, RequestTooLarge iff `¬Fits(m')`, NoCapacity iff `¬Cap`. On success every paged class gets `grown(...)`: `ρ' = L̂' + μ`, and extend_deferred sets `X_h = [Q_h[0]]`. Fresh pages are unkeyed first, as in C1 (`unkeyed_first` in `coord_grown`). |
 | C3 begin_write | `Coordinator::begin_write`, `coord_begin_result`, `cplan_ok` | Errors in contract order (InvalidPhase on a stopped lease, then Busy, then InvalidArgument, then IdentifierExhausted). A valid call never fails for capacity. The plan has `lo = p_h`, `slack = s_h`, `ℓ`, `k`, `propose`, `producer` (for a continuation), `init = (lo = 0)`, inputs `T_h[lo:lo+ℓ] ++ D` or placeholders, and per paged class the slots `slot_c(h,j)` for `j ∈ [lo, lo + s + ℓ + k (+λ))`, distinct, in range and on exclusive unpublished pages. |
 | C4 finish_write | `Coordinator::finish_write`, `coord_finish_result` | Head ticket only (InvalidTicket otherwise). Orphan: Ok with any fields, `coord_dropped`. Otherwise InvalidArgument unless `n ≤ k`, `x` is given when the ticket heads `X_h` without `stop`, and a continuation with deferred drafts reports exactly `n`. Success: commit `D[0:n]` (known or reported), then bind `x` when the ticket heads `X_h` and `x` is given, then `finish_rel` in every class with `c' = z + n` and publication over `T'_h`. Without `stop` every state slot gets `W = T'_h[0:c']`; with `stop` the lease is stopped and `W = ⊥`. |
 | C5 release | `Coordinator::release` | v0.3's result. Busy while any ticket, orphans included, is pending. |
@@ -54,11 +54,11 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | §5.3 failure atomicity | each method | `r is Err ==> final(self)@ == old(self)@` (whole abstract state, including ids, index and pending). |
 | §5.4 frame | `released`/`attached`/`extended`/`began`/`finish_rel` | Exact abstract post-states: every field not mentioned is unchanged. |
 | C0 create | `manager.rs` | Initial state is exact; `ConfigError` on `P = 0`, `B = 0`, `P·B > 2⁴⁰`, or a namespace too long for its `u32` prefix. |
-| C1 attach | `ops_attach.rs` | Exact `k*` (`is_kstar`, unique). Success **iff** `|F| ≥ m − u` (`lemma_attach_capacity_iff`), else `NoCapacity`. Hits come from the call-time Index, and an active candidate is used whenever one exists. Fresh pages come from `F` and have their keys revoked. Refs increase by exactly one per table entry. `c = k*·B`. New handle id never reused. |
-| C2 extend | `ops_extend.rs` | Phase errors in contract order. Success iff `|F| ≥ d`. Old table is a prefix of the new one. Exactly `d` fresh free pages are added. `T' = T ++ suffix`, `c` unchanged. |
+| C1 attach | `ops_attach.rs` | Exact `k*` (`is_kstar`, unique). Success **iff** `|F| ≥ m − u` (`lemma_attach_capacity_iff`), else `NoCapacity`. Hits come from the call-time Index, and an active candidate is used whenever one exists. Fresh pages come from `F`, unkeyed ones first (`unkeyed_first`), and have their keys revoked. Refs increase by exactly one per table entry. `c = k*·B`. New handle id never reused. |
+| C2 extend | `ops_extend.rs` | Phase errors in contract order. Success iff `|F| ≥ d`. Old table is a prefix of the new one. Exactly `d` fresh free pages are added, unkeyed ones first. `T' = T ++ suffix`, `c` unchanged. |
 | C3 begin_write | `ops_write.rs` | `plan_ok`: exact inputs, positions, slots `= slot(h,j)`, slots distinct and in `[0, P·B)`, write pages exclusive (`ref = 1`, not in any other lease) and unpublished; page map for `[0,z)`; §9.0 (b). |
 | C4 finish_write | `ops_write.rs` | Ticket consumed once, `c = z`. Ghost `V` on `[a,z)` is set to the causal prefix, other slots unchanged. Every block with `a < (i+1)B ≤ z` is published with `K(h,i)` and `den = (ns, T[0:(i+1)B])`; no partial block is published. |
-| C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`. Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
+| C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`, unkeyed ones at the front and cached ones at the back (`keyed_last`). Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
 | C6 inspect / slot_of | `ops_release.rs` | Read-only. `slot_of(h,j)` for `j < L_h` equals `slot(h,j)` and lies in range. |
 | §9.1.4 pending writes disjoint | `ops_write::lemma_pending_disjoint`, `lemma_reserved_disjoint` | The input intervals of two pending tickets never share a slot. Across leases, every position from `c_h` to `ρ_h` (so every listed draft, proposal-row and slack slot) is on a slot no other lease's plan can list. Within one lease, a continuation's window may overlap the earlier ticket's rejected and proposal rows (obligation 26). |
 | §9.1.7 integers | everywhere | `usize`/`u64` with overflow checks. `IdentifierExhausted` for handles and tickets, with no wraparound. Manager ids: see the deviations below. |
@@ -84,7 +84,26 @@ and verified; it is the paged-class building block of the `Coordinator`.
 6. **A continuation's deferred drafts are placeholders** (`PendV.ddr`); the completion's reported
    drafts replace them at commit.
 7. **Commit drops the head's rejected drafts.** Nothing reads them after the commit.
-8. v0.3's representation choices (slab counts as recursive counts, `Prot` from the full candidate
+8. **Each paged class keeps `F` as an ordered list (D9).** `IdxList` (`idxlist.rs`) is a doubly
+   linked list over `[0, P)` in two link arrays, with a ghost `Seq` for its order; push at either
+   end, pop from the front and unlinking any member are O(1). Fresh pages come off the front.
+   Unkeyed units join at the front (a released page without a key, a granted slab's units); a
+   cached page joins at the back when its last reference goes, and `release` walks the table
+   backwards. A hit on a free cached page, or a slab reclaim, unlinks the page. `Manager::rep`
+   keeps `keyed_last`: every unkeyed unit precedes every keyed one. Keys change only when a page
+   leaves `F` (`take_fresh`, `reclaim_range`) or on a referenced page (`finish_write`
+   publishes on ref-1 pages), so the order survives every method. `take_fresh` proves
+   `unkeyed_first` from it, the §7 promise. Two further consequences are implementation choices,
+   not contract promises: cached pages are evicted least recently released first (LRU by the
+   time the last reference went; a hit and a later release move a page to the back), and within
+   one release the deepest block goes first, so a cached prefix shrinks from its end and its
+   shallow blocks stay hittable. `coord_edge_cases.rs` checks both at runtime
+   (`cold_attach_takes_unkeyed_pages_before_cached_ones` and the three tests after it). Before
+   this, `F` was an `IdxSet` popped last-in-first-out, so a cold attach evicted the blocks a
+   lease had just released, even with unkeyed free units to spare. The slab plan is unchanged: a
+   class with enough free units, cached ones included, takes no free slab (§3.5 rule 1), so it
+   may evict a cached page while `FS ≠ ∅`.
+9. v0.3's representation choices (slab counts as recursive counts, `Prot` from the full candidate
    set, ghost `W` as `Option<Seq<Token>>`) and v0.2.1's still hold.
 
 ## Deviations and their status

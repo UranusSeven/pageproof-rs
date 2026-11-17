@@ -32,7 +32,8 @@ keeps the invariant, meets its functional spec, and changes nothing when it retu
   handle or ticket names the same lease in every class. Operations are all-or-nothing: if any
   class cannot satisfy a call, the call fails and no class changes.
 - **Manager** (`manager.rs`, `ops_*.rs`) runs one paged class: leases, page tables, reference
-  counts, the prefix-cache index and the ticket queue. State classes use a simpler `StatePool`
+  counts, the prefix-cache index, the ticket queue and the free list. Fresh pages come from
+  unkeyed free pages first; cached pages go least recently released first. State classes use a simpler `StatePool`
   (`state.rs`) that gives each lease one recurrent-state slot.
 - **Slabs** (`slabplan.rs`, `ops_slab.rs`) are the unit of memory. Each slab is free or owned by
   one class, which splits it into units of its own size. Classes take slabs on demand, free slabs
@@ -98,7 +99,7 @@ See [python/demo.py](python/demo.py) for a runnable end-to-end demo.
 
 | Path | Contents |
 |---|---|
-| `crates/pageproof-core` | The verified core: the three layers above, plus `spec.rs` (encodings, chained key), `e8.rs` (SHA-256 wrapper), `model.rs` (abstract `Valid(S)`) and verified helpers `idxset.rs`, `index.rs`, `arith.rs` |
+| `crates/pageproof-core` | The verified core: the three layers above, plus `spec.rs` (encodings, chained key), `e8.rs` (SHA-256 wrapper), `model.rs` (abstract `Valid(S)`) and verified helpers `idxset.rs`, `idxlist.rs`, `index.rs`, `arith.rs` |
 | `crates/pageproof-core/tests` | Runtime tests for the contract's §7 edge-case table |
 | `crates/pageproof-py` | Thin PyO3 bindings (unverified I/O shim) |
 | `crates/pageproof-client` | A verified client that uses the public specs |
