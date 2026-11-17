@@ -234,7 +234,10 @@ fn extend_within_tail_adds_no_page() {
 fn extend_phase_errors_and_snapshot() {
     let mut m = mgr(4, 4);
     let (h, _, v0) = m.attach(&toks(4, 0)).unwrap();
-    assert_eq!(m.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    // D27 (v0.7): extend does not wait for the input to be computed (v0.6: InvalidPhase).
+    let v1 = m.extend(h, &[1]).unwrap();
+    assert_eq!(v1.pages.len(), 2);
+    assert_eq!(m.inspect(h).unwrap().computed, 0);
     compute_all(&mut m, h);
     assert_eq!(m.extend(h, &[]).err(), Some(Error::InvalidArgument));
     assert_eq!(m.extend(h, &toks(13, 1)).err(), Some(Error::RequestTooLarge));

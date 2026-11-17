@@ -313,8 +313,15 @@ fn extend_demand_paged_only() {
     assert_eq!(&v2.tables[0][..1], &v.tables[0][..]);
     assert_eq!(v2.slots, v.slots);
     assert_eq!(count_owner(&co, 1), state_owned);
+    // D27 (v0.7): known positions may wait to be scheduled, so [4, 8) need not be computed
+    // first (v0.6 returned InvalidPhase). The frontier stays put.
+    let v25 = co.extend(h, &toks(1, 3)).unwrap();
+    assert_eq!(v25.tables[0].len(), 3);
+    assert_eq!(&v25.tables[0][..2], &v2.tables[0][..]);
+    assert_eq!(v25.slots, v.slots);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (9, 4));
     // Phase errors.
-    assert_eq!(co.extend(h, &toks(1, 3)).err(), Some(Error::InvalidPhase));
     compute_all(&mut co, h);
     assert_eq!(co.extend(h, &[]).err(), Some(Error::InvalidArgument));
     assert_eq!(co.begin_write(h, 0, Drafts::Known(vec![]), false).err(), Some(Error::InvalidArgument));
@@ -866,17 +873,21 @@ fn zos_extend_with_a_pending_ticket() {
     let mut co = zos_coord(8, 1);
     let (h, _, _) = co.attach(&toks(8, 23)).unwrap();
     let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
-    // Positions [4, 8) are neither computed nor planned.
-    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    // Positions [4, 8) are neither computed nor planned. D27 (v0.7): they may wait, so extend
+    // succeeds (v0.6 returned InvalidPhase); the ticket and its plan are unchanged.
+    co.extend(h, &[1]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.planned, iv.reach), (9, 0, 4, 11));
     let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
     // A full queue is Busy for extend too.
     assert_eq!(co.extend(h, &[1]).err(), Some(Error::Busy));
     co.finish_write(t1, done(t1)).unwrap();
-    co.extend(h, &[1, 2]).unwrap();
+    co.extend(h, &[2]).unwrap();
     let iv = co.inspect(h).unwrap();
     assert_eq!((iv.len, iv.computed, iv.reach), (10, 4, 12));
     let (t3, p3) = co.begin_write(h, 2, Drafts::Known(vec![]), false).unwrap();
     assert_eq!(p3.positions, vec![8, 9]);
+    assert_eq!(p3.input_ids, vec![1, 2]);
     co.finish_write(t2, done(t2)).unwrap();
     co.finish_write(t3, done(t3)).unwrap();
     assert_eq!(co.inspect(h).unwrap().computed, 10);
@@ -983,10 +994,13 @@ fn extend_deferred_phase_errors() {
     co.finish_write(t2, tok(t2, 9)).unwrap();
     let iv = co.inspect(h).unwrap();
     assert_eq!((iv.len, iv.computed, iv.deferred, iv.pending), (9, 8, false, None));
-    // The bound token at position 8 is known but not computed yet.
-    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
-    compute_all(&mut co, h);
+    // The bound token at position 8 is known but not computed yet. D27 (v0.7): extend does not
+    // wait for it (v0.6 returned InvalidPhase); the next ticket covers both positions.
     co.extend(h, &[1]).unwrap();
+    let (t3, p3) = co.begin_write(h, 2, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!((p3.positions.clone(), p3.input_ids.clone()), (vec![8, 9], vec![9, 1]));
+    co.finish_write(t3, done(t3)).unwrap();
+    assert_eq!(co.inspect(h).unwrap().computed, 10);
     co.release(h).unwrap();
 }
 
@@ -2111,4 +2125,25 @@ fn probe_reserves_nothing() {
     let (h, cached, _) = co.attach(&t).unwrap();
     assert_eq!(cached, 0);
     co.release(h).unwrap();
+}
+
+#[test]
+fn extend_ahead_of_execution_then_compute_in_chunks() {
+    // D27: a scheduler that learns tokens one row at a time grows the lease before each row runs.
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 2, 0, NS).unwrap();
+    let t = toks(20, 78);
+    let (h, _, v) = co.attach_capped(&t[..6], 0).unwrap();
+    assert_eq!(v.tables[0].len(), 2, "6 tokens and a reserve of 2");
+    co.extend(h, &t[6..13]).unwrap();
+    co.extend(h, &t[13..20]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (20, 0, 22));
+    for (n, want) in [(6, 6), (7, 13), (7, 20)] {
+        let (tk, plan) = co.begin_write(h, n, Drafts::Known(vec![]), false).unwrap();
+        assert_eq!(plan.input_ids, t[want - n..want].to_vec());
+        assert_eq!(co.finish_write(tk, done(tk)).unwrap(), want);
+    }
+    // The whole input is published: a repeat hits every block but the last.
+    co.release(h).unwrap();
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 16);
 }
