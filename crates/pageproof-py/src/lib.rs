@@ -229,10 +229,28 @@ impl PyCoordinator {
             .map_err(err)
     }
 
-    /// C1. Returns `(handle, cached_tokens, {"tables": [...], "slots": [...]})`.
-    fn attach<'py>(&mut self, py: Python<'py>, tokens: Vec<u32>) -> PyResult<(PyHandle, usize, Bound<'py, pyo3::types::PyDict>)> {
-        let (h, cached, v) = self.inner.attach(&tokens).map_err(err)?;
+    /// C1. Returns `(handle, cached_tokens, {"tables": [...], "slots": [...]})`. With `max_cached`,
+    /// the lease resumes at most that many tokens in (D26); `0` attaches cold.
+    #[pyo3(signature = (tokens, max_cached = None))]
+    fn attach<'py>(
+        &mut self,
+        py: Python<'py>,
+        tokens: Vec<u32>,
+        max_cached: Option<usize>,
+    ) -> PyResult<(PyHandle, usize, Bound<'py, pyo3::types::PyDict>)> {
+        let r = match max_cached {
+            Some(k) => self.inner.attach_capped(&tokens, k),
+            None => self.inner.attach(&tokens),
+        };
+        let (h, cached, v) = r.map_err(err)?;
         Ok((h.into(), cached, lease_dict(py, v.tables, v.slots)?))
+    }
+
+    /// C8. The `cached_tokens` that `attach(tokens, max_cached)` would return now; read-only (D26).
+    #[pyo3(signature = (tokens, max_cached = None))]
+    fn probe(&mut self, tokens: Vec<u32>, max_cached: Option<usize>) -> PyResult<usize> {
+        let k = max_cached.unwrap_or(tokens.len());
+        self.inner.probe(&tokens, k).map_err(err)
     }
 
     /// C2.

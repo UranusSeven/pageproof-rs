@@ -176,4 +176,24 @@ for what, bad in (("begin_write", lambda: sd.begin_write(h, 1)), ("extend", lamb
         raise AssertionError(f"stopped lease: {what} succeeded")
 sd.finish_write(c2.ticket, accepted=7, token=99)  # an orphan accepts any completion
 assert sd.release(h)[7:] == [11]
-print("pageproof v0.6 demo: ok")
+# v0.7: the caller picks where a lease resumes (D26), and extend may run before the input is
+# computed (D27), for a scheduler that grows rows ahead of execution.
+co7 = pp.Coordinator(num_slabs=16, slab_bytes=64, paged_units=[16], state_units=[], block_size=4,
+                     namespace=b"model-v1")
+toks = list(range(500, 512))
+h0, _, _ = co7.attach(toks)
+p = co7.begin_write(h0, 12)
+co7.finish_write(p.ticket)
+co7.release(h0)
+assert co7.probe(toks) == 8, "the last block is always recomputed"
+assert co7.probe(toks, 5) == 4, "the limit caps the hit at whole blocks"
+h1, cached, _ = co7.attach(toks, max_cached=0)
+assert cached == 0, "max_cached=0 attaches cold"
+co7.extend(h1, [1, 2])
+info = co7.inspect(h1)
+assert (info["len"], info["computed"]) == (14, 0)
+p = co7.begin_write(h1, 14)
+co7.finish_write(p.ticket)
+co7.release(h1)
+print("v0.7 hit limit, probe and early extend: ok")
+print("pageproof v0.7 demo: ok")

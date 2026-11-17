@@ -1,12 +1,14 @@
-# Spec notes: contract v0.6 vs. the Verus implementation
+# Spec notes: contract v0.7 vs. the Verus implementation
 
 The contract is [docs/block-manager-contract.md](docs/block-manager-contract.md). This file maps
 each obligation to where it is proved, and records every deliberate representation choice or
 deviation. v0.6 adds speculative decoding (v0.4.1), zero-overhead scheduling (ZOS, v0.5) and their
-combination (v0.6) to the v0.3 coordinator. The v0.2.1 single-class `Manager` remains available
-and verified; it is the paged-class building block of the `Coordinator`.
+combination (v0.6) to the v0.3 coordinator. v0.7 adds a caller's hit limit to attach and a
+read-only probe (D26), and lets extend append tokens before earlier positions are computed (D27),
+for schedulers that choose where a request resumes and plan steps ahead of execution. The v0.2.1 single-class `Manager` remains available and verified; it is the paged-class
+building block of the `Coordinator`.
 
-## Coverage: coordinator C0–C7 and C2b
+## Coverage: coordinator C0–C8 and C2b
 
 | Contract | Where | What is proved |
 |---|---|---|
@@ -15,8 +17,10 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | I1–I11, I16–I18 per paged class | `Coordinator::pools_ok`, `model::inv` | Every paged class (target and drafter) is a valid `Manager` over `N·n_c` units with the shared configuration. |
 | D14 lockstep, obligation 17 | `Coordinator::lock_ok` | Paged classes hold the same leases, inputs, frontiers, reaches, queues, deferred flags, stopped flags, tickets and counters. Every lease satisfies `Fits(ceil(ρ_h/B))`. |
 | I14, I15 | `Coordinator::slots_ok`, `w_ok` | One exclusive slot per lease per state class. `W = T_h[0:c_h]` once `c_h > 0` on a lease that is not stopped, and `W = ⊥` on a stopped lease. |
-| C1 attach | `coord_attach.rs` | v0.3's result, with tables sized for the reach `ρ = L + μ` (`m^+ = ceil((L + μ)/B)`), joint `k*` over `ceil(L/B)`, success iff `Cap(d, Prot)`. In every paged class a fresh page revokes a key only if every unkeyed free page left after the slab plan is in the table too (`unkeyed_first` in `attach_choice_k`, the §7 row on unkeyed and cached units). |
-| C2 extend, C2b extend_deferred | `coord_ops.rs` `Coordinator::grow`, `coord_grow_result` | One body for both. Errors in contract order: InvalidHandle, InvalidPhase on a stopped lease, Busy (extend: full queue or a head with drafts or `propose`; extend_deferred: full queue), InvalidPhase (`X_h` non-empty, `p_h ≠ L_h`, or extend_deferred with an empty queue), InvalidArgument, RequestTooLarge iff `¬Fits(m')`, NoCapacity iff `¬Cap`. On success every paged class gets `grown(...)`: `ρ' = L̂' + μ`, and extend_deferred sets `X_h = [Q_h[0]]`. Fresh pages are unkeyed first, as in C1 (`unkeyed_first` in `coord_grown`). |
+| C1 attach | `coord_attach.rs` `attach_capped`, `coord_attach_capped_result` | v0.3's result, with tables sized for the reach `ρ = L + μ` (`m^+ = ceil((L + μ)/B)`), joint `k*` over `ceil(L/B)` and the hit limit `floor(κ/B)` (`joint_kl`), success iff `Cap(d, Prot)`. In every paged class a fresh page revokes a key only if every unkeyed free page left after the slab plan is in the table too (`unkeyed_first` in `attach_choice_k`, the §7 row on unkeyed and cached units). |
+| C1 `attach(T)` | `Coordinator::attach`, `lemma_attach_capped_full` | `attach_capped(T, L)` with v0.6's `coord_attach_result`: a limit of `L` tokens caps nothing (`lemma_cdiv_le_div_succ`, `lemma_joint_kl_full`). |
+| C8 probe | `Coordinator::probe`, `coord_probe_result` | Read-only (`final@ == old@`): InvalidArgument on an empty input, RequestTooLarge iff `¬Fits(m^+)`, else `k*·B` with `joint_kl` for the same `(T, κ)`, which `lemma_joint_kl_unique` makes the `k*` an attach of the same `(T, κ)` over the same state takes. |
+| C2 extend, C2b extend_deferred | `coord_ops.rs` `Coordinator::grow`, `coord_grow_result`, `ops_extend::grow_phase` | One body for both. Errors in contract order: InvalidHandle, InvalidPhase on a stopped lease, Busy (extend: full queue or a head with drafts or `propose`; extend_deferred: full queue), InvalidPhase (`X_h` non-empty, or extend_deferred with an empty queue or `p_h ≠ L_h`), InvalidArgument, RequestTooLarge iff `¬Fits(m')`, NoCapacity iff `¬Cap`. extend accepts `p_h < L_h` (D27). On success every paged class gets `grown(...)`: `ρ' = L̂' + μ`, and extend_deferred sets `X_h = [Q_h[0]]`. Fresh pages are unkeyed first, as in C1 (`unkeyed_first` in `coord_grown`). |
 | C3 begin_write | `Coordinator::begin_write`, `coord_begin_result`, `cplan_ok` | Errors in contract order (InvalidPhase on a stopped lease, then Busy, then InvalidArgument, then IdentifierExhausted). A valid call never fails for capacity. The plan has `lo = p_h`, `slack = s_h`, `ℓ`, `k`, `propose`, `producer` (for a continuation), `init = (lo = 0)`, inputs `T_h[lo:lo+ℓ] ++ D` or placeholders, and per paged class the slots `slot_c(h,j)` for `j ∈ [lo, lo + s + ℓ + k (+λ))`, distinct, in range and on exclusive unpublished pages. |
 | C4 finish_write | `Coordinator::finish_write`, `coord_finish_result` | Head ticket only (InvalidTicket otherwise). Orphan: Ok with any fields, `coord_dropped`. Otherwise InvalidArgument unless `n ≤ k`, `x` is given when the ticket heads `X_h` without `stop`, and a continuation with deferred drafts reports exactly `n`. Success: commit `D[0:n]` (known or reported), then bind `x` when the ticket heads `X_h` and `x` is given, then `finish_rel` in every class with `c' = z + n` and publication over `T'_h`. Without `stop` every state slot gets `W = T'_h[0:c']`; with `stop` the lease is stopped and `W = ⊥`. |
 | C5 release | `Coordinator::release` | v0.3's result. Busy while any ticket, orphans included, is pending. |
@@ -24,9 +28,9 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | Arena disjointness, obligation 10 | `Coordinator::theorem_arena_disjoint` | Unchanged from v0.3; drafter classes are paged classes. |
 | I11, obligation 9 | `Coordinator::lemma_bounded` | Leases ≤ `N·n_0`. Pending ≤ `(δ + 1)·leases`. Index buckets ≤ `N·n_c`. |
 | Obligation 13 | every coordinator method | `r is Err ==> final@ == old@`, including extend_deferred. |
-| Public usability | `crates/pageproof-client` | `coord_churn` runs chunks, a deferred step, a continuation and a completion with `stop` in a loop; validity and the bounds hold at every iteration from the public specs alone. |
+| Public usability | `crates/pageproof-client` | `coord_churn` runs chunks, a deferred step, a continuation and a completion with `stop` in a loop; validity and the bounds hold at every iteration from the public specs alone. `probe_then_attach` (v0.7) proves that an attach with probe's answer as its limit, right after the probe, resumes exactly there. |
 
-## Coverage: v0.4–v0.6 obligations (§9.1)
+## Coverage: v0.4–v0.7 obligations (§9.1)
 
 | Obligation | Where | Status |
 |---|---|---|
@@ -41,6 +45,9 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | 26 Overlapping windows | `cplan_ok`, `lemma_uncomputed_exclusive` | Proved as stated: the listed slots cover `[lo, lo + s + ℓ + k)`, which contains every window `lo + σ`, `σ ≤ s`; every listed page past `c_h` is exclusive and unpublished, and stays so as `c_h` grows. |
 | 27 Stop and orphans | `lease_ok` (I18), `finish_rel(.., stop)`, `dropped` | Proved: stop credits the committed prefix, stops the lease, empties `X_h` and sets `W = ⊥`; an orphan changes only `Q_h` and `Pending`; begin, extend and extend_deferred return InvalidPhase; release succeeds once the queue is empty. |
 | 14, 18, 20, 24 Refinement of earlier versions | specs | Not proved as observational equivalences. See the deviations. |
+| 28 Refinement of v0.6 | `attach`, `grow_phase` | `attach(T)` keeps v0.6's spec, proved through `lemma_attach_capped_full`. extend's spec is v0.6's with the `p_h = L_h` conjunct dropped from its phase; that it then accepts every v0.6 call with the same result is read off the two specs, not proved as an equivalence. |
+| 29 Hit limit and probe | `coord_attach_capped_result`, `coord_probe_result` | Proved: attach_capped's `k*` is `joint_kl` at `floor(κ/B)`, with v0.3's demand, `Prot` and success-iff-`Cap`; probe changes nothing and returns that `k*·B`. |
+| 30 Extend before compute | `ops_extend::lemma_grow_inv` | Proved: with at most one pending ticket, `k = 0` and no `propose`, extend at `p_h < L_h` keeps `lease_ok` (I9, I16 room clause with `s_h = 0`, I17) and every pending plan. |
 
 ## Coverage: v0.2.1 manager
 
@@ -114,9 +121,14 @@ and verified; it is the paged-class building block of the `Coordinator`.
 
 ## Deviations and their status
 
-- **Refinement obligations 14, 18, 20, 24 are partial.** Each method's spec specialises to the
-  earlier version's when `λ = 0`, `δ = 0` or `Cx = ∅`, and the v0.2.1 and v0.3 test suites still
-  pass, but the observational-equivalence statements are not separately proved.
+- **Refinement obligations 14, 18, 20, 24 and 28 are partial.** Each method's spec specialises to
+  the earlier version's when `λ = 0`, `δ = 0` or `Cx = ∅`, and the v0.2.1 and v0.3 test suites
+  still pass, but the observational-equivalence statements are not separately proved. For 28,
+  `attach(T)` is proved against v0.6's own spec; extend's v0.6 tests that expected InvalidPhase at
+  `p_h < L_h` now expect success, and the rest pass unchanged.
+- **D27 also relaxes the per-class `Manager::extend`.** The coordinator's extend runs each class's
+  `grow`, so the v0.2.1-style `Manager::extend` (and the Python `BlockManager.extend`) accepts an
+  input that is not yet computed too.
 - **C6 does not return each pending ticket's `lo`, `s`, `ℓ`, `k`, `propose` and `producer`.**
   `inspect` returns `Q_h` (ticket ids in issue order) and the lease-level `p_h`, `s_h`, `X_h` and
   `stopped_h`; the per-ticket fields are in the plan the caller holds.
