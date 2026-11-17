@@ -33,8 +33,8 @@ keeps the invariant, meets its functional spec, and changes nothing when it retu
   class cannot satisfy a call, the call fails and no class changes.
 - **Manager** (`manager.rs`, `ops_*.rs`) runs one paged class: leases, page tables, reference
   counts, the prefix-cache index, the ticket queue and the free list. Fresh pages come from
-  unkeyed free pages first; cached pages go least recently released first. State classes use a simpler `StatePool`
-  (`state.rs`) that gives each lease one recurrent-state slot.
+  unkeyed free pages first; cached pages go least recently released first. State classes use a
+  simpler `StatePool` (`state.rs`) that gives each lease one recurrent-state slot.
 - **Slabs** (`slabplan.rs`, `ops_slab.rs`) are the unit of memory. Each slab is free or owned by
   one class, which splits it into units of its own size. Classes take slabs on demand, free slabs
   first. When none are free, an idle slab is reclaimed from another class, even if its pages still

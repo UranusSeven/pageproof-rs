@@ -58,7 +58,7 @@ and verified; it is the paged-class building block of the `Coordinator`.
 | C2 extend | `ops_extend.rs` | Phase errors in contract order. Success iff `|F| ≥ d`. Old table is a prefix of the new one. Exactly `d` fresh free pages are added, unkeyed ones first. `T' = T ++ suffix`, `c` unchanged. |
 | C3 begin_write | `ops_write.rs` | `plan_ok`: exact inputs, positions, slots `= slot(h,j)`, slots distinct and in `[0, P·B)`, write pages exclusive (`ref = 1`, not in any other lease) and unpublished; page map for `[0,z)`; §9.0 (b). |
 | C4 finish_write | `ops_write.rs` | Ticket consumed once, `c = z`. Ghost `V` on `[a,z)` is set to the causal prefix, other slots unchanged. Every block with `a < (i+1)B ≤ z` is published with `K(h,i)` and `den = (ns, T[0:(i+1)B])`; no partial block is published. |
-| C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`, unkeyed ones at the front and cached ones at the back (`keyed_last`). Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
+| C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`, every unkeyed free page ahead of every cached one (`keyed_last`; that cached pages join at the back is not proved, see representation choice 8). Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
 | C6 inspect / slot_of | `ops_release.rs` | Read-only. `slot_of(h,j)` for `j < L_h` equals `slot(h,j)` and lies in range. |
 | §9.1.4 pending writes disjoint | `ops_write::lemma_pending_disjoint`, `lemma_reserved_disjoint` | The input intervals of two pending tickets never share a slot. Across leases, every position from `c_h` to `ρ_h` (so every listed draft, proposal-row and slack slot) is on a slot no other lease's plan can list. Within one lease, a continuation's window may overlap the earlier ticket's rejected and proposal rows (obligation 26). |
 | §9.1.7 integers | everywhere | `usize`/`u64` with overflow checks. `IdentifierExhausted` for handles and tickets, with no wraparound. Manager ids: see the deviations below. |
@@ -94,15 +94,21 @@ and verified; it is the paged-class building block of the `Coordinator`.
    leaves `F` (`take_fresh`, `reclaim_range`) or on a referenced page (`finish_write`
    publishes on ref-1 pages), so the order survives every method. `take_fresh` proves
    `unkeyed_first` from it, the §7 promise. Two further consequences are implementation choices,
-   not contract promises: cached pages are evicted least recently released first (LRU by the
-   time the last reference went; a hit and a later release move a page to the back), and within
-   one release the deepest block goes first, so a cached prefix shrinks from its end and its
-   shallow blocks stay hittable. `coord_edge_cases.rs` checks both at runtime
-   (`cold_attach_takes_unkeyed_pages_before_cached_ones` and the three tests after it). Before
+   neither a contract promise nor proved (`keyed_last` fixes only the partition, not the order
+   inside the cached segment): cached pages are evicted least recently released first (LRU by
+   the time the last reference went; a hit and a later release move a page to the back), and
+   within one release the deepest block goes first, so a cached prefix shrinks from its end and
+   its shallow blocks stay hittable. `cached_blocks_are_evicted_least_recently_released_first`
+   and `a_hit_makes_a_cached_prefix_most_recently_released` in `coord_edge_cases.rs` check both
+   at runtime; the four tests before them check unkeyed-first for attach, extend,
+   extend_deferred and a slab granted in the same call. Before
    this, `F` was an `IdxSet` popped last-in-first-out, so a cold attach evicted the blocks a
-   lease had just released, even with unkeyed free units to spare. The slab plan is unchanged: a
-   class with enough free units, cached ones included, takes no free slab (§3.5 rule 1), so it
-   may evict a cached page while `FS ≠ ∅`.
+   lease had just released, even with unkeyed free units to spare. The slab plan is unchanged,
+   so two gaps remain: a class with enough free units, cached ones included, takes no free slab
+   (§3.5 rule 1), so it may evict a cached page while `FS ≠ ∅`
+   ([#15](https://github.com/UranusSeven/pageproof-rs/issues/15)); and a reclaim takes the
+   donor's lowest idle slab, keyed or not
+   ([#16](https://github.com/UranusSeven/pageproof-rs/issues/16)).
 9. v0.3's representation choices (slab counts as recursive counts, `Prot` from the full candidate
    set, ghost `W` as `Option<Seq<Token>>`) and v0.2.1's still hold.
 
@@ -119,7 +125,9 @@ and verified; it is the paged-class building block of the `Coordinator`.
   stops leases or defers positions (`Manager::create` has `δ = 0`). `Manager::extend_deferred`
   never succeeds with `δ = 0`. `create_empty` also requires `λ + δλ ≤ μ`, which every coordinator
   configuration satisfies.
-- **Reclaim choice is greedy** (D9 leaves it open); `plan_rel` proves the counts.
+- **Reclaim choice is greedy** (D9 leaves it open); `plan_rel` proves the counts. The donor gives
+  its lowest-index idle slab, even when it has an idle slab with no keyed unit
+  ([#16](https://github.com/UranusSeven/pageproof-rs/issues/16)).
 - **Paged classes agree on leases, not on which pages hits share.** D14 keeps every paged class
   on the same leases, inputs and table lengths, but each class picks its own candidate for a hit.
   `scan_bucket` takes the first referenced candidate in bucket order, revoking a key reorders a

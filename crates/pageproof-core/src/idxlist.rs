@@ -24,8 +24,6 @@ pub struct IdxList {
     nxt: Vec<usize>,
     /// `prv[x]`: the member before `x`, or `NIL`.
     prv: Vec<usize>,
-    /// `on[x]`: `x` is a member.
-    on: Vec<bool>,
     head: usize,
     tail: usize,
     len: usize,
@@ -44,19 +42,17 @@ impl IdxList {
     }
 
     pub closed spec fn universe(&self) -> nat {
-        self.on@.len()
+        self.nxt@.len()
     }
 
     pub closed spec fn wf(&self) -> bool {
         let s = self.s@;
-        let n = self.on@.len();
+        let n = self.nxt@.len();
         &&& n < NIL
-        &&& self.nxt@.len() == n
         &&& self.prv@.len() == n
         &&& s.no_duplicates()
         &&& self.len == s.len()
         &&& forall|i: int| 0 <= i < s.len() ==> (#[trigger] s[i] as nat) < n
-        &&& forall|x: int| 0 <= x < n ==> (#[trigger] self.on@[x] <==> s.contains(x as usize))
         &&& self.head == (if s.len() == 0 { NIL } else { s[0] })
         &&& self.tail == (if s.len() == 0 { NIL } else { s[s.len() - 1] })
         &&& forall|i: int| 0 <= i < s.len() ==> self.nxt@[#[trigger] s[i] as int] == succ(s, i)
@@ -86,7 +82,7 @@ impl IdxList {
     {
         let s = self.s@;
         s.unique_seq_to_set();
-        let hi: usize = self.on.len();
+        let hi: usize = self.nxt.len();
         vstd::set_lib::range_set_properties::<usize>(0usize, hi);
         let r = Set::<usize>::range(0usize, hi);
         assert forall|x: usize| #[trigger] self@.contains(x) implies r.contains(x) by {
@@ -107,7 +103,6 @@ impl IdxList {
         let s = IdxList {
             nxt: vec![NIL; n],
             prv: vec![NIL; n],
-            on: vec![false; n],
             head: NIL,
             tail: NIL,
             len: 0,
@@ -129,7 +124,6 @@ impl IdxList {
     {
         let mut nxt: Vec<usize> = Vec::new();
         let mut prv: Vec<usize> = Vec::new();
-        let mut on: Vec<bool> = Vec::new();
         let mut i: usize = 0;
         while i < n
             invariant
@@ -137,18 +131,15 @@ impl IdxList {
                 n < NIL,
                 nxt@.len() == i,
                 prv@.len() == i,
-                on@.len() == i,
                 forall|j: int| 0 <= j < i ==> #[trigger] nxt@[j] == (if j + 1 < n { (j + 1) as usize } else { NIL }),
                 forall|j: int| 0 <= j < i ==> #[trigger] prv@[j] == (if j > 0 { (j - 1) as usize } else { NIL }),
-                forall|j: int| 0 <= j < i ==> #[trigger] on@[j],
             decreases n - i,
         {
-            let ghost (n0, p0, o0) = (nxt@, prv@, on@);
+            let ghost (n0, p0) = (nxt@, prv@);
             nxt.push(if i + 1 < n { i + 1 } else { NIL });
             prv.push(if i > 0 { i - 1 } else { NIL });
-            on.push(true);
             proof {
-                assert forall|j: int| 0 <= j < i implies nxt@[j] == n0[j] && prv@[j] == p0[j] && on@[j] == o0[j] by {}
+                assert forall|j: int| 0 <= j < i implies nxt@[j] == n0[j] && prv@[j] == p0[j] by {}
             }
             i += 1;
         }
@@ -156,16 +147,12 @@ impl IdxList {
         let s = IdxList {
             nxt,
             prv,
-            on,
             head: if n > 0 { 0 } else { NIL },
             tail: if n > 0 { n - 1 } else { NIL },
             len: n,
             s: Ghost(sq),
         };
         proof {
-            assert forall|x: int| 0 <= x < n implies (#[trigger] s.on@[x] <==> sq.contains(x as usize)) by {
-                assert(sq[x] == x as usize);
-            }
             assert forall|j: int| 0 <= j < sq.len() implies s.nxt@[#[trigger] sq[j] as int] == succ(sq, j) by {
                 assert(sq[j] as int == j);
             }
@@ -194,19 +181,6 @@ impl IdxList {
         self.len
     }
 
-    pub fn contains(&self, b: usize) -> (r: bool)
-        requires
-            self.wf(),
-            (b as nat) < self.universe(),
-        ensures
-            r == self@.contains(b),
-    {
-        proof {
-            assert((b as int) as usize == b);
-        }
-        self.on[b]
-    }
-
     /// Inserts `b` as the first member.
     pub fn push_front(&mut self, b: usize)
         requires
@@ -232,12 +206,11 @@ impl IdxList {
             self.prv.set(h, b);
         }
         self.head = b;
-        self.on.set(b, true);
         self.len = self.len + 1;
         let ghost s1 = seq![b] + s0;
         self.s = Ghost(s1);
         proof {
-            let n = self.on@.len();
+            let n = self.nxt@.len();
             assert(!s0.contains(b));
             assert forall|j: int| 0 <= j < s0.len() implies #[trigger] s1[j + 1] == s0[j] by {}
             assert(s1[0] == b);
@@ -266,9 +239,6 @@ impl IdxList {
                 if i > 0 {
                     assert(s1[i] == s0[i - 1]);
                 }
-            }
-            assert forall|x: int| 0 <= x < n implies (#[trigger] self.on@[x] <==> s1.contains(x as usize)) by {
-                assert(s1.contains(x as usize) <==> (x as usize == b || s0.contains(x as usize)));
             }
             assert forall|i: int| 0 <= i < s1.len() implies self.nxt@[#[trigger] s1[i] as int] == succ(s1, i) by {
                 if i > 0 {
@@ -318,12 +288,11 @@ impl IdxList {
             self.nxt.set(t, b);
         }
         self.tail = b;
-        self.on.set(b, true);
         self.len = self.len + 1;
         let ghost s1 = s0.push(b);
         self.s = Ghost(s1);
         proof {
-            let n = self.on@.len();
+            let n = self.nxt@.len();
             let m = s0.len() as int;
             assert(!s0.contains(b));
             assert forall|x: usize| #[trigger] s1.contains(x) <==> (x == b || s0.contains(x)) by {
@@ -337,9 +306,6 @@ impl IdxList {
                         assert(s0.contains(s1[i]));
                     }
                 }
-            }
-            assert forall|x: int| 0 <= x < n implies (#[trigger] self.on@[x] <==> s1.contains(x as usize)) by {
-                assert(s1.contains(x as usize) <==> (x as usize == b || s0.contains(x as usize)));
             }
             assert forall|i: int| 0 <= i < s1.len() implies self.nxt@[#[trigger] s1[i] as int] == succ(s1, i) by {
                 if i < m {
@@ -385,10 +351,10 @@ impl IdxList {
             assert(p == pred(s0, i));
             assert(q == succ(s0, i));
             if i > 0 {
-                assert((s0[i - 1] as nat) < self.on@.len());
+                assert((s0[i - 1] as nat) < self.nxt@.len());
             }
             if i + 1 < s0.len() {
-                assert((s0[i + 1] as nat) < self.on@.len());
+                assert((s0[i + 1] as nat) < self.nxt@.len());
             }
         }
         if p == NIL {
@@ -401,12 +367,11 @@ impl IdxList {
         } else {
             self.prv.set(q, p);
         }
-        self.on.set(b, false);
         self.len = self.len - 1;
         let ghost s1 = s0.remove(i);
         self.s = Ghost(s1);
         proof {
-            let n = self.on@.len();
+            let n = self.nxt@.len();
             let m = s0.len() as int;
             s0.remove_ensures(i);
             assert forall|j: int| 0 <= j < s1.len() implies #[trigger] s1[j] == (if j < i { s0[j] } else { s0[j + 1] }) by {}
@@ -442,9 +407,6 @@ impl IdxList {
                 } else {
                     assert(s1[j] == s0[j + 1]);
                 }
-            }
-            assert forall|x: int| 0 <= x < n implies (#[trigger] self.on@[x] <==> s1.contains(x as usize)) by {
-                assert(s1.contains(x as usize) <==> (x as usize != b && s0.contains(x as usize)));
             }
             if i > 0 {
                 assert(s1[0] == s0[0]);

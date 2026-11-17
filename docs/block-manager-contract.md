@@ -467,7 +467,7 @@ Prot &= \{ slab_c(g) \mid c\in Cp,\ i<k^*,\ \text{no candidate of } Index_c[K(h,
 
 The demand formula distinguishes reusing an active page from reusing a free cache page: the former saves one free-unit slot, the latter still consumes one. Finding a cache hit does not mean no physical capacity is needed.
 
-attach does not implicitly preempt other requests, does not evict referenced units, and does not advance GPU computation. Which free page or slab is evicted is not part of this contract, except that reclaim happens only when free slabs do not suffice, and a class evicts a cached page only when it has no unkeyed free page left.
+attach does not implicitly preempt other requests, does not evict referenced units, and does not advance GPU computation. Which free page or slab is evicted is not part of this contract, except that reclaim happens only when free slabs do not suffice, and that unkeyed free units are allocated before cached ones (above). A reclaim still revokes every key in the slab it takes (§3.5 rule 3), whatever unkeyed units the donor class keeps elsewhere.
 
 ### C2. extend(h, suffix) -> Result<LeaseView>
 
@@ -628,7 +628,7 @@ Returns `owner[s]` for every slab, and `|F_c|` and `|R_c|` (with `Prot = ∅`) f
 | A reclaimable slab holds the only free candidate for a hit position of this attach | Not reclaimed in this call (`Prot`) |
 | `FS` non-empty and a reclaimable slab exists | The free slab is used; nothing is reclaimed |
 | Release of the last lease using a slab | The slab stays owned and becomes reclaimable; keys are kept |
-| attach, extend or extend_deferred needs fresh units in a class whose free units include unkeyed and cached ones | The unkeyed units are taken first. A cached unit is taken, and its key revoked, only if every unkeyed free unit of that class, after the slab plan, is taken too. A cold attach right after a release therefore keeps the released prefix hittable while unkeyed units remain. Which cached unit goes first is not fixed (D9) |
+| attach, extend or extend_deferred needs fresh units in a class whose free units include unkeyed and cached ones | The unkeyed units are taken first. A cached unit is taken, and its key revoked, only if every unkeyed free unit of that class, after the slab plan, is taken too. Free slabs do not spare cached units: §3.5 rule 1 grants a slab only when `|F_c| < d_c`, and `F_c` counts cached units. A reclaimed slab loses its keys (rule 3) whatever unkeyed units its class keeps. Which cached unit goes first is not fixed (D9) |
 | extend of a hybrid lease | State demand is 0; only paged classes may need units or slabs |
 | attach of an input with `¬Fits(m)` | RequestTooLarge even on an empty arena, not NoCapacity |
 | First plan of a lease (`a = 0`) with a state class | `init = true`; the executor initializes the slot before reading it (E10) |

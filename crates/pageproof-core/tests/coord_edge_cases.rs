@@ -1484,18 +1484,18 @@ fn prefix_cached_in_the_target_class_only() {
     // §7: target prefix cached, drafter class not: k* stops at the first block missing in any
     // paged class. Target pages are 16 B (4 per slab), drafter pages 32 B (2 per slab), μ = 2.
     let mut co = Coordinator::create(6, 64, &[16], &[32], &[], 4, 1, 0, NS).unwrap();
-    let t = toks(17, 70); // 5 pages: blocks 0-3 published, block 4 partial
+    let t = toks(5, 70); // 2 pages: block 0 published, block 1 partial
     let (ha, _, va) = co.attach(&t).unwrap();
     compute_all(&mut co, ha);
     co.release(ha).unwrap();
-    // Slab rounding leaves the target class 4 unkeyed free pages and the drafter class 2. A
-    // 6-page lease takes those first, then cached pages deepest block first: 2 in the target
-    // class, all 4 in the drafter class.
-    assert_eq!(co.arena().free_units, vec![8, 6]);
-    let (hx, _, vx) = co.attach(&toks(20, 71)).unwrap();
-    let (tgt, drf) = (&va.tables[0], &va.tables[1]);
-    assert_eq!(&vx.tables[0][4..], &[tgt[3], tgt[2]]);
-    assert_eq!(&vx.tables[1][2..], &[drf[3], drf[2], drf[1], drf[0]]);
+    // Slab rounding leaves the target class 3 unkeyed free pages and the drafter class 1, beside
+    // each class's cached block 0.
+    assert_eq!(co.arena().free_units, vec![4, 2]);
+    // A 2-page lease takes only unkeyed pages in the target class (unkeyed first), but both free
+    // pages, the cached one included, in the drafter class. This holds for any D9 order.
+    let (hx, _, vx) = co.attach(&toks(4, 71)).unwrap();
+    assert!(!vx.tables[0].contains(&va.tables[0][0]), "target block 0 kept");
+    assert!(vx.tables[1].contains(&va.tables[1][0]), "drafter block 0 reused");
     co.release(hx).unwrap();
     let (hc, cached, _) = co.attach(&t).unwrap();
     assert_eq!(cached, 0);
@@ -1881,6 +1881,56 @@ fn extend_takes_unkeyed_pages_before_cached_ones() {
     for h in [hq, hb] {
         co.release(h).unwrap();
     }
+}
+
+#[test]
+fn extend_deferred_takes_unkeyed_pages_before_cached_ones() {
+    // The same order for extend_deferred's fresh pages (δ = 1, no state class).
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
+    let pa = toks(8, 132); // 2 pages, both blocks published
+    let (ha, _, va) = co.attach(&pa).unwrap();
+    compute_all(&mut co, ha);
+    co.release(ha).unwrap();
+    let a = &va.tables[0];
+    // F: the slab's 2 spare units (unkeyed) and A's 2 cached blocks. Q takes a spare unit.
+    let (hq, _, vq) = co.attach(&toks(4, 133)).unwrap();
+    assert!(!a.contains(&vq.tables[0][0]));
+    let (t1, _) = co.begin_write(hq, 4, Drafts::Known(vec![]), false).unwrap();
+    // The deferred position starts block 1, which takes the other spare unit.
+    let lv = co.extend_deferred(hq).unwrap();
+    assert_eq!(lv.tables[0].len(), 2);
+    assert!(!a.contains(&lv.tables[0][1]), "an unkeyed unit, not a cached block of A");
+    assert_eq!(co.arena().free_units, vec![2]);
+    co.finish_write(t1, tok(t1, 5)).unwrap();
+    co.release(hq).unwrap();
+    let mut qa = pa.clone();
+    qa.push(1);
+    let (hb, cb, _) = co.attach(&qa).unwrap();
+    assert_eq!(cb, 8);
+    co.release(hb).unwrap();
+}
+
+#[test]
+fn units_of_a_slab_granted_in_the_same_call_go_before_cached_ones() {
+    // A class short of free units gets a slab (§3.5 rule 1). The granted units are unkeyed, so
+    // the call takes them, and the old unkeyed units, before any cached one.
+    let mut co = Coordinator::create(4, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let pa = toks(8, 130); // 2 pages, both blocks published
+    let (ha, _, va) = co.attach(&pa).unwrap();
+    compute_all(&mut co, ha);
+    co.release(ha).unwrap();
+    // F: the slab's 2 spare units (unkeyed) and A's 2 cached blocks; 3 free slabs.
+    assert_eq!((co.arena().free_units, free_slabs(&co)), (vec![4], 3));
+    // A 6-page lease needs ceil((6 - 4)/4) = 1 slab, and takes its 4 units and the 2 spare ones.
+    let (hq, _, vq) = co.attach(&toks(24, 131)).unwrap();
+    assert_eq!((co.arena().free_units, free_slabs(&co)), (vec![2], 2));
+    assert!(!vq.tables[0].contains(&va.tables[0][0]) && !vq.tables[0].contains(&va.tables[0][1]));
+    co.release(hq).unwrap();
+    let mut qa = pa.clone();
+    qa.push(1);
+    let (hb, cb, _) = co.attach(&qa).unwrap();
+    assert_eq!(cb, 8);
+    co.release(hb).unwrap();
 }
 
 #[test]
