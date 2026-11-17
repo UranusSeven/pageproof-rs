@@ -169,4 +169,51 @@ pub fn attach_release(co: &mut Coordinator, toks: &Vec<u32>) -> (r: Option<Vec<u
     }
 }
 
+/// v0.7 (D26): a scheduler asks `probe` where a request resumes, then attaches it with that
+/// position as the hit limit. With no call in between, an attach that succeeds resumes exactly
+/// where probe said, from the public specs alone.
+pub fn probe_then_attach(co: &mut Coordinator, toks: &Vec<u32>) -> (r: Option<(usize, usize)>)
+    requires
+        old(co).inv(),
+    ensures
+        final(co).inv(),
+        r matches Some((probed, cached)) ==> probed == cached,
+{
+    let ghost o = co@;
+    let p = match co.probe(toks.as_slice(), toks.len()) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    proof {
+        assert(co@ == o);
+    }
+    match co.attach_capped(toks.as_slice(), p) {
+        Ok((h, cached, view)) => {
+            proof {
+                let m0 = cdiv(toks@.len(), o.b);
+                let lim = (toks.len() as nat) / o.b;
+                let k1 = p as nat / o.b;
+                let k2 = cached as nat / o.b;
+                // probe: k1 is the joint k* under the input's own limit, and p = k1·B.
+                assert(o.joint_kl(toks@, m0, lim, k1));
+                assert(p as nat == k1 * o.b);
+                // attach_capped at p: k2 is the joint k* under the limit floor(p/B) = k1.
+                assert(o.b >= 1) by {
+                    old(co).lemma_public_shape();
+                }
+                vstd::arithmetic::div_mod::lemma_div_multiples_vanish(k1 as int, o.b as int);
+                assert((p as nat) / o.b == k1);
+                assert(o.joint_kl(toks@, m0, k1, k2));
+                // k1 also satisfies the attach's definition: its run is whole, and a run capped at
+                // k1 stops there. So the unique k* of the attach is k1.
+                assert(k1 <= lim);
+                assert(o.joint_kl(toks@, m0, k1, k1));
+                lemma_joint_kl_unique(o, toks@, m0, k1, k1, k2);
+            }
+            Some((p, cached))
+        },
+        Err(_) => None,
+    }
+}
+
 } // verus!

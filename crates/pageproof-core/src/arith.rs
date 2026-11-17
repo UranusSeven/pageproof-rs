@@ -116,6 +116,17 @@ pub proof fn lemma_cdiv_mono(l1: nat, l2: nat, b: nat)
     lemma_div_is_ordered((l1 + b - 1) as int, (l2 + b - 1) as int, b as int);
 }
 
+/// `ceil(l/b) <= floor(l/b) + 1`.
+pub proof fn lemma_cdiv_le_div_succ(l: nat, b: nat)
+    requires
+        b > 0,
+    ensures
+        cdiv(l, b) <= l / b + 1,
+{
+    lemma_div_is_ordered((l + b - 1) as int, (l + b) as int, b as int);
+    vstd::arithmetic::div_mod::lemma_div_plus_one(l as int, b as int);
+}
+
 pub proof fn lemma_cdiv_le(l: nat, b: nat, p: nat)
     requires
         b > 0,

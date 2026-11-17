@@ -108,6 +108,139 @@ pub open spec fn coord_attach_result(o: CoordV, n: CoordV, toks: Seq<Token>, r: 
     }
 }
 
+/// The complete C1 contract with a hit limit of `lim` blocks (D26): exactly C1, with `k*` also
+/// capped at `lim`. With `lim + 1 >= ceil(L/B)` it is C1 (`lemma_attach_capped_full`).
+pub open spec fn coord_attach_capped_result(
+    o: CoordV,
+    n: CoordV,
+    toks: Seq<Token>,
+    lim: nat,
+    r: Result<(Handle, usize, LeaseView), Error>,
+) -> bool {
+    let m0 = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
+    let ok_in = toks.len() >= 1 && o.fits_m(m);
+    &&& toks.len() == 0 ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::InvalidArgument)
+    &&& (toks.len() > 0 && !o.fits_m(m)) ==> r == Err::<(Handle, usize, LeaseView), Error>(Error::RequestTooLarge)
+    &&& (ok_in && o.next_handle() == u64::MAX) ==> r == Err::<(Handle, usize, LeaseView), Error>(
+        Error::IdentifierExhausted,
+    )
+    &&& (ok_in && o.next_handle() < u64::MAX) ==> (r is Ok || r == Err::<(Handle, usize, LeaseView), Error>(
+        Error::NoCapacity,
+    ))
+    &&& r is Err ==> n == o
+    &&& r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity) ==> exists|k: nat|
+        o.joint_kl(toks, m0, lim, k) && !o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+    &&& r matches Ok((h, cached, view)) ==> {
+        let k = cached as nat / o.b;
+        &&& ok_in
+        &&& h == Handle { mgr: o.id, id: o.next_handle() }
+        &&& cached as nat == k * o.b
+        &&& o.joint_kl(toks, m0, lim, k)
+        &&& o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k))
+        &&& exists|mid: CoordV| #[trigger] coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@)
+    }
+}
+
+/// A limit that leaves `m - 1` blocks of room changes nothing: `joint_kl` is `joint_k`.
+pub proof fn lemma_joint_kl_full(o: CoordV, toks: Seq<Token>, m: nat, lim: nat, k: nat)
+    requires
+        lim + 1 >= m,
+    ensures
+        o.joint_kl(toks, m, lim, k) <==> o.joint_k(toks, m, k),
+{
+}
+
+/// C1 with a hit limit that leaves every block but the last is C1 (D26).
+pub proof fn lemma_attach_capped_full(o: CoordV, n: CoordV, toks: Seq<Token>, lim: nat, r: Result<(Handle, usize, LeaseView), Error>)
+    requires
+        coord_attach_capped_result(o, n, toks, lim, r),
+        lim + 1 >= cdiv(toks.len(), o.b),
+    ensures
+        coord_attach_result(o, n, toks, r),
+{
+    let m0 = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
+    assert forall|k: nat| #[trigger] o.joint_kl(toks, m0, lim, k) <==> o.joint_k(toks, m0, k) by {
+        lemma_joint_kl_full(o, toks, m0, lim, k);
+    }
+    if r == Err::<(Handle, usize, LeaseView), Error>(Error::NoCapacity) {
+        let k = choose|k: nat| o.joint_kl(toks, m0, lim, k) && !o.cap(o.attach_demand(toks, m, k), o.attach_prot(toks, k));
+        assert(o.joint_k(toks, m0, k));
+    }
+}
+
+/// Assembles the success case of `coord_attach_capped_result`.
+pub proof fn lemma_attach_capped_ok(
+    o: CoordV,
+    mid: CoordV,
+    n: CoordV,
+    toks: Seq<Token>,
+    lim: nat,
+    k: nat,
+    h: Handle,
+    cached: usize,
+    view: LeaseView,
+)
+    requires
+        toks.len() >= 1,
+        o.b >= 1,
+        o.fits_m(o.reach_blocks(toks.len())),
+        o.next_handle() < u64::MAX,
+        h == (Handle { mgr: o.id, id: o.next_handle() }),
+        cached as nat == k * o.b,
+        o.joint_kl(toks, cdiv(toks.len(), o.b), lim, k),
+        o.cap(o.attach_demand(toks, o.reach_blocks(toks.len()), k), o.attach_prot(toks, k)),
+        coord_attached(o, mid, n, toks, k, tables_view(view.tables@), view.slots@),
+    ensures
+        coord_attach_capped_result(o, n, toks, lim, Ok((h, cached, view))),
+{
+    lemma_slot_decomp(k, 0, o.b);
+    assert((cached as nat) / o.b == k);
+    let r = Ok::<(Handle, usize, LeaseView), Error>((h, cached, view));
+    assert(r is Ok);
+    let (h2, c2, v2) = r->Ok_0;
+    assert(c2 == cached);
+    assert(v2 == view);
+    assert(coord_attached(o, mid, n, toks, k, tables_view(v2.tables@), v2.slots@));
+}
+
+/// The joint `k*` under a hit limit is unique.
+pub proof fn lemma_joint_kl_unique(o: CoordV, toks: Seq<Token>, m: nat, lim: nat, k1: nat, k2: nat)
+    requires
+        o.joint_kl(toks, m, lim, k1),
+        o.joint_kl(toks, m, lim, k2),
+    ensures
+        k1 == k2,
+{
+    if o.nst() == 0 {
+        if k1 < k2 {
+            let c = choose|c: int| 0 <= c < o.np && !#[trigger] o.paged[c].has_hit(o.paged[c].key_of(toks, k1));
+            assert(o.paged[c].has_hit(o.paged[c].key_of(toks, k1)));
+        }
+        if k2 < k1 {
+            let c = choose|c: int| 0 <= c < o.np && !#[trigger] o.paged[c].has_hit(o.paged[c].key_of(toks, k2));
+            assert(o.paged[c].has_hit(o.paged[c].key_of(toks, k2)));
+        }
+    }
+}
+
+/// C8 `probe(T, κ)` (D26): read-only. On valid input it returns the `cached` that
+/// `attach_capped(T, κ)` would report now, `k*·B`; it changes nothing.
+pub open spec fn coord_probe_result(o: CoordV, n: CoordV, toks: Seq<Token>, lim: nat, r: Result<usize, Error>) -> bool {
+    let m0 = cdiv(toks.len(), o.b);
+    let m = o.reach_blocks(toks.len());
+    &&& n == o
+    &&& toks.len() == 0 ==> r == Err::<usize, Error>(Error::InvalidArgument)
+    &&& (toks.len() > 0 && !o.fits_m(m)) ==> r == Err::<usize, Error>(Error::RequestTooLarge)
+    &&& (toks.len() > 0 && o.fits_m(m)) ==> r is Ok
+    &&& r matches Ok(cached) ==> {
+        let k = cached as nat / o.b;
+        &&& cached as nat == k * o.b
+        &&& o.joint_kl(toks, m0, lim, k)
+    }
+}
+
 /// Assembles the success case of `coord_attach_result`.
 pub proof fn lemma_attach_ok(o: CoordV, mid: CoordV, n: CoordV, toks: Seq<Token>, k: nat, h: Handle, cached: usize, view: LeaseView)
     requires
@@ -186,14 +319,15 @@ pub proof fn lemma_coord_attach_capacity_iff(
 }
 
 impl Coordinator {
-    /// The minimum of the per-class probe runs is the joint `k*`.
-    pub(crate) proof fn lemma_joint_k(&self, toks: Seq<Token>, m: nat, cap: nat, probes: Seq<Probe>, k: nat)
+    /// The minimum of the per-class probe runs is the joint `k*` under the hit limit `lim` (D26).
+    pub(crate) proof fn lemma_joint_kl(&self, toks: Seq<Token>, m: nat, lim: nat, cap: nat, probes: Seq<Probe>, k: nat)
         requires
             self.valid(),
             m >= 1,
             cap + 1 <= m,
+            cap <= lim,
             self.nst() > 0 ==> cap == 0,
-            self.nst() == 0 ==> cap + 1 == m,
+            self.nst() == 0 ==> (cap + 1 == m || cap == lim),
             probes.len() == self.np(),
             k <= cap,
             forall|c: int|
@@ -201,7 +335,7 @@ impl Coordinator {
                     <= probes[c].hits@.len(),
             exists|c: int| 0 <= c < self.np() && #[trigger] probes[c].hits@.len() == k,
         ensures
-            self@.joint_k(toks, m, k),
+            self@.joint_kl(toks, m, lim, k),
     {
         self.lemma_view();
         if self.nst() == 0 {
@@ -211,7 +345,8 @@ impl Coordinator {
                 assert(is_kcap(self.pv(c), toks, cap, probes[c].hits@.len() as nat));
                 assert(self@.paged[c] == self.pv(c));
             }
-            if k + 1 < m {
+            if k + 1 < m && k < lim {
+                assert(k < cap);
                 let c0 = choose|c: int| 0 <= c < self.np() && #[trigger] probes[c].hits@.len() == k;
                 assert(is_kcap(self.pv(c0), toks, cap, probes[c0].hits@.len() as nat));
                 assert(self@.paged[c0] == self.pv(c0));
@@ -1460,13 +1595,122 @@ impl Coordinator {
         assert(tabs.len() == ov.np);
     }
 
-    /// C1. `attach(T)` across every class (contract v0.3 §6 C1).
+    /// C1. `attach(T)` across every class (contract v0.3 §6 C1): `attach_capped(T, |T|)`, whose
+    /// limit leaves every block but the last.
     pub fn attach(&mut self, toks: &[Token]) -> (r: Result<(Handle, usize, LeaseView), Error>)
         requires
             old(self).inv(),
         ensures
             final(self).inv(),
             coord_attach_result(old(self)@, final(self)@, toks@, r),
+    {
+        let ghost o = self@;
+        proof {
+            self.lemma_view();
+            assert(o.b >= 1);
+        }
+        let r = self.attach_capped(toks, toks.len());
+        proof {
+            let lim = (toks.len() as nat) / o.b;
+            // A limit of L tokens leaves every block but the last: ceil(L/B) <= floor(L/B) + 1.
+            lemma_cdiv_le_div_succ(toks@.len(), o.b);
+            assert(lim == toks@.len() / o.b);
+            lemma_attach_capped_full(o, self@, toks@, lim, r);
+        }
+        r
+    }
+
+    /// C8. `probe(T, κ)` (D26): read-only. Returns the `cached` that `attach_capped(T, κ)` would
+    /// report now, `k*·B`, with `k*` the joint run of hits capped at `floor(κ/B)` blocks and at
+    /// `ceil(L/B) - 1`; with a state class it is 0 (D13). Only ghost E8 logs change.
+    #[allow(unused_variables)]
+    pub fn probe(&mut self, toks: &[Token], max_cached: usize) -> (r: Result<usize, Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_probe_result(old(self)@, final(self)@, toks@, (max_cached as nat) / old(self)@.b, r),
+    {
+        let ghost o = *self;
+        let ghost ov = o@;
+        let n = toks.len();
+        if n == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let b = self.b;
+        proof {
+            self.lemma_view();
+            self.lemma_shape();
+        }
+        let cfg = self.cfg_exec();
+        let mu = cfg.mu;
+        if n > MAX_SLOTS as usize {
+            proof {
+                assert(!ov.fits_m(ov.reach_blocks(n as nat))) by {
+                    if ov.fits_m(ov.reach_blocks(n as nat)) {
+                        lemma_fits_bound(self.per@, self.np(), self.nst(), self.nslab as nat, ov.reach_blocks(n as nat), 0);
+                        lemma_cdiv_props(n as nat + mu as nat, b as nat);
+                        lemma_mul_mono(ov.reach_blocks(n as nat), self.cunits(0), b as nat);
+                        assert(self.unit@[0] >= 1);
+                    }
+                }
+            }
+            return Err(Error::RequestTooLarge);
+        }
+        let m0 = (n - 1) / b + 1;
+        let nr = n + mu;
+        let m = (nr - 1) / b + 1;
+        proof {
+            vstd::arithmetic::div_mod::lemma_div_plus_one((n - 1) as int, b as int);
+            assert(((n - 1 + b) as int) / (b as int) == ((n - 1) as int) / (b as int) + 1);
+            assert(m0 as nat == cdiv(n as nat, b as nat));
+            vstd::arithmetic::div_mod::lemma_div_plus_one((nr - 1) as int, b as int);
+            assert(((nr - 1 + b) as int) / (b as int) == ((nr - 1) as int) / (b as int) + 1);
+            assert(m as nat == cdiv(nr as nat, b as nat));
+            assert(m as nat == ov.reach_blocks(n as nat));
+            lemma_cdiv_mono(n as nat, nr as nat, b as nat);
+        }
+        if !self.fits_exec(m) {
+            return Err(Error::RequestTooLarge);
+        }
+        proof {
+            self.paged@[0].lemma_valid();
+            lemma_fits_mono(self.per@, self.np(), self.nst(), self.nslab as nat, m0 as nat, m as nat);
+            lemma_cdiv_props(n as nat, b as nat);
+        }
+        let lim = max_cached / b;
+        let cap = if self.state.len() > 0 { 0 } else if lim < m0 - 1 { lim } else { m0 - 1 };
+        let (probes, kmin) = self.joint_probe(toks, cap);
+        proof {
+            self.lemma_joint_kl(toks@, m0 as nat, lim as nat, cap as nat, probes@, kmin as nat);
+            o.lemma_view();
+            self.lemma_view();
+            assert(self@ == ov);
+            // k* < ceil(L/B), so k*·B < L.
+            assert(kmin + 1 <= m0);
+            lemma_cdiv_props(n as nat, b as nat);
+            assert((kmin as nat) * (b as nat) <= ((m0 - 1) as nat) * (b as nat)) by (nonlinear_arith)
+                requires kmin + 1 <= m0, b >= 1;
+            assert((kmin as nat) * (b as nat) < n);
+        }
+        let cached = kmin * b;
+        proof {
+            assert((cached as nat) / ov.b == kmin as nat) by {
+                lemma_slot_decomp(kmin as nat, 0, ov.b);
+            }
+        }
+        Ok(cached)
+    }
+
+    /// C1 with a hit limit (D26): `attach(T)` whose `k*` is also capped at `floor(κ/B)` blocks,
+    /// so the lease's computed prefix `c_h = k*·B` never passes `κ`. The caller chooses where a
+    /// request resumes; `κ = 0` attaches cold.
+    pub fn attach_capped(&mut self, toks: &[Token], max_cached: usize) -> (r: Result<(Handle, usize, LeaseView), Error>)
+        requires
+            old(self).inv(),
+        ensures
+            final(self).inv(),
+            coord_attach_capped_result(old(self)@, final(self)@, toks@, (max_cached as nat) / old(self)@.b, r),
     {
         let ghost o = *self;
         let ghost ov = o@;
@@ -1537,11 +1781,12 @@ impl Coordinator {
             assert(self.unit@[0] >= 1);
             assert((m as nat) <= self.cunits(0));
         }
-        let cap = if self.state.len() > 0 { 0 } else { m0 - 1 };
+        let lim = max_cached / b;
+        let cap = if self.state.len() > 0 { 0 } else if lim < m0 - 1 { lim } else { m0 - 1 };
         let (probes, kmin) = self.joint_probe(toks, cap);
         let ghost s1 = *self;
         proof {
-            self.lemma_joint_k(toks@, m0 as nat, cap as nat, probes@, kmin as nat);
+            self.lemma_joint_kl(toks@, m0 as nat, lim as nat, cap as nat, probes@, kmin as nat);
         }
         let tp = self.truncate_all(probes, kmin, Ghost(toks@));
         let prot = self.compute_prot(toks, &tp, kmin);
@@ -1554,7 +1799,7 @@ impl Coordinator {
         let d = self.attach_demand_exec(toks, &tp, kmin, m);
         if !self.check_cap(&d, &prot) {
             proof {
-                assert(ov.joint_k(toks@, m0 as nat, kmin as nat));
+                assert(ov.joint_kl(toks@, m0 as nat, lim as nat, kmin as nat));
                 assert(!ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
             }
             return Err(Error::NoCapacity);
@@ -1606,7 +1851,7 @@ impl Coordinator {
             assert(self.id == ov.id) by {
                 o.lemma_view();
             }
-            assert(ov.joint_k(toks@, m0 as nat, kmin as nat));
+            assert(ov.joint_kl(toks@, m0 as nat, lim as nat, kmin as nat));
             assert(ov.cap(ov.attach_demand(toks@, m as nat, kmin as nat), ov.attach_prot(toks@, kmin as nat)));
             assert(ov.fits_m(m as nat));
             assert(cached as nat == kmin * ov.b) by {
@@ -1621,7 +1866,7 @@ impl Coordinator {
             let midv = mid@;
             assert(coord_attached(ov, midv, self@, toks@, kmin as nat, tables_view(view.tables@), view.slots@));
             assert(ov == old(self)@);
-            lemma_attach_ok(ov, midv, self@, toks@, kmin as nat, Handle { mgr: self.id, id: hid }, cached, view);
+            lemma_attach_capped_ok(ov, midv, self@, toks@, lim as nat, kmin as nat, Handle { mgr: self.id, id: hid }, cached, view);
         }
         Ok((Handle { mgr: self.id, id: hid }, cached, view))
     }
