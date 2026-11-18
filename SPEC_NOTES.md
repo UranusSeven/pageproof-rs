@@ -62,7 +62,7 @@ building block of the `Coordinator`.
 | §5.4 frame | `released`/`attached`/`extended`/`began`/`finish_rel` | Exact abstract post-states: every field not mentioned is unchanged. |
 | C0 create | `manager.rs` | Initial state is exact; `ConfigError` on `P = 0`, `B = 0`, `P·B > 2⁴⁰`, or a namespace too long for its `u32` prefix. |
 | C1 attach | `ops_attach.rs` | Exact `k*` (`is_kstar`, unique). Success **iff** `|F| ≥ m − u` (`lemma_attach_capacity_iff`), else `NoCapacity`. Hits come from the call-time Index, and an active candidate is used whenever one exists. Fresh pages come from `F`, unkeyed ones first (`unkeyed_first`), and have their keys revoked. Refs increase by exactly one per table entry. `c = k*·B`. New handle id never reused. |
-| C2 extend | `ops_extend.rs` | Phase errors in contract order. Success iff `|F| ≥ d`. Old table is a prefix of the new one. Exactly `d` fresh free pages are added, unkeyed ones first. `T' = T ++ suffix`, `c` unchanged. |
+| C2 extend | `ops_extend.rs` | Phase errors in contract order; since v0.7 an input not yet computed is no longer a phase error (D27). Success iff `|F| ≥ d`. Old table is a prefix of the new one. Exactly `d` fresh free pages are added, unkeyed ones first. `T' = T ++ suffix`, `c` unchanged. |
 | C3 begin_write | `ops_write.rs` | `plan_ok`: exact inputs, positions, slots `= slot(h,j)`, slots distinct and in `[0, P·B)`, write pages exclusive (`ref = 1`, not in any other lease) and unpublished; page map for `[0,z)`; §9.0 (b). |
 | C4 finish_write | `ops_write.rs` | Ticket consumed once, `c = z`. Ghost `V` on `[a,z)` is set to the causal prefix, other slots unchanged. Every block with `a < (i+1)B ≤ z` is published with `K(h,i)` and `den = (ns, T[0:(i+1)B])`; no partial block is published. |
 | C5 release | `ops_release.rs` | Exact decrement per page. Pages that reach 0 rejoin `F`, every unkeyed free page ahead of every cached one (`keyed_last`; that cached pages join at the back is not proved, see representation choice 8). Keys, Index and `V` are retained. `InvalidHandle`/`Busy`. Handle permanently invalid. |
@@ -122,10 +122,14 @@ building block of the `Coordinator`.
 ## Deviations and their status
 
 - **Refinement obligations 14, 18, 20, 24 and 28 are partial.** Each method's spec specialises to
-  the earlier version's when `λ = 0`, `δ = 0` or `Cx = ∅`, and the v0.2.1 and v0.3 test suites
-  still pass, but the observational-equivalence statements are not separately proved. For 28,
-  `attach(T)` is proved against v0.6's own spec; extend's v0.6 tests that expected InvalidPhase at
-  `p_h < L_h` now expect success, and the rest pass unchanged.
+  the earlier version's when `λ = 0`, `δ = 0` or `Cx = ∅`, except extend's since v0.7: it accepts
+  `p_h < L_h`, which every earlier version rejected with InvalidPhase (D27), so it reduces to the
+  earlier specs only where they accepted the call. The observational-equivalence statements are
+  not separately proved. The v0.2.1 and v0.3 test suites pass with the four tests that expected
+  that InvalidPhase changed to expect success: `edge_cases.rs::extend_phase_errors_and_snapshot`
+  (v0.2.1), and `extend_demand_paged_only`, `zos_extend_with_a_pending_ticket` and
+  `extend_deferred_phase_errors` in `coord_edge_cases.rs`. For 28, `attach(T)` is proved against
+  v0.6's own spec.
 - **D27 also relaxes the per-class `Manager::extend`.** The coordinator's extend runs each class's
   `grow`, so the v0.2.1-style `Manager::extend` (and the Python `BlockManager.extend`) accepts an
   input that is not yet computed too.

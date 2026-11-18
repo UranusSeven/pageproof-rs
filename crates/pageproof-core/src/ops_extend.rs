@@ -1,4 +1,5 @@
-//! C2 `extend`: append a suffix to a fully computed lease and atomically reserve its capacity.
+//! C2 `extend`: append a suffix to a lease, whose earlier positions need not be computed yet (D27),
+//! and atomically reserve its capacity.
 use vstd::prelude::*;
 use crate::spec::*;
 use crate::types::*;
