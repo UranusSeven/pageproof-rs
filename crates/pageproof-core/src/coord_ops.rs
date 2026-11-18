@@ -94,11 +94,10 @@ pub open spec fn coord_grow_result(o: CoordV, n: CoordV, h: Handle, suffix: Seq<
     let m2 = o.reach_blocks(l2);
     let d = (m2 - cdiv(l.rho, o.b)) as nat;
     // D21: pending tickets may stay if the queue has room and its head has no drafts or proposal
-    // rows; every input position is computed or covered by a pending ticket.
-    // ...and none is deferred; extend_deferred needs a pending ticket whose bonus position it
-    // appends (D22).
+    // rows; no position is deferred. Known positions may wait to be scheduled (D27).
+    // extend_deferred needs a pending ticket whose bonus position it appends (D22).
     let busy = grow_busy(o.paged[0], l, dfr);
-    let ph = !l.dfr && pfront(o.paged[0], l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
+    let ph = grow_phase(o.paged[0], l, dfr);
     let arg = dfr || suffix.len() > 0;
     let ok = live && !busy && ph && arg && o.fits_m(m2);
     &&& !live0 ==> r == Err::<LeaseView, Error>(Error::InvalidHandle)
@@ -134,8 +133,7 @@ pub proof fn lemma_extend_ok(o: CoordV, mid: CoordV, n: CoordV, h: Handle, suffi
         !grow_busy(o.paged[0], o.leases()[h.id], dfr),
         !o.leases()[h.id].dfr,
         !o.leases()[h.id].stopped,
-        pfront(o.paged[0], o.leases()[h.id]) == o.leases()[h.id].toks.len(),
-        dfr ==> o.leases()[h.id].pending.len() > 0,
+        grow_phase(o.paged[0], o.leases()[h.id], dfr),
         dfr || suffix.len() > 0,
         o.fits_m(o.reach_blocks(glen(o.leases()[h.id], suffix, dfr))),
         o.cap(
@@ -737,7 +735,7 @@ impl Coordinator {
             return Err(Error::Busy);
         }
         let (len, _c0, _) = self.paged[0].lease_info(h.id);
-        if self.paged[0].lease_dfr(h.id) || pf != len || (dfr && q == 0) {
+        if self.paged[0].lease_dfr(h.id) || (dfr && (pf != len || q == 0)) {
             return Err(Error::InvalidPhase);
         }
         if !dfr && suffix.len() == 0 {
@@ -855,8 +853,7 @@ impl Coordinator {
                 !grow_busy(mid.pv(0), mid.pv(0).leases[h.id], dfr),
                 !mid.pv(0).leases[h.id].dfr,
                 !mid.pv(0).leases[h.id].stopped,
-                pfront(mid.pv(0), mid.pv(0).leases[h.id]) == len,
-                dfr ==> mid.pv(0).leases[h.id].pending.len() > 0,
+                grow_phase(mid.pv(0), mid.pv(0).leases[h.id], dfr),
                 dfr ==> suffix@.len() == 0,
                 mid.pv(0).leases[h.id].toks.len() == len,
                 add as nat == (if dfr { 1nat } else { suffix@.len() }),

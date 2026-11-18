@@ -4,7 +4,7 @@
 
 **A formally verified cache manager for LLM serving.** Written in Rust and proved with
 [Verus](https://github.com/verus-lang/verus) against the
-[pageproof contract v0.6](docs/block-manager-contract.md).
+[pageproof contract v0.7](docs/block-manager-contract.md).
 
 Every public `Coordinator` method is proved on its real body, with machine integers. Each one
 keeps the invariant, meets its functional spec, and changes nothing when it returns an error.
@@ -16,6 +16,9 @@ keeps the invariant, meets its functional spec, and changes nothing when it retu
 - **Zero-overhead scheduling:** plan a lease's next step before the previous token reaches the
   host, even behind a verify step.
 - **Stop:** end a lease at an EOS inside the accepted span; later tickets become no-op orphans.
+- **Scheduler-chosen resume points:** `attach_capped` takes a hit limit, `probe` answers where a
+  request would resume without attaching, and `extend` runs before earlier positions are computed,
+  so a scheduler that plans steps ahead of execution can drive it.
 
 ## How it works
 
@@ -95,6 +98,14 @@ sd.finish_write(c.ticket, accepted=n2, drafts=accepted_drafts_of_c)
 
 See [python/demo.py](python/demo.py) for a runnable end-to-end demo.
 
+A scheduler can choose where a lease resumes, and grow it before its earlier steps run:
+
+```python
+co.probe(prompt_ids)                          # cached tokens attach would take now; changes nothing
+h, cached, lease = co.attach(prompt_ids, max_cached=0)   # cold, whatever is cached
+co.extend(h, more_ids)                        # v0.7: fine before [0, len) is computed
+```
+
 ## Layout
 
 | Path | Contents |
@@ -111,4 +122,5 @@ See [python/demo.py](python/demo.py) for a runnable end-to-end demo.
 Not yet supported: multiple threads, aborting a write (writes always succeed), tree drafts, more
 than one state slot per lease (the executor rebuilds the accepted state in place), scheduling
 depth above 1, non-paged drafter classes, offload/adopt, COW, state checkpoints (so no prefix hits
-when a state class exists), and static caches in the arena.
+when a state class exists), windowed lifetimes (sliding or tumbling windows, rings), keys that
+cover a layer's token shift, and static caches in the arena.

@@ -60,6 +60,15 @@ pub open spec fn grow_busy(v: MgrV, l: LeaseV, dfr: bool) -> bool {
     if dfr { l.pending.len() > v.cfg.delta } else { extend_busy(v, l) }
 }
 
+/// The calling phase of C2 and C2b: no deferred position. extend_deferred also needs a pending
+/// ticket ending at the end of the input, whose bonus position it appends (D22). extend lets
+/// known positions wait to be scheduled, as after attach (D27, v0.7; v0.6 also required
+/// `p_h = L_h`).
+pub open spec fn grow_phase(v: MgrV, l: LeaseV, dfr: bool) -> bool {
+    &&& !l.dfr
+    &&& dfr ==> (pfront(v, l) == l.toks.len() && l.pending.len() > 0)
+}
+
 /// The complete C2 (`dfr` false) and C2b (`dfr`, empty suffix) contracts.
 pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, dfr: bool, r: Result<PageTableView, Error>) -> bool {
     let live0 = h.mgr == v.id && v.leases.contains_key(h.id);
@@ -68,11 +77,12 @@ pub open spec fn grow_result(v: MgrV, v2: MgrV, h: Handle, suffix: Seq<Token>, d
     let live = live0 && !l.stopped;
     let l2 = glen(l, suffix, dfr);
     let d = cdiv(l2 + v.cfg.mu, v.b) - l.table.len();
-    // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); every
-    // input position must be computed or covered by a pending ticket, and none may be deferred.
-    // extend_deferred needs a pending ticket whose bonus position it appends (D22).
+    // Pending tickets are allowed if they have room and no drafts or proposal rows (D21); no
+    // position may be deferred. Known positions may wait to be scheduled (D27).
+    // extend_deferred needs a pending ticket whose bonus position it appends, the newest one
+    // ending at the end of the input (D22).
     let busy = grow_busy(v, l, dfr);
-    let ph = !l.dfr && pfront(v, l) == l.toks.len() && (dfr ==> l.pending.len() > 0);
+    let ph = grow_phase(v, l, dfr);
     let arg = dfr || suffix.len() > 0;
     &&& !live0 ==> r == Err::<PageTableView, Error>(Error::InvalidHandle)
     &&& (live0 && l.stopped) ==> r == Err::<PageTableView, Error>(Error::InvalidPhase)
@@ -111,8 +121,8 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
         !grow_busy(v, v.leases[h], dfr),
         !v.leases[h].dfr,
         !v.leases[h].stopped,
-        pfront(v, v.leases[h]) == v.leases[h].toks.len(),
-        dfr ==> suffix.len() == 0 && v.leases[h].pending.len() > 0,
+        grow_phase(v, v.leases[h], dfr),
+        dfr ==> suffix.len() == 0,
         !dfr ==> suffix.len() > 0,
         v.leases[h].toks.len() + (if dfr { 1nat } else { suffix.len() }) + v.cfg.mu <= v.p * v.b,
         blocks_for(v.leases[h].toks.len() + (if dfr { 1nat } else { suffix.len() }) + v.cfg.mu, v.b, v.leases[h].table.len() + fresh.len()),
@@ -136,19 +146,22 @@ pub proof fn lemma_grow_inv(v: MgrV, log: Log, h: u64, suffix: Seq<Token>, fresh
     assert(lease_ok(v, log, h));
     assert(l2.dfr == dfr);
     assert(lhat(l2) == l.toks.len() + (if dfr { 1nat } else { suffix.len() }));
-    // With δ <= 1 and room in the queue, at most one ticket is pending and it ends at L, so c <= L.
+    // With δ <= 1 and room in the queue, at most one ticket is pending. It ends at or before L
+    // (D27: known positions may wait to be scheduled; extend_deferred needs it to end at L).
     // extend needs it without drafts; extend_deferred keeps its drafts, which fit the new reach.
     assert(l.pending.len() <= 1);
     assert(l2.pending == l.pending);
     if l.pending.len() == 1 {
         assert(v.pend.contains_key(l.pending[0]));
         assert(pend_ok(v, l.pending[0]));
-        assert(v.pend[l.pending[0]].z == l.toks.len());
+        if dfr {
+            assert(v.pend[l.pending[0]].z == l.toks.len());
+        }
         assert(v.pend[l.pending[0]].drafts.len() <= v.cfg.lam);
         if !dfr {
             assert(v.pend[l.pending[0]].drafts.len() == 0);
         }
-        assert(pfront(v2, l2) == l.toks.len());
+        assert(pfront(v2, l2) == v.pend[l.pending[0]].z);
         assert(sdr(v2, l2) == v.pend[l.pending[0]].drafts.len());
     } else {
         assert(pfront(v2, l2) == l.c);
@@ -477,7 +490,9 @@ impl Manager {
         if busy {
             return Err(Error::Busy);
         }
-        if l_dfr || pf != l_len || (dfr && q == 0) {
+        // A deferred position ends the phase; extend_deferred also needs the newest pending
+        // ticket to end at the end of the input (D22). extend does not (D27).
+        if l_dfr || (dfr && (pf != l_len || q == 0)) {
             return Err(Error::InvalidPhase);
         }
         if !dfr && suffix.len() == 0 {

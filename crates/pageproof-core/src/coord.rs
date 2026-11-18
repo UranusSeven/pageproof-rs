@@ -522,6 +522,22 @@ impl CoordV {
         }
     }
 
+    /// The joint `k*` of C1 under a hit limit of `lim` blocks (D26): the longest joint run of
+    /// hits, at most `m - 1` and at most `lim`. With `lim + 1 >= m` it is [`Self::joint_k`].
+    pub open spec fn joint_kl(self, toks: Seq<Token>, m: nat, lim: nat, k: nat) -> bool {
+        &&& k + 1 <= m
+        &&& k <= lim
+        &&& self.nst() > 0 ==> k == 0
+        &&& self.nst() == 0 ==> {
+            &&& forall|c: int, i: nat| 0 <= c < self.np && i < k ==> #[trigger] self.paged[c].has_hit(
+                self.paged[c].key_of(toks, i),
+            )
+            &&& (k + 1 < m && k < lim) ==> exists|c: int| 0 <= c < self.np && !#[trigger] self.paged[c].has_hit(
+                self.paged[c].key_of(toks, k),
+            )
+        }
+    }
+
     /// C1 demand `d_c`: `m - u_c` for paged classes, 1 for state classes.
     pub open spec fn attach_demand(self, toks: Seq<Token>, m: nat, k: nat) -> Seq<usize> {
         Seq::new(

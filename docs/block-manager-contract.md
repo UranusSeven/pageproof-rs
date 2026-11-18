@@ -1,13 +1,19 @@
-# Block Manager Functional Contract v0.6
+# Block Manager Functional Contract v0.7
 
-Status: implemented and verified. `crates/pageproof-core` implements v0.6 (`Coordinator`, merged in [pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)), and Verus proves every public method against C0–C7 and C2b. `SPEC_NOTES.md` maps each clause and §9.1 obligation to its proof and lists the deviations, among them that the refinement obligations 14, 18, 20 and 24 are not proved as observational equivalences. By design, with `δ = 0`, v0.6 behaves exactly like v0.4.1 (§9.1 obligation 20). With `δ = 0`, `λ = 0` and no drafter class, it behaves exactly like v0.3 (obligation 18). With `λ = 0`, it behaves exactly like v0.5 (obligation 24). So the v0.3 proofs were the base for v0.4.1, v0.4.1 for v0.5, and v0.5 for v0.6.
-Date: 2026-11-13 (v0.5: 2026-11-12; v0.4.1: 2026-11-12; v0.4: 2026-11-12; v0.3: 2026-11-04; v0.2.1: 2026-11-03; v0.2: 2026-11-02; v0.1: 2026-11-01).
+Status: implemented and verified. `crates/pageproof-core` implements v0.7, and Verus proves every public method against C0–C8 and C2b. v0.7 adds the hit limit and `probe` of D26 and the extend rule of D27 to v0.6 (`Coordinator`, merged in [pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)). `SPEC_NOTES.md` maps each clause and §9.1 obligation to its proof and lists the deviations, among them that the refinement obligations 14, 18, 20, 24 and 28 are not proved as observational equivalences. By design, with `δ = 0`, v0.6 behaves exactly like v0.4.1 (§9.1 obligation 20). With `δ = 0`, `λ = 0` and no drafter class, it behaves exactly like v0.3 (obligation 18). With `λ = 0`, it behaves exactly like v0.5 (obligation 24). `attach(T)` of v0.7 is v0.6's attach, and v0.7's extend succeeds wherever v0.6's did (obligation 28). So the v0.3 proofs were the base for v0.4.1, v0.4.1 for v0.5, v0.5 for v0.6, and v0.6 for v0.7.
+Date: 2026-11-17 (v0.6: 2026-11-13; v0.5: 2026-11-12; v0.4.1: 2026-11-12; v0.4: 2026-11-12; v0.3: 2026-11-04; v0.2.1: 2026-11-03; v0.2: 2026-11-02; v0.1: 2026-11-01).
 Reference code: nano-vLLM `bb823b3e06983d71485a8e1f23715ebd87d98ef8`: `block_manager.py`, `sequence.py`, `scheduler.py`; `prefix_keys` in `shell/offload.py` (the existing implementation of chained keys).
 Layout reference: DeepInfer `0d0a93ff09c99af7a8521f230e16507bf3e00dda`: `deepinfer/kv_spec/kvspec.py` (`LogicalSpec`, `layout`, `PhysicalPlan`), `deepinfer/kv_spec/deepseek_v4.py`, `deepinfer/worker/kv_cache_views.py`.
 Speculative-decoding reference: vLLM `9d61ade7f657833df27e43c4561455523c78c8fb`: `vllm/models/kimi_k3/nvidia/ops/recoverssm.py` (`_kda_recoverssm_verify_kernel`, `_commit_kda_state_kernel`, `_compact_conv_state_kernel`), `vllm/model_executor/layers/mamba/abstract.py` (`num_speculative_blocks`), `vllm/model_executor/layers/mamba/mamba_utils.py` (`append_kda_recoverssm_record`), `vllm/v1/worker/gpu/model_states/recoverssm.py` (`RecoverSSMState.commit_step`).
 Drafter model: an MTP drafter that, in the verify forward, projects the target model's hidden states from a few selected layers into drafter keys at every verified position, and then proposes all `λ` drafts in one further forward (D20).
 Zero-overhead scheduling (ZOS): requested in [pageproof-rs#2](https://github.com/UranusSeven/pageproof-rs/issues/2).
 ZOS-with-speculation reference: vLLM `9d61ade7f657833df27e43c4561455523c78c8fb`: `vllm/v1/core/sched/async_scheduler.py` (spec-token placeholders).
+
+Changes in v0.7 relative to v0.6:
+- attach takes a **hit limit** `κ`: `k*` is also capped at `floor(κ/B)` blocks, so `c_h = k*·B <= κ`. A scheduler that decides where a request resumes (it asks where a prefix resumes, then schedules the request's first step from that position, or from 0 to compute it cold) passes that position. `attach(T)` is `attach(T, L)`, which caps nothing, so v0.6 callers see no change (D26, C1).
+- New read-only **C8 `probe(T, κ)`**: the `c_h` that `attach(T, κ)` would set now, without attaching. A scheduler asks it to rank candidates and to answer where a request resumes (D26).
+- **extend no longer needs `p_h = L_h`**: known tokens may wait to be scheduled, as after attach. A scheduler that plans steps ahead of execution learns a request's tokens before earlier positions are computed; it appends them, and its tickets cover them later. extend_deferred keeps `p_h = L̂_h` (D27, C2).
+- New proof obligations 28–30. I1–I18 are unchanged.
 
 Changes in v0.6 relative to v0.5:
 - ZOS combined with speculative decoding. A verify ticket, or a ticket with a proposal, may have a ticket queued behind it. Such a **continuation** takes as input the producer's bonus token and up to `λ` drafts that the producer's proposal forward made on the device. None of these are on the host when the continuation is issued (D21, D22, D24).
@@ -77,7 +83,7 @@ The module guarantees that the page tables, state slots and plans it outputs con
 
 One coordinator serves one model configuration and owns its arena. External code cannot bypass it to overwrite completed KV, write a live state slot, or reuse a unit. Several coordinators need separate arenas; sharing one arena across coordinators is out of scope.
 
-### 1.1 Explicit non-goals and write assumption for v0.6
+### 1.1 Explicit non-goals and write assumption for v0.7
 
 v0.4 supports speculative decoding with **linear draft chains**: a verify ticket feeds the last input token followed by up to `λ` drafts, and its completion accepts a prefix of them. Rejected drafts never enter `T_h`, so no truncate primitive is needed (D17). v0.5 adds zero-overhead scheduling for steps without drafts or proposals: up to `δ` further steps of a lease may be planned before the previous step's sampled token reaches the host (D21, D22). v0.6 lets such a step follow a verify step whose acceptance count is not yet known: the step's start is bounded, and its inputs and drafts come from the device (D24). The following capabilities are still not in this version's state machine. Callers must handle them separately and must not treat them as proved properties:
 
@@ -90,6 +96,8 @@ v0.4 supports speculative decoding with **linear draft chains**: a verify ticket
 - State cache hits: there are no state checkpoints. A state slot is never keyed, published or shared, so a configuration with a state class never reuses a prefix (D13). kvspec's `on_hit` (`restore` / `replay` / `empty`) is ignored by v0.3 through v0.6.
 - External KV import (adopt) for offload/store: the only way to advance `c_h` is the executor's completion event for a ticket. The `restore_prefix` path needs additional primitives.
 - Static caches shared by all requests (kvspec `Static`, e.g. sink tokens): allocated by the caller outside the arena.
+- Windowed lifetimes: sliding or tumbling windows and rings, which free or overwrite the pages a lease no longer reads. A lease keeps every page of its input, so such a layout only runs as if every state were full.
+- Layers that read tokens after their position (a token shift). Whether a layer does depends on where it stores each entry. The first MTP module combines the target model's hidden state at p with token p + 1; stored at p, as vLLM stores it, that entry reads a token after its position. A key covers the tokens of its block only, so a published block's last entries would depend on a token outside its key; a caller with such a layer must not hit (`κ = 0`). Stored at p + 1 instead, the entry depends only on tokens up to its own position and hits are exact. But a lease that attached with a hit of `k*` blocks must then compute the entry at `k*B` from the hidden state at `k*B - 1`, which no page holds unless the executor also stores it in block `k* - 1`'s page, whose key covers everything it depends on.
 - Slab compaction, defragmentation, or moving a live unit.
 - ZOS depth above 1 (`δ >= 2`): create rejects it. Stop (D25) would cover the EOS case of v0.5, but deeper queues need the reservation and the bounded-start rules restated for chains of continuations (§10).
 - Multi-threaded concurrent calls: see the single-thread assumption E3 in §5.
@@ -127,8 +135,10 @@ Until these primitives exist, an adapter must not claim to cover every feature o
 | D23 | No separate publication rule for deferred tokens: a block is published when the frontier passes it, as in v0.4.1 | A producer is always older than the ticket that consumes its token, and completion is in issue order, so every position below `c_h` already has its token in `T_h` (I17). An EOS sampled by step n while step n+1 is in flight is appended when step n completes; step n+1 then completes the block, which is published with the real EOS token. Without speculation this needs only `δ <= 1`: step n+1 is the newest ticket and not in `X_h`, so its token is ignored and nothing after the EOS enters `T_h`. With speculation, step n+1 is a continuation whose accepted drafts would follow the EOS, so the caller reports the EOS with `stop` (D25) |
 | D24 | A ticket whose input is a deferred token is a **continuation** of that token's producer, the newest pending ticket. Its start is bounded: `a = lo + σ`, where `lo` is known at issue and `σ ∈ [0, s]` is the number of drafts the older pending tickets of the lease will accept, with slack `s` their total draft count. Its drafts, if any, are the ones its producer's proposal forward samples, and the coordinator learns them only from the continuation's completion. The plan lists write slots for every position the ticket can write, `[lo, lo + s + 1 + k)` (plus `λ` in drafter classes with `propose`), and the executor writes the window that starts at `a` | The executor resolves the context and the inputs on the device from the producer's outputs: its acceptance count, its bonus token and its proposal (E13). Listing every slot keeps E5: the executor selects addresses from the plan. A runner that instead derives the slots on the device from the block table and the shifted positions makes the same selection when the block table it reads is the plan's page mapping (E5). A continuation needs no host-known drafts, so the host never waits for the device's proposal. The v0.5 deferred decode is the special case `s = 0`, `k = 0` |
 | D25 | A completion may carry `stop`. It commits a prefix of what the device accepted, appends the bonus token only if one is given and the ticket heads `X_h`, orphans every younger ticket of the lease, and makes the lease **stopped**. An orphan completes in issue order and credits, publishes and binds nothing. A stopped lease accepts no new work; it can only be inspected and, once its queue is empty, released | The device does not apply stop rules, so its acceptance count can run past an EOS inside the accepted span, and the continuation already started from that count. After a truncation, the continuation's window starts past the coordinator's frontier and its inputs follow the EOS, so its KV is not KV of `T_h` and must not be credited. Making the lease terminal keeps the frontier and the state slot from ever depending on an orphan's writes |
+| D26 | attach and probe take a **hit limit** `κ` from the caller: `k*` is the joint run of hits capped at `ceil(L/B) - 1` and at `floor(κ/B)` blocks. `attach(T)` is `attach(T, L)`. probe returns the `c_h` attach would set, without changing anything | The scheduler, not the block manager, decides where a request resumes: it asks where a prefix resumes and then schedules the request's first step from that position, or from 0 when it computes the request cold, which it may do even when the prefix is cached. A lease that took more hits than the scheduler planned for would have shared, published pages under positions its step recomputes (I7). With probe, the answer and the attach right after it agree: both compute the same `k*` from the same state |
+| D27 | extend appends known tokens whatever the planned frontier: `p_h <= L_h` replaces v0.6's `p_h = L_h`. extend_deferred still needs `p_h = L̂_h` | Known tokens may wait to be scheduled, as they already do after attach (D2). A scheduler that plans steps ahead of execution learns a request's tokens one step at a time, before the steps that compute earlier positions have run; with v0.6 it could not grow the lease until every earlier position was computed or ticketed, and the queue holds at most `δ + 1` tickets. Every other C2 rule stays: no deferred position, Busy behind a ticket with drafts or `propose` or a full queue, and the demand and `Cap` of C2 |
 
-D1–D25 are proposed semantics, not claims that upstream already satisfies them. D4, D6–D8, D10–D14 and D16–D25 in particular require changes to the implementation and interface; this contract does not promise function-by-function compatibility with the old API.
+D1–D27 are proposed semantics, not claims that upstream already satisfies them. D4, D6–D8, D10–D14 and D16–D27 in particular require changes to the implementation and interface; this contract does not promise function-by-function compatibility with the old API.
 
 ## 3. Abstract state
 
@@ -141,7 +151,7 @@ D1–D25 are proposed semantics, not claims that upstream already satisfies them
 - `B >= 1`: token slots per unit of every paged class, target and drafter (D15).
 - `λ >= 0`: the maximum number of draft tokens per ticket (D16), which is also the number of drafts the drafter proposes in one forward (nextn). `Cx ≠ ∅` requires `λ >= 1`. With `λ = 0` and `Cx = ∅` the configuration is a v0.3 configuration. The **reservation margin** is `μ = (δ + 1)·λ` when `Cx = ∅` and `μ = (δ + 1)·λ + λ` otherwise (D18): `λ` or `2λ` when `δ = 0`, and `2λ` or `3λ` when `δ = 1`. For a state class, `u_c` must already include whatever the executor needs to rebuild the state after a partial acceptance of up to `λ` drafts (per-token records, the widened conv window); this is part of E11, not checked by create.
 - `δ ∈ {0, 1}`: the ZOS depth, the number of further steps of a lease that may be planned before the previous step's sampled token reaches the host (D21). `δ + 1` bounds the ticket queue of a lease. create rejects `δ >= 2` (C0, §1.1). With `δ = 0` the configuration is a v0.4.1 configuration.
-- `Namespace`: the configuration identity that decides cache reusability, an opaque byte string. The final field table should cover model and weight version, adapters, positional encoding/scaling, attention semantics (including sliding window), B, and, for every class, its kind, `u_c` and in-unit layout (the kvspec `LogicalSpec` and `PhysicalPlan` regions). It should align with `Engine.store_identity()`. v0.6 still uses a dummy (an implementation may pass a fixed string such as `"dummy-v0.6"`); when `Cx ≠ ∅` it must also cover the drafter (E12). Completeness remains the caller's obligation (E6); the field table is deferred.
+- `Namespace`: the configuration identity that decides cache reusability, an opaque byte string. The final field table should cover model and weight version, adapters, positional encoding/scaling, attention semantics (including sliding window), B, and, for every class, its kind, `u_c` and in-unit layout (the kvspec `LogicalSpec` and `PhysicalPlan` regions). It should align with `Engine.store_identity()`. v0.6 and v0.7 still use a dummy (an implementation may pass a fixed string such as `"dummy-v0.6"`); when `Cx ≠ ∅` it must also cover the drafter (E12). Completeness remains the caller's obligation (E6); the field table is deferred.
 - `Token`: the type of valid token ids; sequences are finite and 0-indexed.
 
 **Addressing.** Unit `g` of class `c` occupies arena bytes `[g·u_c, (g+1)·u_c)`. By A1 this range lies inside slab `slab_c(g)`'s bytes `[s·S, (s+1)·S)`, so a class's units are exactly the arena viewed as a `[N·n_c, u_c]` array. Inside a unit, the kvspec plan decides where each layer's region lies. For a paged class, `u_c` is the plan's paged-pool stride for `block_tokens = B`; for a state class it is the state-pool stride. Arena base alignment is E9.
@@ -425,21 +435,23 @@ This contract assumes methods are called sequentially on one thread (or serializ
 
 **Failure:** return an explicit ConfigError and produce no usable coordinator if `N`, `S` or `B` is non-positive; there is no paged class that is not a drafter class; some `u_c` is non-positive; **some `u_c` does not divide `S` (A1)**; `Cx ≠ ∅` and `λ = 0`; `δ >= 2` (D21); `¬Fits(ceil((1+μ)/B))`, so that not even a one-token lease could attach; or the configuration cannot be safely represented in machine integers (including `N·S`, `N·n_c·B` and `L + μ` for every `L` with `Fits(ceil(L/B))`). `δ` needs no further representation check: it is at most 1, and ticket ids are already guarded by IdentifierExhausted.
 
-With `δ = 0`, `λ = 0` and `Cx = ∅`, C0–C7 below reduce to their v0.3 text (obligation 18). With `δ = 0`, C0–C7 reduce to their v0.4.1 text and C2b never succeeds (obligation 20). With `λ = 0`, they reduce to their v0.5 text (obligation 24). Each reduction holds for completions without `stop`, which is new in v0.6.
+With `δ = 0`, `λ = 0` and `Cx = ∅`, C0–C7 below reduce to their v0.3 text (obligation 18). With `δ = 0`, C0–C7 reduce to their v0.4.1 text and C2b never succeeds (obligation 20). With `λ = 0`, they reduce to their v0.5 text (obligation 24). Each reduction holds for completions without `stop`, which is new in v0.6, for attach without a limit (`κ = L`), and for extend in the phases where v0.6 also accepted it (`p_h = L_h`), both new in v0.7 (obligation 28).
 
-### C1. attach(T) -> Result<(Handle, cached_tokens, LeaseView)>
+### C1. attach(T, κ) -> Result<(Handle, cached_tokens, LeaseView)>
 
 Purpose: handle a request for the first time, or re-acquire resources from the retained full input after a request was preempted and released.
+
+`κ` is the hit limit (D26): the caller resumes the request at most `κ` positions in, `κ = 0` attaches cold. `attach(T)` is `attach(T, L)`; that limit caps nothing, since `floor(L/B) >= m - 1`, so with it this clause is v0.6's C1 (obligation 28). The implementation names the general method `attach_capped`.
 
 **Valid input:** T is a non-empty sequence of valid tokens with `Fits(ceil((L+μ)/B))`, and its Namespace is this coordinator's fixed configuration. An input that is too large, including its draft reservation, returns RequestTooLarge; an invalid or empty sequence returns InvalidArgument.
 
 **Exact definition of prefix and capacity:** let `m=ceil(L/B)` be the input's block count and `m^+ = ceil((L+μ)/B)` the reserved block count (D18). Computed from the pre-call state:
 
 \[
-k^*=\begin{cases}0 & \text{if } Cs \ne \varnothing,\\ \max\{k\in[0,m-1]\mid\forall c\in Cp,\ \forall i<k,\ Index_c[K(h,i)]\ne\varnothing\} & \text{otherwise.}\end{cases}
+k^*=\begin{cases}0 & \text{if } Cs \ne \varnothing,\\ \max\{k\in[0,\min(m-1, \lfloor κ/B \rfloor)]\mid\forall c\in Cp,\ \forall i<k,\ Index_c[K(h,i)]\ne\varnothing\} & \text{otherwise.}\end{cases}
 \]
 
-`K(h,i)` is computed incrementally along the §3.3 chain, starting from `Seed(ns)`. The tail block has no key, so the upper bound `m-1` agrees with "the last block is recomputed". The first case is D13: there are no state checkpoints, so no prefix can be resumed. (A future version replaces it with "and a state checkpoint at `kB` exists".) The hit is joint over target and drafter classes: a prefix cached for the target model but not for the drafter is not a hit.
+`K(h,i)` is computed incrementally along the §3.3 chain, starting from `Seed(ns)`. The tail block has no key, so the upper bound `m-1` agrees with "the last block is recomputed". The bound `floor(κ/B)` keeps `c_h = k*·B <= κ` (D26). The first case is D13: there are no state checkpoints, so no prefix can be resumed. (A future version replaces it with "and a state checkpoint at `kB` exists".) The hit is joint over target and drafter classes: a prefix cached for the target model but not for the drafter is not a hit.
 
 For `c ∈ Cp`, let `r_c` be the number of the k* prefix positions that have at least one candidate in `Index_c` with `ref>0`. Demand and protected slabs:
 
@@ -473,7 +485,7 @@ attach does not implicitly preempt other requests, does not evict referenced uni
 
 Purpose: append the tokens that need computing next to a lease, and atomically reserve their capacity.
 
-**Calling phase:** h is valid and not stopped, `X_h` is empty, and `p_h = L_h`, i.e. every input position is computed or covered by a pending ticket. Pending tickets are allowed only if `|Q_h| <= δ` and every ticket in `Q_h` has `k = 0` and no `propose` (D21), so `s_h = 0`; otherwise extend returns Busy. A stopped lease returns InvalidPhase, checked first; Busy is checked next; then a non-empty `X_h` or `p_h < L_h` returns InvalidPhase. With `δ = 0` this is v0.4.1's rule: any pending ticket returns Busy, and `c_h < L_h` returns InvalidPhase. suffix is non-empty with valid tokens; the existing prefix may not be modified.
+**Calling phase:** h is valid and not stopped, and `X_h` is empty. Known input positions may be neither computed nor covered by a pending ticket: `p_h <= L_h` (D27; v0.6 required `p_h = L_h`). Pending tickets are allowed only if `|Q_h| <= δ` and every ticket in `Q_h` has `k = 0` and no `propose` (D21), so `s_h = 0`; otherwise extend returns Busy. A stopped lease returns InvalidPhase, checked first; Busy is checked next; then a non-empty `X_h` returns InvalidPhase. With `δ = 0` any pending ticket returns Busy, as in v0.4.1. suffix is non-empty with valid tokens; the existing prefix may not be modified.
 
 After a verify, this is how the caller appends the bonus token sampled after the last accepted draft (D17). With `δ >= 1`, it is also how the caller appends a token that is already known on the host, such as a teacher-forced (golden) token, while the step that consumes the previous position is in flight.
 
@@ -597,11 +609,19 @@ Returns the input length `L_h`, the deferred tail `X_h` and the planned input le
 
 If the optional `slot_of(c, h, j)` is provided, it only guarantees the correct allocated token-slot index for `c ∈ Cp` and `0<=j<ρ_h`; only for `j<c_h` may it also claim that the slot's KV is valid. Invalid handles, classes or indices return explicit errors.
 
-v0.6 does not require can_allocate/can_append. If a preview is added later, it may only be read-only advice or a plan bound to a state version; it cannot unconditionally guarantee that it will still be executable after later state changes.
+v0.6 does not require can_allocate/can_append. If a preview is added later, it may only be read-only advice or a plan bound to a state version; it cannot unconditionally guarantee that it will still be executable after later state changes. C8 is such advice for the cache only.
 
 ### C7. arena() -> ArenaView (read-only helper)
 
 Returns `owner[s]` for every slab, and `|F_c|` and `|R_c|` (with `Prot = ∅`) for every class, target, drafter and state. No side effects. It is observability for the scheduler, not a reservation.
+
+### C8. probe(T, κ) -> Result<cached_tokens> (read-only helper)
+
+Purpose: tell a scheduler where a request would resume before it attaches (D26).
+
+**Valid input:** as C1: an empty T returns InvalidArgument, and T with `¬Fits(ceil((L+μ)/B))` returns RequestTooLarge.
+
+**Result:** on valid input, `k*·B`, with `k*` exactly as in C1 for `(T, κ)` over the current state. No side effects: every class's state, `Index_c` and slab ownership are unchanged (only the ghost hash log of E8 grows). So an attach of `(T, κ)` that follows with no call between them hits exactly `k*` blocks, whenever it succeeds. probe does not reserve: a call between them may revoke a key by fresh allocation or slab reclaim, and the attach then hits less.
 
 ## 7. Edge cases that must be reviewed
 
@@ -707,6 +727,18 @@ Returns `owner[s]` for every slab, and `|F_c|` and `|R_c|` (with `Prot = ∅`) f
 | extend_deferred behind a verify when `1 + λ > B` | Demand may exceed one page per paged class, at most `ceil((1 + δ·λ)/B)`; NoCapacity leaves the state unchanged and the caller waits for t1 |
 | attach of `L` with `B = 64`, `λ = 4`, a drafter class, `δ = 1` | `μ = 12`: page tables cover `ceil((L + 12)/64)` blocks; `Fits` decides RequestTooLarge |
 | `λ = 0` with `δ = 1` | Every method behaves exactly as in v0.5; every slack is 0 and every continuation is a deferred decode step (obligation 24) |
+| **Hit limit, probe and extend (v0.7)**, `B = 4`, no state class, unless stated otherwise | |
+| attach of 12 tokens whose first two blocks are cached, with `κ = 0` | `k* = 0`: a cold lease of fresh pages. The cached pages keep their keys unless this attach takes them as fresh pages |
+| Same, with `κ = 5`, `κ = 8` and `κ = 12` | `k* = 1`, `2` and `2`: the limit caps at `floor(κ/B)` blocks, and the input at `m - 1 = 2` |
+| `attach(T)` | Exactly v0.6's attach: the limit `L` caps nothing |
+| probe of the same 12 tokens with `κ = 12`, then attach with `κ = 12` | probe returns 8 and changes nothing; the attach hits exactly 2 blocks and reports 8 |
+| probe with an empty input, or one that cannot fit with its reservation | InvalidArgument, RequestTooLarge |
+| probe on a configuration with a state class | 0 (D13) |
+| probe, then a call that takes a probed page as a fresh page, then attach | The attach hits less than probe returned: probe reserves nothing |
+| extend with `c_h < L_h` and no pending ticket (`δ = 0`) | Succeeds (v0.6: InvalidPhase); `c_h` and the computed prefix are unchanged, and the next ticket starts at `c_h` with known inputs up to the new `L_h` |
+| extend behind a pending ticket that covers part of the input (`δ = 1`, `k = 0`) | Succeeds; the pending plan is unchanged, and the next ticket starts at its end |
+| extend while `X_h` is non-empty | Still InvalidPhase (or Busy, checked first): a known token cannot follow a deferred one |
+| extend_deferred while the newest ticket ends before `L̂_h` | Still InvalidPhase |
 
 ## 8. Mapping from upstream methods and intentional changes
 
@@ -772,7 +804,7 @@ This is a new interface designed for a provable implementation; it cannot replac
 ### 9.1 Proof obligations
 
 1. **Initialization:** Valid holds after a successful create, and create returns ConfigError exactly in the cases listed in C0.
-2. **Per-method preservation:** for every real method body, prove that Valid is preserved, together with the functional, error and frame conditions of C0–C7 and C2b, including the orphan and stopped-lease cases of C4.
+2. **Per-method preservation:** for every real method body, prove that Valid is preserved, together with the functional, error and frame conditions of C0–C8 and C2b, including the orphan and stopped-lease cases of C4.
 3. **Allocation sufficiency:** attach's k*, `r_c`, `d_c` and `Prot` match their definitions; with correct candidate choice, `Cap` guarantees success.
 4. **Addressing and isolation:** slot range per class, no aliasing within a request, no conflicts between pending writes, distinct live slots, and shared pages are never written.
 5. **Cache soundness:**
@@ -802,6 +834,9 @@ This is a new interface designed for a provable implementation; it cannot replac
 25. **Bounded start and reservation:** every method preserves the §3.4 relations of `lo`, `s` and `base`, and I16. A valid begin_write's span fits the reach for every acceptance count of the older pending tickets, so begin_write never fails for capacity; finish_write without `stop` sets the next ticket's start to exactly `c'_h`, and with `stop` every orphan's window starts in `[c'_h, lo + s]`.
 26. **Overlapping windows:** for every acceptance count of every older pending ticket, a continuation's window lies inside its listed slots and at or past the producer's credited prefix, on exclusive unpublished pages. Its writes may overlap the producer's rejected rows and proposal rows, and never a credited slot or a published page.
 27. **Stop and orphans:** every method preserves I18. finish_write with `stop` credits and publishes exactly the committed prefix, orphans every younger ticket, empties `X_h`, and sets `W_c = ⊥`; finish_write of an orphan changes only `Q_h` and `Pending`; begin_write, extend and extend_deferred return InvalidPhase on a stopped lease; release succeeds on a stopped lease once its queue is empty and returns `T_h` as committed.
+28. **Refinement of v0.6:** `attach(T)` equals `attach_capped(T, L)` and has v0.6's C1 contract; the limit caps nothing because `ceil(L/B) <= floor(L/B) + 1`. extend accepts every call v0.6's extend accepted, with the same result; it also accepts calls with `p_h < L_h`, which v0.6 rejected with InvalidPhase.
+29. **Hit limit and probe (D26):** attach with a limit has C1's contract with `k*` also capped at `floor(κ/B)`, including the success-iff-`Cap` condition for that `k*`; probe returns `k*·B` for the same `(T, κ)` over the current state, changes no class state, `Index_c`, slab owner or id counter, and errs exactly as attach's input checks do.
+30. **Extend before compute (D27):** extend with `p_h < L_h` preserves Valid, I9, I16 and I17: pending plans stay valid, the reach becomes `L' + μ`, and the room-to-issue clause of I16 holds because pending tickets have no drafts (`s_h = 0`).
 
 ### 9.2 Trusted base
 
@@ -812,7 +847,7 @@ This is a new interface designed for a provable implementation; it cannot replac
 
 Auxiliary lemmas, loop invariants and data structures may be designed by the agent. But new assumes, axioms, skipped function bodies, or weakened pre/postconditions must not be used to pass off a proof as complete. E1–E13 are explicitly listed external assumptions and must not become a loophole for new assumes.
 
-v0.3 was implemented and proved in these steps: the slab arena with one paged class and obligation 14; several paged classes with per-class Index and `Cap`; state classes and cross-class atomicity; the ticket/completion protocol across classes and the Python runner adapter. v0.4.1, v0.5 and v0.6 were implemented and proved the same way, one verified step at a time ([pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)): (1) `λ`, `μ` and the reach `ρ_h` with the new attach/extend demands; (2) verify tickets and partial commit, with state classes taking `num_drafts`; (3) drafter classes and proposal rows; (4) queues of at most `δ + 1` tickets with in-order completion, and `extend` while tickets are pending; (5) `X_h`, extend_deferred and binding in `finish_write`; (6) the `lo`, `s` and `base` fields, continuations behind a verify ticket and `Deferred(k)` drafts; (7) `stop` and orphans; (8) the Python facade. Runtime tests in `crates/pageproof-core/tests` exercise the §7 table. `zos_fuzz.rs` there holds the randomised runtime tests this plan also called for: ZOS depth 1 against depth 0, and ZOS with speculation against plain decoding. Over random request mixes and a simulated executor, `δ = 1` produces the same token streams, release snapshots and published blocks as `δ = 0`, except where it binds a final EOS through `X_h` (§7). Speculation with clean and noisy drafts commits the same tokens as plain decoding. Every step checks the bounds, the isolation of pending tickets, each continuation's window against `slot_of`, and the KV and state each ticket reads. They are runtime checks, not proof obligations. Each step keeps the same external functional goals; properties left for later must not be counted as proved.
+v0.7 capped attach's hit run at the caller's limit, dropped `p_h = L_h` from extend's phase and added probe, each proved with the v0.6 lemmas generalised to a limit (`joint_kl`, `lemma_joint_kl`), plus a lemma that the limit `L` caps nothing; `pageproof-client` proves from the public specs that probe's answer is what the next attach takes. v0.3 was implemented and proved in these steps: the slab arena with one paged class and obligation 14; several paged classes with per-class Index and `Cap`; state classes and cross-class atomicity; the ticket/completion protocol across classes and the Python runner adapter. v0.4.1, v0.5 and v0.6 were implemented and proved the same way, one verified step at a time ([pageproof-rs#7](https://github.com/UranusSeven/pageproof-rs/pull/7)): (1) `λ`, `μ` and the reach `ρ_h` with the new attach/extend demands; (2) verify tickets and partial commit, with state classes taking `num_drafts`; (3) drafter classes and proposal rows; (4) queues of at most `δ + 1` tickets with in-order completion, and `extend` while tickets are pending; (5) `X_h`, extend_deferred and binding in `finish_write`; (6) the `lo`, `s` and `base` fields, continuations behind a verify ticket and `Deferred(k)` drafts; (7) `stop` and orphans; (8) the Python facade. Runtime tests in `crates/pageproof-core/tests` exercise the §7 table. `zos_fuzz.rs` there holds the randomised runtime tests this plan also called for: ZOS depth 1 against depth 0, and ZOS with speculation against plain decoding. Over random request mixes and a simulated executor, `δ = 1` produces the same token streams, release snapshots and published blocks as `δ = 0`, except where it binds a final EOS through `X_h` (§7). Speculation with clean and noisy drafts commits the same tokens as plain decoding. Every step checks the bounds, the isolation of pending tickets, each continuation's window against `slot_of`, and the KV and state each ticket reads. They are runtime checks, not proof obligations. Each step keeps the same external functional goals; properties left for later must not be counted as proved.
 
 ## 10. Decided and open
 
@@ -871,6 +906,12 @@ Decided in v0.6:
 - `stop` commits a prefix of what the device accepted, orphans younger tickets and makes the lease terminal (D25, I18).
 - Host-known drafts still need an empty queue, and `propose` still needs a drafter class.
 
+Decided in v0.7:
+
+- attach takes a hit limit from its caller, and probe answers where a request would resume without attaching; `attach(T)` is unchanged (D26).
+- extend appends known tokens whether or not every earlier position is computed or ticketed; extend_deferred keeps its phase (D27).
+- A scheduler that only reports which positions have executed, rather than issuing tickets, can still drive a coordinator: it credits those positions with issued-and-completed tickets, and releases a finished lease only once no in-flight step can read its pages. Neither needs a new primitive.
+
 Still open (to be decided in a later version):
 
 - Tree drafts: a compaction step in the plan that moves the accepted path's KV into the slots of `[z, z+n)`, and how it interacts with I6 and I16.
@@ -889,7 +930,9 @@ Still open (to be decided in a later version):
 - Reclaim policy among reclaimable slabs (e.g. fewest keyed pages first), and whether an explicit trim operation that returns idle slabs is useful.
 - The real Namespace field table (E6), its alignment with `Engine.store_identity()`, and how it encodes the kvspec plan of every class.
 - Whether to share identity with `prefix_keys` in `shell/offload.py`. Sharing requires aligning the Tag, the namespace fields and `grain == B`; otherwise the contract should state explicitly that there are two separate schemes.
-- Primitives for offload (`adopt`).
+- Primitives for offload (`adopt`), which a disaggregated decode instance needs: its first step resumes past its local cached prefix, and the positions between are loaded from another instance.
+- Windowed lifetimes (sliding, tumbling, rings), several state versions per lease, and keys that cover a layer's token shift, which hybrid layouts need.
+- Evicting a cached page on request: a reset of the cache must wait until no lease lives.
 - Static caches inside the arena.
 
 One more explicit boundary: the proofs this contract requires cover resources, provenance, addresses and protocol. Whether the GPU actually completed according to plan, and whether the KV and state values are numerically correct, need a separate executor contract. That boundary cannot be treated as proved just by assigning values to the ghosts `V_c` and `W_c`.

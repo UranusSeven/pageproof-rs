@@ -1,4 +1,4 @@
-//! Runtime checks of the contract's §7 edge cases (v0.3 through v0.6 rows) against the verified
+//! Runtime checks of the contract's §7 edge cases (v0.3 through v0.7 rows) against the verified
 //! coordinator: slab arena, several paged classes, state classes, reclaim, Prot, the all-or-nothing
 //! operations, speculative decoding, ZOS and stop.
 use pageproof_core::coord::Coordinator;
@@ -313,8 +313,15 @@ fn extend_demand_paged_only() {
     assert_eq!(&v2.tables[0][..1], &v.tables[0][..]);
     assert_eq!(v2.slots, v.slots);
     assert_eq!(count_owner(&co, 1), state_owned);
+    // D27 (v0.7): known positions may wait to be scheduled, so [4, 8) need not be computed
+    // first (v0.6 returned InvalidPhase). The frontier stays put.
+    let v25 = co.extend(h, &toks(1, 3)).unwrap();
+    assert_eq!(v25.tables[0].len(), 3);
+    assert_eq!(&v25.tables[0][..2], &v2.tables[0][..]);
+    assert_eq!(v25.slots, v.slots);
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed), (9, 4));
     // Phase errors.
-    assert_eq!(co.extend(h, &toks(1, 3)).err(), Some(Error::InvalidPhase));
     compute_all(&mut co, h);
     assert_eq!(co.extend(h, &[]).err(), Some(Error::InvalidArgument));
     assert_eq!(co.begin_write(h, 0, Drafts::Known(vec![]), false).err(), Some(Error::InvalidArgument));
@@ -866,17 +873,21 @@ fn zos_extend_with_a_pending_ticket() {
     let mut co = zos_coord(8, 1);
     let (h, _, _) = co.attach(&toks(8, 23)).unwrap();
     let (t1, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
-    // Positions [4, 8) are neither computed nor planned.
-    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
+    // Positions [4, 8) are neither computed nor planned. D27 (v0.7): they may wait, so extend
+    // succeeds (v0.6 returned InvalidPhase); the ticket and its plan are unchanged.
+    co.extend(h, &[1]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.planned, iv.reach), (9, 0, 4, 11));
     let (t2, _) = co.begin_write(h, 4, Drafts::Known(vec![]), false).unwrap();
     // A full queue is Busy for extend too.
     assert_eq!(co.extend(h, &[1]).err(), Some(Error::Busy));
     co.finish_write(t1, done(t1)).unwrap();
-    co.extend(h, &[1, 2]).unwrap();
+    co.extend(h, &[2]).unwrap();
     let iv = co.inspect(h).unwrap();
     assert_eq!((iv.len, iv.computed, iv.reach), (10, 4, 12));
     let (t3, p3) = co.begin_write(h, 2, Drafts::Known(vec![]), false).unwrap();
     assert_eq!(p3.positions, vec![8, 9]);
+    assert_eq!(p3.input_ids, vec![1, 2]);
     co.finish_write(t2, done(t2)).unwrap();
     co.finish_write(t3, done(t3)).unwrap();
     assert_eq!(co.inspect(h).unwrap().computed, 10);
@@ -983,10 +994,13 @@ fn extend_deferred_phase_errors() {
     co.finish_write(t2, tok(t2, 9)).unwrap();
     let iv = co.inspect(h).unwrap();
     assert_eq!((iv.len, iv.computed, iv.deferred, iv.pending), (9, 8, false, None));
-    // The bound token at position 8 is known but not computed yet.
-    assert_eq!(co.extend(h, &[1]).err(), Some(Error::InvalidPhase));
-    compute_all(&mut co, h);
+    // The bound token at position 8 is known but not computed yet. D27 (v0.7): extend does not
+    // wait for it (v0.6 returned InvalidPhase); the next ticket covers both positions.
     co.extend(h, &[1]).unwrap();
+    let (t3, p3) = co.begin_write(h, 2, Drafts::Known(vec![]), false).unwrap();
+    assert_eq!((p3.positions.clone(), p3.input_ids.clone()), (vec![8, 9], vec![9, 1]));
+    co.finish_write(t3, done(t3)).unwrap();
+    assert_eq!(co.inspect(h).unwrap().computed, 10);
     co.release(h).unwrap();
 }
 
@@ -1997,4 +2011,139 @@ fn a_hit_makes_a_cached_prefix_most_recently_released() {
     let (h2, c2, _) = co.attach(&pb).unwrap();
     assert_eq!(c2, 4);
     co.release(h2).unwrap();
+}
+
+// ---- v0.7: the caller's hit limit, probe (D26) and extend before compute (D27) ----
+
+/// A 12-token prompt whose three blocks (`B = 4`) are published and cached: the lease that
+/// computed it is released. An attach of the same 12 tokens hits two of them, since it always
+/// recomputes the last block.
+fn cached_prompt(co: &mut Coordinator, seed: u32) -> Vec<u32> {
+    let t = toks(12, seed);
+    let (h, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, 0);
+    compute_all(co, h);
+    co.release(h).unwrap();
+    t
+}
+
+#[test]
+fn attach_capped_resumes_no_further_than_the_limit() {
+    // §7: the limit caps at floor(κ/B) blocks, the input at m - 1.
+    for (limit, want) in [(0, 0), (3, 0), (4, 4), (5, 4), (8, 8), (12, 8), (usize::MAX, 8)] {
+        let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+        let t = cached_prompt(&mut co, 70);
+        let (h, cached, v) = co.attach_capped(&t, limit).unwrap();
+        assert_eq!(cached, want, "limit {limit}");
+        assert_eq!(co.inspect(h).unwrap().computed, want);
+        assert_eq!(v.tables[0].len(), 3);
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn attach_is_attach_capped_at_the_input_length() {
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 71);
+    let (h, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, 8);
+    co.release(h).unwrap();
+    let (h, cached, _) = co.attach_capped(&t, t.len()).unwrap();
+    assert_eq!(cached, 8);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn a_cold_attach_takes_fresh_pages_only() {
+    // κ = 0: no hit, every page fresh and exclusive. Its class takes unkeyed free pages first and
+    // cached ones only when too few are left (D9): either way probe and attach agree afterwards.
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 72);
+    let (h, cached, v) = co.attach_capped(&t, 0).unwrap();
+    assert_eq!(cached, 0);
+    let (h2, cached2, v2) = co.attach_capped(&t, 0).unwrap();
+    assert_eq!(cached2, 0);
+    assert!(v.tables[0].iter().all(|p| !v2.tables[0].contains(p)), "cold leases share no page");
+    co.release(h).unwrap();
+    co.release(h2).unwrap();
+    let p = co.probe(&t, t.len()).unwrap();
+    let (h, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, p);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn probe_answers_what_the_next_attach_takes() {
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 73);
+    // A longer input with the same prefix hits all three blocks; another prefix hits none.
+    let mut longer = t.clone();
+    longer.extend(toks(9, 99));
+    assert_eq!(co.probe(&longer, longer.len()).unwrap(), 12);
+    assert_eq!(co.probe(&longer, 11).unwrap(), 8);
+    assert_eq!(co.probe(&toks(12, 74), 12).unwrap(), 0);
+    // Whatever each attach evicts (D9), the next probe answers what the attach after it takes.
+    for limit in [12, 8, 5, 0] {
+        let before = co.arena();
+        let p = co.probe(&t, limit).unwrap();
+        let after = co.arena();
+        assert_eq!((after.owner, after.free_units), (before.owner, before.free_units), "probe allocates nothing");
+        let (h, cached, _) = co.attach_capped(&t, limit).unwrap();
+        assert_eq!(cached, p, "limit {limit}");
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn probe_errors_match_attach() {
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    assert_eq!(co.probe(&[], 0).err(), Some(Error::InvalidArgument));
+    // 2 slabs of 4 pages: 33 tokens need 9 blocks.
+    assert_eq!(co.probe(&toks(33, 1), 33).err(), Some(Error::RequestTooLarge));
+    assert_eq!(co.attach(&toks(33, 1)).err(), Some(Error::RequestTooLarge));
+    assert_eq!(co.probe(&toks(32, 1), 32), Ok(0));
+}
+
+#[test]
+fn probe_with_a_state_class_is_zero() {
+    // D13: no state checkpoints, so nothing resumes.
+    let mut co = Coordinator::create(8, 64, &[16], &[], &[64], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 75);
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 0);
+}
+
+#[test]
+fn probe_reserves_nothing() {
+    // §7: a call between probe and attach may take a probed page as a fresh one.
+    let mut co = Coordinator::create(3, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 76);
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 8);
+    // Twelve pages in all; a cold 48-token lease takes every one of them.
+    let (h, _, _) = co.attach(&toks(48, 77)).unwrap();
+    co.release(h).unwrap();
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 0);
+    let (h, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, 0);
+    co.release(h).unwrap();
+}
+
+#[test]
+fn extend_ahead_of_execution_then_compute_in_chunks() {
+    // D27: a scheduler that learns tokens one row at a time grows the lease before each row runs.
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 2, 0, NS).unwrap();
+    let t = toks(20, 78);
+    let (h, _, v) = co.attach_capped(&t[..6], 0).unwrap();
+    assert_eq!(v.tables[0].len(), 2, "6 tokens and a reserve of 2");
+    co.extend(h, &t[6..13]).unwrap();
+    co.extend(h, &t[13..20]).unwrap();
+    let iv = co.inspect(h).unwrap();
+    assert_eq!((iv.len, iv.computed, iv.reach), (20, 0, 22));
+    for (n, want) in [(6, 6), (7, 13), (7, 20)] {
+        let (tk, plan) = co.begin_write(h, n, Drafts::Known(vec![]), false).unwrap();
+        assert_eq!(plan.input_ids, t[want - n..want].to_vec());
+        assert_eq!(co.finish_write(tk, done(tk)).unwrap(), want);
+    }
+    // The whole input is published: a repeat hits every block but the last.
+    co.release(h).unwrap();
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 16);
 }

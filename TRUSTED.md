@@ -3,8 +3,8 @@
 ## What is proved
 
 `scripts/verify.sh` runs Verus on `crates/pageproof-core` at a fixed `--rlimit 20` and fails on
-any error, timeout or rlimit exhaustion. Every public method of `Coordinator` (contract v0.6
-C0–C7 and C2b) and of `Manager` (v0.2.1 C0–C6, the paged-class building block) is proved on its
+any error, timeout or rlimit exhaustion. Every public method of `Coordinator` (contract v0.7
+C0–C8 and C2b) and of `Manager` (v0.2.1 C0–C6, the paged-class building block) is proved on its
 real body, with machine integers. See
 [SPEC_NOTES.md](SPEC_NOTES.md) for the exact statement of each result and any deviations.
 
