@@ -1361,7 +1361,8 @@ fn eos_at_step_n_while_step_n_plus_1_is_pending() {
 
 #[test]
 fn golden_token_behind_a_pending_step() {
-    // §7: extend(h, [g]) succeeds with X_h empty, p_h = L_h and room in the queue.
+    // §7: extend(h, [g]) succeeds with X_h empty and room in the queue (v0.5 and v0.6 also needed
+    // p_h = L_h, which holds here; D27).
     let mut co = Coordinator::create(8, 64, &[16], &[], &[], 4, 0, 1, NS).unwrap();
     let (h, _, _) = co.attach(&toks(5, 53)).unwrap();
     let (t1, _) = co.begin_write(h, 5, Drafts::Known(vec![]), false).unwrap();
@@ -2146,4 +2147,85 @@ fn extend_ahead_of_execution_then_compute_in_chunks() {
     // The whole input is published: a repeat hits every block but the last.
     co.release(h).unwrap();
     assert_eq!(co.probe(&t, t.len()).unwrap(), 16);
+}
+
+#[test]
+fn probe_counts_the_reservation_like_attach() {
+    // §7: an input that cannot fit with its reservation is RequestTooLarge for probe, as for
+    // attach. 2 slabs of 4 pages and λ = 2, so μ = 2: a lease holds at most 8 blocks.
+    let mut co = Coordinator::create(2, 64, &[16], &[], &[], 4, 2, 0, NS).unwrap();
+    // 31 tokens fit in 8 blocks alone, but not with 2 reserved positions: ceil(33/4) = 9.
+    assert_eq!(co.probe(&toks(31, 2), 31).err(), Some(Error::RequestTooLarge));
+    assert_eq!(co.attach(&toks(31, 2)).err(), Some(Error::RequestTooLarge));
+    assert_eq!(co.attach_capped(&toks(31, 2), 0).err(), Some(Error::RequestTooLarge));
+    // 30 tokens and 2 reserved positions fill the 8 blocks exactly.
+    assert_eq!(co.probe(&toks(30, 2), 30), Ok(0));
+    let (h, cached, v) = co.attach(&toks(30, 2)).unwrap();
+    assert_eq!((cached, v.tables[0].len()), (0, 8));
+    co.release(h).unwrap();
+}
+
+#[test]
+fn hit_limit_and_probe_cap_every_paged_class_alike() {
+    // D26 over two target classes of different unit sizes and a drafter class (λ = 1, so μ = 2):
+    // the limit caps the joint hit in every class at once, and probe answers what the attach
+    // takes. Every class keeps spare unkeyed units, so no attach here evicts a cached block.
+    let mut co = Coordinator::create(16, 256, &[16, 32], &[16], &[], 4, 1, 0, NS).unwrap();
+    let t = toks(12, 79);
+    let (h, cached, first) = co.attach(&t).unwrap();
+    assert_eq!(cached, 0);
+    compute_all(&mut co, h);
+    co.release(h).unwrap();
+    for (limit, want) in [(12, 8), (8, 8), (7, 4), (4, 4), (3, 0), (0, 0)] {
+        let p = co.probe(&t, limit).unwrap();
+        assert_eq!(p, want, "probe with limit {limit}");
+        let (h, cached, v) = co.attach_capped(&t, limit).unwrap();
+        assert_eq!(cached, p, "attach with limit {limit}");
+        assert_eq!(v.tables.len(), 3);
+        for (c, table) in v.tables.iter().enumerate() {
+            // 12 tokens and 2 reserved positions: 4 blocks in every class.
+            assert_eq!(table.len(), 4, "class {c}");
+            assert_eq!(&table[..cached / 4], &first.tables[c][..cached / 4], "class {c} hits its cached pages");
+        }
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn a_probe_answer_can_go_stale_upward() {
+    // §7 and C8: probe reserves nothing, so a finish_write between probe and attach can publish
+    // more of the prefix. An attach with a larger limit then hits more than probe returned; one
+    // with probe's answer as its limit hits no more than that.
+    let mut co = Coordinator::create(16, 64, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = toks(12, 80);
+    let (ha, _, _) = co.attach(&t).unwrap();
+    let (t1, _) = co.begin_write(ha, 4, Drafts::Known(vec![]), false).unwrap();
+    co.finish_write(t1, done(t1)).unwrap();
+    let p = co.probe(&t, t.len()).unwrap();
+    assert_eq!(p, 4, "block 0 is published, block 1 is not yet");
+    compute_all(&mut co, ha);
+    let (hb, cached, _) = co.attach(&t).unwrap();
+    assert_eq!(cached, 8, "blocks 1 and 2 were published after the probe");
+    let (hc, cached, _) = co.attach_capped(&t, p).unwrap();
+    assert_eq!(cached, p);
+    for h in [ha, hb, hc] {
+        co.release(h).unwrap();
+    }
+}
+
+#[test]
+fn a_cold_attach_spares_cached_blocks_while_unkeyed_pages_last() {
+    // §7: with κ = 0 no cached page is protected, but fresh pages are unkeyed ones first (D9).
+    // Slabs of 8 pages: after the cached prompt its class has 5 unkeyed free pages, more than a
+    // cold attach of the same 12 tokens takes, so every cached block keeps its key.
+    let mut co = Coordinator::create(16, 128, &[16], &[], &[], 4, 0, 0, NS).unwrap();
+    let t = cached_prompt(&mut co, 81);
+    let (h, cached, v) = co.attach_capped(&t, 0).unwrap();
+    assert_eq!(cached, 0);
+    assert_eq!(co.probe(&t, t.len()).unwrap(), 8, "the cached prefix still hits");
+    let (h2, cached2, v2) = co.attach(&t).unwrap();
+    assert_eq!(cached2, 8);
+    assert!(v2.tables[0][..2].iter().all(|p| !v.tables[0].contains(p)), "the cold lease took no cached page");
+    co.release(h).unwrap();
+    co.release(h2).unwrap();
 }
