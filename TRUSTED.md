@@ -62,9 +62,10 @@ new/get/insert/remove/contains_key (with the `u64` key model axiom), `slice_subr
 
 ## Not covered
 
-- `crates/pageproof-py` and `python/demo.py` are not verified. The shim only converts types. Its
-  one judgement call is that `finish_write(ticket, ...)` builds the completion from its arguments:
-  calling it is the executor's E1 and E13 assertion (in every class, for the coordinator).
+- `crates/pageproof-py`, `python/demo.py` and `python/chunked_prefill.py` are not verified. The
+  shim only converts types. Its one judgement call is that `finish_write(ticket, ...)` builds the
+  completion from its arguments: calling it is the executor's E1 and E13 assertion (in every
+  class, for the coordinator).
 - The OS, allocator, CPython, and the dynamic loader.
 - Allocation failure, panics in std, and process termination (contract §5 excludes these).
 - Byte-level memory. The proof bounds element counts (`Manager::lemma_bounded`). That `Vec` and

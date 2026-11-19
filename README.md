@@ -56,7 +56,7 @@ keeps the invariant, meets its functional spec, and changes nothing when it retu
 | `audit.sh` | Checks proof escape hatches: exactly one `external_body`, the SHA-256 call |
 | `lint.sh` | Clippy on the whole workspace, warnings as errors |
 | `build.sh` | Verify and audit, then build the core and `python/pageproof.so` |
-| `test.sh` | Rust edge-case tests and the Python demo |
+| `test.sh` | Rust edge-case tests, the Python demo and the chunked prefill example |
 
 Nothing is written to `~/.cargo`: `CARGO_HOME` lives under `.toolchain/`. Set `PP_PYTHON` to pick
 the Python interpreter (default `python3`). CI runs the lint gate on an arm64 macOS runner.
@@ -75,6 +75,18 @@ plan = co.begin_write(h, len(prompt_ids) - cached)
 # ... executor writes KV to plan.write_slots[c], reads/writes state in plan.state_slots,
 #     initialising them first when plan.init is set ...
 co.finish_write(plan.ticket)
+```
+
+Chunked prefill: `attach` allocates pages for the whole prompt, and each chunk is one ticket that
+advances the computed frontier. Every block a chunk completes is published, so a request with the
+same prefix attached mid-prefill reuses the blocks finished so far.
+
+```python
+h, done, _ = co.attach(prompt_ids)
+while done < len(prompt_ids):
+    plan = co.begin_write(h, min(chunk, len(prompt_ids) - done))  # positions [done, done + n)
+    # ... executor reads the KV of [0, done) through plan.page_tables and writes the chunk ...
+    done = co.finish_write(plan.ticket)              # the new computed frontier
 ```
 
 Speculative decoding with a drafter class and zero-overhead scheduling:
@@ -96,7 +108,9 @@ sd.finish_write(v.ticket, accepted=n1, token=bonus1)
 sd.finish_write(c.ticket, accepted=n2, drafts=accepted_drafts_of_c)
 ```
 
-See [python/demo.py](python/demo.py) for a runnable end-to-end demo.
+See [python/demo.py](python/demo.py) for a runnable end-to-end demo, and
+[python/chunked_prefill.py](python/chunked_prefill.py) for chunked prefill in a scheduler loop that
+mixes prefill chunks with decodes.
 
 A scheduler can choose where a lease resumes, and grow it before its earlier steps run:
 
