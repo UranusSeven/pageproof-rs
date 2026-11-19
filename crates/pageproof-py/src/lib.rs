@@ -1,4 +1,4 @@
-//! Python facade for the verified block manager and the v0.6 coordinator. UNVERIFIED, part of the
+//! Python facade for the verified block manager and the v0.7 coordinator. UNVERIFIED, part of the
 //! trusted I/O shim.
 //!
 //! This file only converts between Python objects and the verified API. It never touches
@@ -152,7 +152,7 @@ impl PyBlockManager {
     }
 }
 
-/// Immutable execution plan across classes (contract v0.6 C3, §3.4).
+/// Immutable execution plan across classes (contract v0.7 C3, §3.4).
 #[pyclass(frozen, get_all)]
 struct CoordPlan {
     ticket: PyTicket,
@@ -182,7 +182,7 @@ struct CoordPlan {
     init: bool,
 }
 
-/// v0.6 coordinator: one slab arena shared by paged, drafter and state classes, with speculative
+/// v0.7 coordinator: one slab arena shared by paged, drafter and state classes, with speculative
 /// decoding (λ drafts per ticket) and zero-overhead scheduling (δ tickets ahead).
 #[pyclass(name = "Coordinator", unsendable)]
 struct PyCoordinator {
@@ -199,7 +199,7 @@ fn lease_dict<'py>(py: Python<'py>, tables: Vec<Vec<usize>>, slots: Vec<usize>) 
 #[pymethods]
 impl PyCoordinator {
     /// C0. `paged_units`, `drafter_units` and `state_units` are unit sizes in bytes; each must divide
-    /// `slab_bytes`. `max_drafts` is λ and `zos_depth` is δ (contract v0.6 §3.1).
+    /// `slab_bytes`. `max_drafts` is λ and `zos_depth` is δ (contract v0.7 §3.1).
     #[new]
     #[pyo3(signature = (num_slabs, slab_bytes, paged_units, state_units, block_size, namespace, *, drafter_units = Vec::new(), max_drafts = 0, zos_depth = 0))]
     #[allow(clippy::too_many_arguments)]
